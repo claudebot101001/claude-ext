@@ -8,6 +8,7 @@ Two roles:
 import asyncio
 import logging
 import os
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from extensions.cron.store import CronJob, JobStore, compute_next_run
 
 log = logging.getLogger(__name__)
 
-SCHEDULER_INTERVAL = 30  # seconds between due-job checks
+SCHEDULER_INTERVAL = 15  # seconds between due-job checks
 
 
 class ExtensionImpl(Extension):
@@ -41,7 +42,7 @@ class ExtensionImpl(Extension):
         # Register MCP server so Claude sessions can call cron_create etc.
         mcp_script = str(Path(__file__).parent / "mcp_server.py")
         self.sm.register_mcp_server("cron", {
-            "command": "python",
+            "command": sys.executable,
             "args": [mcp_script],
             "env": {
                 "CRON_STORE_PATH": str(self.store.path),
