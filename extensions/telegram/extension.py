@@ -88,6 +88,7 @@ class ExtensionImpl(Extension):
                 await self.app.bot.send_message(chat_id=chat_id, text=chunk)
             except Exception:
                 log.exception("Failed to deliver message to chat %s", chat_id)
+                break  # subsequent chunks will almost certainly fail too
 
     # -- helpers ------------------------------------------------------------
 
@@ -143,6 +144,7 @@ class ExtensionImpl(Extension):
         # Auto-select: pick first non-dead session, or create new
         user_sessions = self.sm.get_sessions_for_user(user_id)
         alive = [s for s in user_sessions if s.status != SessionStatus.DEAD]
+        alive.sort(key=lambda s: (s.status != SessionStatus.IDLE, s.slot))
         if alive:
             session = alive[0]
         else:
@@ -199,13 +201,12 @@ class ExtensionImpl(Extension):
                     await update.message.reply_text(f"Directory not found: {candidate}")
                     return
 
-        # Auto-name based on slot if not given
+        # Auto-name: find first unused "session-N" name (independent of slot)
         if not name:
-            user_sessions = self.sm.get_sessions_for_user(user_id)
-            used_slots = {s.slot for s in user_sessions}
-            for i in range(1, self.sm.max_sessions_per_user + 1):
-                if i not in used_slots:
-                    name = f"session-{i}"
+            for i in range(1, self.sm.max_sessions_per_user + 2):
+                candidate = f"session-{i}"
+                if not self.sm.get_session_by_name(user_id, candidate):
+                    name = candidate
                     break
             if not name:
                 name = "session"
