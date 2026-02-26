@@ -78,14 +78,34 @@ class Session:
     id: str                    # UUID
     name: str                  # 用户可见名称
     slot: int                  # 固定槽位号（1-N），删除后可被复用
-    user_id: int               # 所属用户（Telegram user ID）
-    chat_id: int               # 投递结果的 Telegram chat ID
+    user_id: str               # 所属用户（通用字符串标识，如 str(telegram_user_id)）
     working_dir: str           # Claude Code 工作目录
+    context: dict              # 扩展自定义路由数据（如 Telegram 放 {"chat_id": ...}）
     status: SessionStatus      # idle / busy / dead / stopped
     claude_session_id: str     # Claude CLI session UUID（用于 --resume）
     tmux_session: str          # tmux session 名称 "cc-{uuid}"
     prompt_count: int          # 已发送 prompt 数
 ```
+
+#### DeliveryCallback 签名
+
+```python
+# (session_id, result_text, metadata)
+DeliveryCallback = Callable[[str, str, dict], Awaitable[None]]
+```
+
+扩展通过 `session_manager.sessions[session_id]` 获取 session 对象，从 `session.context` 读取路由信息（如 chat_id）。core 不传递任何扩展特有的路由参数。
+
+#### create_session 签名
+
+```python
+async def create_session(
+    self, name: str, user_id: str, working_dir: str,
+    context: dict | None = None,
+) -> Session
+```
+
+`context` 字段用于扩展自定义数据。例如 Telegram 扩展传入 `{"chat_id": chat_id}`，Slack 扩展可传入 `{"channel_id": ...}`。core 不解读 context 内容，仅原样持久化和恢复。
 
 #### 文件式 IPC
 
@@ -124,15 +144,12 @@ echo $CLAUDE_EXIT > "/path/exitcode"
 | 方法 | 职责 |
 |------|------|
 | `create_session()` | 分配槽位 + 创建 tmux session + 状态目录 + 启动 queue worker |
-| `send_prompt()` | 将 prompt 放入 per-session 队列，返回队列位置 |
 | `send_prompt()` | 将 prompt 放入 per-session 队列，返回队列位置。拒绝 DEAD session，自动重置 STOPPED |
 | `stop_session()` | 清空队列 → 标记 STOPPED → Ctrl-C → 后台 5s 写 exitcode（非阻塞）。对 IDLE session 仅清空队列。返回 `(bool, int)` |
-| `destroy_session()` | 杀 tmux + 取消 worker + 删除状态目录 + 清理 `active_sessions.json` |
+| `destroy_session()` | 杀 tmux + 取消 worker + 删除状态目录 |
 | `recover()` | 启动时扫描磁盘状态 + 检查 tmux 存活，恢复/重连（结果缓冲到 pending） |
 | `shutdown()` | 取消所有 worker，**不杀 tmux session**（核心设计点） |
 | `set_delivery_callback()` | 注册结果投递回调 + 刷新 recover 期间缓冲的待投递结果 |
-| `set_user_active_session()` | 持久化用户的活跃 session 选择到 `active_sessions.json` |
-| `get_user_active_session()` | 读取持久化的活跃 session（重启后恢复） |
 
 #### 槽位机制
 
@@ -166,11 +183,11 @@ echo $CLAUDE_EXIT > "/path/exitcode"
 
 #### 心跳
 
-长时间运行的任务（>60s）会每分钟通过 delivery callback 发送 "Still working..." 通知，避免用户端完全沉默。仅在 session 状态为 BUSY 时发送，STOPPED 后不再发出（避免 "Stopping..." 后又收到 "Still working..." 的矛盾信息）。
+长时间运行的任务（>60s）会每分钟通过 delivery callback 发送结构化心跳事件：`result_text=""`, `metadata={"is_heartbeat": True, "elapsed_s": <int>}`。扩展自行格式化为用户可读消息（如 Telegram 扩展格式化为 "Still working... (Nm elapsed)"）。仅在 session 状态为 BUSY 时发送，STOPPED 后不再发出。
 
-#### 活跃 session 持久化
+#### 活跃 session 持久化（扩展层职责）
 
-用户的活跃 session 选择通过 `active_sessions.json` 持久化到磁盘。主进程重启后，Telegram 扩展从此文件恢复用户的活跃 session，无需用户重新 `/switch`。`destroy_session()` 会自动清理此文件中的引用。
+活跃 session 选择是扩展层的 UX 概念，不属于 core。Telegram 扩展自行管理 `active_sessions.json` 的读写和清理。其他扩展可使用不同的持久化策略或不持久化。
 
 ### core/engine.py — ClaudeEngine
 
@@ -349,7 +366,7 @@ extensions:                       # 每个扩展的独立配置
 
 4. **新增功能 = 新增目录，不改已有代码。** 如果添加新扩展需要修改 `core/` 或其他扩展，说明抽象泄漏了。
 
-5. **core 层的公共服务要通用化。** `core/session.py` 不绑定 Telegram，通过 delivery callback 解耦。任何扩展都可以注册自己的回调。
+5. **core 层的公共服务要通用化。** `core/session.py` 不绑定任何特定扩展。Session 使用 `user_id: str`（通用标识）和 `context: dict`（扩展自定义数据）替代特定平台字段。DeliveryCallback 只传 `(session_id, text, metadata)`，扩展自行从 session 对象获取路由信息。心跳以结构化事件形式发出，扩展自行格式化。
 
 6. **配置即声明。** 扩展的行为由 `config.yaml` 控制，不硬编码。
 

@@ -1,5 +1,6 @@
 """Telegram bot extension - multi-session bridge to Claude Code via tmux."""
 
+import json
 import logging
 import os
 
@@ -44,23 +45,58 @@ class ExtensionImpl(Extension):
     def sm(self):
         return self.engine.session_manager
 
+    # -- active session persistence -----------------------------------------
+
+    def _active_map_path(self):
+        return self.sm.base_dir / "active_sessions.json"
+
+    def _load_active_map(self) -> dict:
+        p = self._active_map_path()
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save_active_map(self, data: dict) -> None:
+        p = self._active_map_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.rename(p)
+
+    def _get_user_active_session(self, user_id: str) -> str | None:
+        """Get the persisted active session for a user (if still valid)."""
+        data = self._load_active_map()
+        sid = data.get(user_id)
+        if sid and sid in self.sm.sessions:
+            return sid
+        return None
+
     # -- delivery callback (called by SessionManager) -----------------------
 
     async def _deliver_result(
         self,
         session_id: str,
-        user_id: int,
-        chat_id: int,
         result_text: str,
         metadata: dict,
     ) -> None:
-        # Heartbeat messages are already formatted with #slot prefix
-        if metadata.get("is_heartbeat"):
-            await self._send_chunked(chat_id, result_text)
+        session = self.sm.sessions.get(session_id)
+        if not session:
+            return
+        chat_id = session.context.get("chat_id")
+        if not chat_id:
             return
 
-        session = self.sm.sessions.get(session_id)
-        prefix = f"[#{session.slot} {session.name}] " if session else ""
+        if metadata.get("is_heartbeat"):
+            elapsed_s = metadata.get("elapsed_s", 0)
+            mins = elapsed_s // 60
+            text = f"[#{session.slot} {session.name}] Still working... ({mins}m elapsed)"
+            await self._send_chunked(chat_id, text)
+            return
+
+        prefix = f"[#{session.slot} {session.name}] "
 
         cost = metadata.get("total_cost_usd")
         turns = metadata.get("num_turns")
@@ -92,7 +128,7 @@ class ExtensionImpl(Extension):
 
     # -- helpers ------------------------------------------------------------
 
-    def _resolve_session(self, user_id: int, target: str):
+    def _resolve_session(self, user_id: str, target: str):
         """Resolve a target string (slot number or name) to a Session.
         Priority: slot number > exact name > name prefix."""
         # Slot number
@@ -114,16 +150,21 @@ class ExtensionImpl(Extension):
 
         return None
 
-    def _set_active(self, ctx: ContextTypes.DEFAULT_TYPE, user_id: int, session_id: str | None) -> None:
+    def _set_active(self, ctx: ContextTypes.DEFAULT_TYPE, user_id: str, session_id: str | None) -> None:
         """Update active session in both memory and persistent storage."""
         ctx.user_data["active_session_id"] = session_id
-        self.sm.set_user_active_session(user_id, session_id)
+        data = self._load_active_map()
+        if session_id:
+            data[user_id] = session_id
+        else:
+            data.pop(user_id, None)
+        self._save_active_map(data)
 
     async def _ensure_active_session(
         self, update: Update, ctx: ContextTypes.DEFAULT_TYPE,
     ) -> tuple["Session", bool]:
         """Return (session, was_auto_selected).  Creates one if needed."""
-        user_id = update.effective_user.id
+        user_id = str(update.effective_user.id)
         chat_id = update.effective_chat.id
         active_id = ctx.user_data.get("active_session_id")
 
@@ -133,7 +174,7 @@ class ExtensionImpl(Extension):
 
         # Try to restore from persisted state (survives restart)
         if not active_id:
-            persisted = self.sm.get_user_active_session(user_id)
+            persisted = self._get_user_active_session(user_id)
             if persisted:
                 ctx.user_data["active_session_id"] = persisted
                 active_id = persisted
@@ -158,8 +199,8 @@ class ExtensionImpl(Extension):
             session = await self.sm.create_session(
                 name=slot_name,
                 user_id=user_id,
-                chat_id=chat_id,
                 working_dir=self.working_dir,
+                context={"chat_id": chat_id},
             )
 
         self._set_active(ctx, user_id, session.id)
@@ -186,7 +227,7 @@ class ExtensionImpl(Extension):
     async def _cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        user_id = update.effective_user.id
+        user_id = str(update.effective_user.id)
         chat_id = update.effective_chat.id
 
         # Parse: /new [name] [working_dir]  or  /new <dir>
@@ -227,8 +268,8 @@ class ExtensionImpl(Extension):
             session = await self.sm.create_session(
                 name=name,
                 user_id=user_id,
-                chat_id=chat_id,
                 working_dir=work_dir,
+                context={"chat_id": chat_id},
             )
         except RuntimeError as e:
             await update.message.reply_text(str(e))
@@ -243,7 +284,7 @@ class ExtensionImpl(Extension):
     async def _cmd_sessions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        user_id = update.effective_user.id
+        user_id = str(update.effective_user.id)
         active_id = ctx.user_data.get("active_session_id")
 
         sessions = self.sm.get_sessions_for_user(user_id)
@@ -276,13 +317,14 @@ class ExtensionImpl(Extension):
             return
 
         target = args[1].strip()
-        found = self._resolve_session(update.effective_user.id, target)
+        user_id = str(update.effective_user.id)
+        found = self._resolve_session(user_id, target)
 
         if not found:
             await update.message.reply_text(f"Session '{target}' not found.")
             return
 
-        self._set_active(ctx, update.effective_user.id, found.id)
+        self._set_active(ctx, user_id, found.id)
         await update.message.reply_text(
             f"Switched to #{found.slot} '{found.name}' [{found.status.value}]."
         )
@@ -337,7 +379,7 @@ class ExtensionImpl(Extension):
     async def _cmd_delete(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        user_id = update.effective_user.id
+        user_id = str(update.effective_user.id)
 
         # Parse: /delete <target> [force]
         parts = update.message.text.split()
@@ -363,10 +405,21 @@ class ExtensionImpl(Extension):
 
         slot = found.slot
         name = found.name
-        await self.sm.destroy_session(found.id)
+        session_id = found.id
+        await self.sm.destroy_session(session_id)
 
-        if ctx.user_data.get("active_session_id") == found.id:
+        if ctx.user_data.get("active_session_id") == session_id:
             self._set_active(ctx, user_id, None)
+
+        # Clean up any other active_sessions references to this session
+        data = self._load_active_map()
+        dirty = False
+        for uid, sid in list(data.items()):
+            if sid == session_id:
+                data.pop(uid)
+                dirty = True
+        if dirty:
+            self._save_active_map(data)
 
         await update.message.reply_text(f"Deleted #{slot} '{name}'.")
 
@@ -389,8 +442,8 @@ class ExtensionImpl(Extension):
             )
             return
 
-        # Update chat_id in case it changed
-        session.chat_id = update.effective_chat.id
+        # Update chat_id in context in case it changed
+        session.context["chat_id"] = update.effective_chat.id
 
         try:
             position = await self.sm.send_prompt(session.id, text)

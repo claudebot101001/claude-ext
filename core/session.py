@@ -37,9 +37,9 @@ class Session:
     id: str
     name: str
     slot: int
-    user_id: int
-    chat_id: int
+    user_id: str
     working_dir: str
+    context: dict = field(default_factory=dict)
     status: SessionStatus = SessionStatus.IDLE
     claude_session_id: str = ""
     tmux_session: str = ""
@@ -60,8 +60,8 @@ class Session:
             self.last_active_at = now
 
 
-# Callback type: (session_id, user_id, chat_id, result_text, metadata)
-DeliveryCallback = Callable[[str, int, int, str, dict], Awaitable[None]]
+# Callback type: (session_id, result_text, metadata)
+DeliveryCallback = Callable[[str, str, dict], Awaitable[None]]
 
 
 # ---------------------------------------------------------------------------
@@ -103,7 +103,7 @@ class SessionManager:
 
     # -- slot management ----------------------------------------------------
 
-    def _next_slot(self, user_id: int) -> int:
+    def _next_slot(self, user_id: str) -> int:
         """Return the lowest unused slot number for the user."""
         used = {s.slot for s in self.sessions.values() if s.user_id == user_id}
         for i in range(1, self.max_sessions_per_user + 1):
@@ -113,48 +113,10 @@ class SessionManager:
             f"Session limit ({self.max_sessions_per_user}) reached"
         )
 
-    def get_session_by_slot(self, user_id: int, slot: int) -> Session | None:
+    def get_session_by_slot(self, user_id: str, slot: int) -> Session | None:
         for s in self.sessions.values():
             if s.user_id == user_id and s.slot == slot:
                 return s
-        return None
-
-    # -- active session persistence -----------------------------------------
-
-    def _active_map_path(self) -> Path:
-        return self.base_dir / "active_sessions.json"
-
-    def _load_active_map(self) -> dict:
-        p = self._active_map_path()
-        if p.exists():
-            try:
-                return json.loads(p.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                return {}
-        return {}
-
-    def _save_active_map(self, data: dict) -> None:
-        p = self._active_map_path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data), encoding="utf-8")
-        tmp.rename(p)
-
-    def set_user_active_session(self, user_id: int, session_id: str | None) -> None:
-        """Persist the user's active session choice across restarts."""
-        data = self._load_active_map()
-        if session_id:
-            data[str(user_id)] = session_id
-        else:
-            data.pop(str(user_id), None)
-        self._save_active_map(data)
-
-    def get_user_active_session(self, user_id: int) -> str | None:
-        """Get the persisted active session for a user (if still valid)."""
-        data = self._load_active_map()
-        sid = data.get(str(user_id))
-        if sid and sid in self.sessions:
-            return sid
         return None
 
     # -- public API ---------------------------------------------------------
@@ -162,9 +124,9 @@ class SessionManager:
     async def create_session(
         self,
         name: str,
-        user_id: int,
-        chat_id: int,
+        user_id: str,
         working_dir: str,
+        context: dict | None = None,
     ) -> Session:
         user_sessions = self.get_sessions_for_user(user_id)
         if len(user_sessions) >= self.max_sessions_per_user:
@@ -181,8 +143,8 @@ class SessionManager:
             name=name,
             slot=slot,
             user_id=user_id,
-            chat_id=chat_id,
             working_dir=working_dir,
+            context=context or {},
             claude_session_id=claude_sid,
         )
 
@@ -224,13 +186,13 @@ class SessionManager:
         await queue.put(prompt)
         return position
 
-    def get_sessions_for_user(self, user_id: int) -> list[Session]:
+    def get_sessions_for_user(self, user_id: str) -> list[Session]:
         return sorted(
             (s for s in self.sessions.values() if s.user_id == user_id),
             key=lambda s: s.slot,
         )
 
-    def get_session_by_name(self, user_id: int, name: str) -> Session | None:
+    def get_session_by_name(self, user_id: str, name: str) -> Session | None:
         for s in self.sessions.values():
             if s.user_id == user_id and s.name == name:
                 return s
@@ -297,16 +259,6 @@ class SessionManager:
         if sdir.exists():
             shutil.rmtree(sdir)
 
-        # Clean up active session references
-        data = self._load_active_map()
-        dirty = False
-        for uid, sid in list(data.items()):
-            if sid == session_id:
-                data.pop(uid)
-                dirty = True
-        if dirty:
-            self._save_active_map(data)
-
         log.info("Destroyed session #%d '%s' (%s)", session.slot, session.name, session_id[:8])
 
     async def shutdown(self) -> None:
@@ -346,8 +298,7 @@ class SessionManager:
                     self.sessions[session.id] = session
                     self._setup_queue(session.id)
                     self._pending_deliveries.append((
-                        session.id, session.user_id, session.chat_id,
-                        result_text, metadata,
+                        session.id, result_text, metadata,
                     ))
                     log.info("Recovered completed session %s", session.name)
 
@@ -468,10 +419,7 @@ class SessionManager:
 
         # Deliver result
         if self._delivery_cb:
-            await self._delivery_cb(
-                session_id, session.user_id, session.chat_id,
-                result_text, metadata,
-            )
+            await self._delivery_cb(session_id, result_text, metadata)
 
     def _generate_run_script(self, session: Session, sdir: Path, is_first: bool) -> str:
         prompt_file = shlex.quote(str(sdir / "prompt.txt"))
@@ -536,11 +484,9 @@ class SessionManager:
                 last_heartbeat = time.monotonic()
                 session = self.sessions.get(session_id)
                 if session and session.status == SessionStatus.BUSY and self._delivery_cb:
-                    mins = int(elapsed / 60)
                     await self._delivery_cb(
-                        session_id, session.user_id, session.chat_id,
-                        f"[#{session.slot} {session.name}] Still working... ({mins}m elapsed)",
-                        {"is_heartbeat": True},
+                        session_id, "",
+                        {"is_heartbeat": True, "elapsed_s": int(elapsed)},
                     )
 
             # Check tmux health
@@ -563,10 +509,7 @@ class SessionManager:
             session.claude_session_id = metadata["claude_session_id"]
         self._save_state(session)
         if self._delivery_cb:
-            await self._delivery_cb(
-                session_id, session.user_id, session.chat_id,
-                result_text, metadata,
-            )
+            await self._delivery_cb(session_id, result_text, metadata)
 
     # -- result parsing -----------------------------------------------------
 
@@ -606,7 +549,7 @@ class SessionManager:
             "name": session.name,
             "slot": session.slot,
             "user_id": session.user_id,
-            "chat_id": session.chat_id,
+            "context": session.context,
             "working_dir": session.working_dir,
             "status": session.status.value,
             "claude_session_id": session.claude_session_id,
@@ -629,13 +572,19 @@ class SessionManager:
             return None
         try:
             data = json.loads(state_file.read_text(encoding="utf-8"))
+            # Backward compat: old format has chat_id at top level, no context
+            context = data.get("context", {})
+            if not context and "chat_id" in data:
+                context = {"chat_id": data["chat_id"]}
+            # Backward compat: old format has user_id as int
+            user_id = str(data["user_id"])
             return Session(
                 id=data["id"],
                 name=data["name"],
                 slot=data.get("slot", 0),
-                user_id=data["user_id"],
-                chat_id=data["chat_id"],
+                user_id=user_id,
                 working_dir=data["working_dir"],
+                context=context,
                 status=SessionStatus(data.get("status", "idle")),
                 claude_session_id=data.get("claude_session_id", ""),
                 tmux_session=data.get("tmux_session", f"cc-{data['id']}"),
