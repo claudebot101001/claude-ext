@@ -119,6 +119,44 @@ class SessionManager:
                 return s
         return None
 
+    # -- active session persistence -----------------------------------------
+
+    def _active_map_path(self) -> Path:
+        return self.base_dir / "active_sessions.json"
+
+    def _load_active_map(self) -> dict:
+        p = self._active_map_path()
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save_active_map(self, data: dict) -> None:
+        p = self._active_map_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.rename(p)
+
+    def set_user_active_session(self, user_id: int, session_id: str | None) -> None:
+        """Persist the user's active session choice across restarts."""
+        data = self._load_active_map()
+        if session_id:
+            data[str(user_id)] = session_id
+        else:
+            data.pop(str(user_id), None)
+        self._save_active_map(data)
+
+    def get_user_active_session(self, user_id: int) -> str | None:
+        """Get the persisted active session for a user (if still valid)."""
+        data = self._load_active_map()
+        sid = data.get(str(user_id))
+        if sid and sid in self.sessions:
+            return sid
+        return None
+
     # -- public API ---------------------------------------------------------
 
     async def create_session(
@@ -164,8 +202,14 @@ class SessionManager:
 
     async def send_prompt(self, session_id: str, prompt: str) -> int:
         """Enqueue a prompt.  Returns queue position (0 = will run next).
-        Automatically resets STOPPED sessions so they can accept work again."""
+        Automatically resets STOPPED sessions.  Rejects DEAD sessions."""
         session = self.sessions[session_id]
+
+        if session.status == SessionStatus.DEAD:
+            raise RuntimeError(
+                f"Session #{session.slot} '{session.name}' is dead. "
+                f"Delete it and create a new one."
+            )
 
         # Reset stopped sessions on new input
         if session.status == SessionStatus.STOPPED:
@@ -192,37 +236,46 @@ class SessionManager:
                 return s
         return None
 
-    async def stop_session(self, session_id: str) -> bool:
-        """Gracefully stop a running prompt and drain the queue."""
+    async def stop_session(self, session_id: str) -> tuple[bool, int]:
+        """Stop running task + drain queue.  Non-blocking.
+        Returns (stopped_running_task, drained_queue_count)."""
         session = self.sessions.get(session_id)
         if not session:
-            return False
+            return False, 0
 
-        if session.status != SessionStatus.BUSY:
-            return False
-
-        # Drain queued prompts so they don't execute after stop
+        # Drain queue regardless of status
+        drained = 0
         queue = self._queues.get(session_id)
         if queue:
             while not queue.empty():
                 try:
                     queue.get_nowait()
                     queue.task_done()
+                    drained += 1
                 except asyncio.QueueEmpty:
                     break
 
-        # Ctrl-C first for graceful termination
-        await self._tmux_send_ctrl_c(session.tmux_session)
-        await asyncio.sleep(5)
+        if session.status != SessionStatus.BUSY:
+            return False, drained
 
-        sdir = self.session_dir(session_id)
-        if not (sdir / "exitcode").exists():
-            # Force-write a synthetic exitcode so the poller unblocks
-            (sdir / "exitcode").write_text("130")
-
+        # Set STOPPED *before* Ctrl-C to prevent _execute_prompt race
         session.status = SessionStatus.STOPPED
         self._save_state(session)
-        return True
+
+        # Send Ctrl-C (non-blocking)
+        await self._tmux_send_ctrl_c(session.tmux_session)
+
+        # Background: ensure exitcode exists after delay so poller unblocks
+        asyncio.create_task(self._ensure_stopped(session_id))
+
+        return True, drained
+
+    async def _ensure_stopped(self, session_id: str) -> None:
+        """Background task: write synthetic exitcode if claude didn't exit."""
+        await asyncio.sleep(5)
+        sdir = self.session_dir(session_id)
+        if sdir.exists() and not (sdir / "exitcode").exists():
+            (sdir / "exitcode").write_text("130")
 
     async def destroy_session(self, session_id: str) -> None:
         session = self.sessions.pop(session_id, None)
@@ -476,7 +529,7 @@ class SessionManager:
                     mins = int(elapsed / 60)
                     await self._delivery_cb(
                         session_id, session.user_id, session.chat_id,
-                        f"[{session.name}] Still working... ({mins}m elapsed)",
+                        f"[#{session.slot} {session.name}] Still working... ({mins}m elapsed)",
                         {"is_heartbeat": True},
                     )
 
@@ -590,6 +643,8 @@ class SessionManager:
     # -- tmux helpers -------------------------------------------------------
 
     async def _tmux_new_session(self, name: str, cwd: str) -> int:
+        # Clean up any residual session with the same name (#8)
+        await self._tmux_kill_session(name)
         proc = await asyncio.create_subprocess_exec(
             "tmux", "new-session", "-d", "-s", name, "-c", cwd,
             stdout=asyncio.subprocess.DEVNULL,

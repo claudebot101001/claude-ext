@@ -54,7 +54,7 @@ class ExtensionImpl(Extension):
         result_text: str,
         metadata: dict,
     ) -> None:
-        # Heartbeat messages are plain text, no decoration
+        # Heartbeat messages are already formatted with #slot prefix
         if metadata.get("is_heartbeat"):
             await self._send_chunked(chat_id, result_text)
             return
@@ -72,8 +72,18 @@ class ExtensionImpl(Extension):
         await self._send_chunked(chat_id, text)
 
     async def _send_chunked(self, chat_id: int, text: str) -> None:
-        for i in range(0, len(text), MAX_TG_MESSAGE):
-            chunk = text[i : i + MAX_TG_MESSAGE]
+        """Send text in chunks, splitting at newline boundaries when possible."""
+        while text:
+            if len(text) <= MAX_TG_MESSAGE:
+                chunk = text
+                text = ""
+            else:
+                # Try to split at a newline near the limit
+                cut = text.rfind("\n", 0, MAX_TG_MESSAGE)
+                if cut < MAX_TG_MESSAGE // 2:
+                    cut = MAX_TG_MESSAGE  # No good newline, hard cut
+                chunk = text[:cut]
+                text = text[cut:].lstrip("\n")
             try:
                 await self.app.bot.send_message(chat_id=chat_id, text=chunk)
             except Exception:
@@ -103,8 +113,15 @@ class ExtensionImpl(Extension):
 
         return None
 
-    async def _ensure_active_session(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-        """Return the active session, creating one if needed."""
+    def _set_active(self, ctx: ContextTypes.DEFAULT_TYPE, user_id: int, session_id: str | None) -> None:
+        """Update active session in both memory and persistent storage."""
+        ctx.user_data["active_session_id"] = session_id
+        self.sm.set_user_active_session(user_id, session_id)
+
+    async def _ensure_active_session(
+        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+    ) -> tuple["Session", bool]:
+        """Return (session, was_auto_selected).  Creates one if needed."""
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
         active_id = ctx.user_data.get("active_session_id")
@@ -112,24 +129,31 @@ class ExtensionImpl(Extension):
         # Check if the stored active session still exists
         if active_id and active_id not in self.sm.sessions:
             active_id = None
-            ctx.user_data["active_session_id"] = None
 
+        # Try to restore from persisted state (survives restart)
         if not active_id:
-            # Auto-pick an existing idle session or create a new one
-            user_sessions = self.sm.get_sessions_for_user(user_id)
-            if user_sessions:
-                session = user_sessions[0]
-            else:
-                session = await self.sm.create_session(
-                    name="default",
-                    user_id=user_id,
-                    chat_id=chat_id,
-                    working_dir=self.working_dir,
-                )
-            ctx.user_data["active_session_id"] = session.id
-            active_id = session.id
+            persisted = self.sm.get_user_active_session(user_id)
+            if persisted:
+                ctx.user_data["active_session_id"] = persisted
+                active_id = persisted
 
-        return self.sm.sessions[active_id]
+        if active_id:
+            return self.sm.sessions[active_id], False
+
+        # Auto-select: pick existing or create new
+        user_sessions = self.sm.get_sessions_for_user(user_id)
+        if user_sessions:
+            session = user_sessions[0]
+        else:
+            session = await self.sm.create_session(
+                name="default",
+                user_id=user_id,
+                chat_id=chat_id,
+                working_dir=self.working_dir,
+            )
+
+        self._set_active(ctx, user_id, session.id)
+        return session, True
 
     # -- command handlers ---------------------------------------------------
 
@@ -140,7 +164,7 @@ class ExtensionImpl(Extension):
         await update.message.reply_text(
             "Claude Code bridge ready.\n\n"
             "Commands:\n"
-            f"/new [name] - Create new session (max {max_s})\n"
+            f"/new [name] [dir] - Create new session (max {max_s})\n"
             "/sessions - List all sessions\n"
             "/switch <slot|name> - Switch session\n"
             "/status - Auth, usage & session info\n"
@@ -172,7 +196,6 @@ class ExtensionImpl(Extension):
 
         # Auto-name based on slot if not given
         if not name:
-            # Preview which slot will be used
             user_sessions = self.sm.get_sessions_for_user(user_id)
             used_slots = {s.slot for s in user_sessions}
             for i in range(1, self.sm.max_sessions_per_user + 1):
@@ -198,7 +221,7 @@ class ExtensionImpl(Extension):
             await update.message.reply_text(str(e))
             return
 
-        ctx.user_data["active_session_id"] = session.id
+        self._set_active(ctx, user_id, session.id)
         dir_note = f"\nDir: {work_dir}" if work_dir != self.working_dir else ""
         await update.message.reply_text(
             f"Created #{session.slot} '{session.name}'. Now active.{dir_note}"
@@ -219,10 +242,15 @@ class ExtensionImpl(Extension):
         for s in sessions:
             marker = " *" if s.id == active_id else ""
             status_tag = s.status.value.upper()
+            # Show working dir if it differs from the default
+            dir_info = ""
+            if s.working_dir != self.working_dir:
+                dir_name = os.path.basename(s.working_dir.rstrip("/"))
+                dir_info = f" ({dir_name})"
             prompt_info = ""
             if s.last_prompt:
                 prompt_info = f"\n      {s.last_prompt[:50]}"
-            lines.append(f"  #{s.slot}. {s.name} [{status_tag}]{marker}{prompt_info}")
+            lines.append(f"  #{s.slot}. {s.name} [{status_tag}]{marker}{dir_info}{prompt_info}")
 
         await update.message.reply_text("\n".join(lines))
 
@@ -241,7 +269,7 @@ class ExtensionImpl(Extension):
             await update.message.reply_text(f"Session '{target}' not found.")
             return
 
-        ctx.user_data["active_session_id"] = found.id
+        self._set_active(ctx, update.effective_user.id, found.id)
         await update.message.reply_text(
             f"Switched to #{found.slot} '{found.name}' [{found.status.value}]."
         )
@@ -269,31 +297,55 @@ class ExtensionImpl(Extension):
             return
 
         session = self.sm.sessions[active_id]
-        if session.status != SessionStatus.BUSY:
+
+        # Allow stop for BUSY (kills task + drains) and IDLE (drains queue only)
+        if session.status not in (SessionStatus.BUSY, SessionStatus.IDLE):
             await update.message.reply_text(
-                f"#{session.slot} '{session.name}' is not running."
+                f"#{session.slot} '{session.name}' is {session.status.value}."
             )
             return
 
-        await self.sm.stop_session(active_id)
-        await update.message.reply_text(
-            f"Stopping #{session.slot} '{session.name}' (queue cleared)..."
-        )
+        stopped, drained = await self.sm.stop_session(active_id)
+
+        if stopped:
+            msg = f"Stopping #{session.slot} '{session.name}'..."
+            if drained:
+                msg += f" ({drained} queued cleared)"
+            await update.message.reply_text(msg)
+        elif drained:
+            await update.message.reply_text(
+                f"Cleared {drained} queued message(s) from #{session.slot} '{session.name}'."
+            )
+        else:
+            await update.message.reply_text(
+                f"#{session.slot} '{session.name}' has nothing to stop."
+            )
 
     async def _cmd_delete(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
         user_id = update.effective_user.id
-        args = update.message.text.split(maxsplit=1)
 
-        if len(args) < 2:
-            await update.message.reply_text("Usage: /delete <slot number or name>")
+        # Parse: /delete <target> [force]
+        parts = update.message.text.split()
+        if len(parts) < 2:
+            await update.message.reply_text("Usage: /delete <slot|name> [force]")
             return
 
-        target = args[1].strip()
+        force = len(parts) >= 3 and parts[-1].lower() == "force"
+        target = parts[1].strip()
+
         found = self._resolve_session(user_id, target)
         if not found:
             await update.message.reply_text(f"Session '{target}' not found.")
+            return
+
+        # Guard: don't delete busy sessions without force
+        if found.status == SessionStatus.BUSY and not force:
+            await update.message.reply_text(
+                f"#{found.slot} '{found.name}' is busy. "
+                f"Use /stop first, or /delete {found.slot} force"
+            )
             return
 
         slot = found.slot
@@ -301,7 +353,7 @@ class ExtensionImpl(Extension):
         await self.sm.destroy_session(found.id)
 
         if ctx.user_data.get("active_session_id") == found.id:
-            ctx.user_data["active_session_id"] = None
+            self._set_active(ctx, user_id, None)
 
         await update.message.reply_text(f"Deleted #{slot} '{name}'.")
 
@@ -314,7 +366,7 @@ class ExtensionImpl(Extension):
         if not text:
             return
 
-        session = await self._ensure_active_session(update, ctx)
+        session, auto_selected = await self._ensure_active_session(update, ctx)
 
         # Dead sessions need manual intervention
         if session.status == SessionStatus.DEAD:
@@ -327,15 +379,20 @@ class ExtensionImpl(Extension):
         # Update chat_id in case it changed
         session.chat_id = update.effective_chat.id
 
-        position = await self.sm.send_prompt(session.id, text)
+        try:
+            position = await self.sm.send_prompt(session.id, text)
+        except RuntimeError as e:
+            await update.message.reply_text(str(e))
+            return
+
+        tag = f"[#{session.slot} {session.name}]"
+        auto_note = " (auto-activated)" if auto_selected else ""
 
         if position == 0:
-            await update.message.reply_text(
-                f"[#{session.slot} {session.name}] Processing..."
-            )
+            await update.message.reply_text(f"{tag}{auto_note} Processing...")
         else:
             await update.message.reply_text(
-                f"[#{session.slot} {session.name}] Queued (position {position}). "
+                f"{tag}{auto_note} Queued (position {position}). "
                 f"Use /new to start a parallel session."
             )
 
