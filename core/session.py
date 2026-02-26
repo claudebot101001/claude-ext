@@ -1,8 +1,13 @@
 """tmux-backed session manager for Claude Code.
 
 Each session runs in its own tmux session, fully decoupled from the main
-process.  Communication uses file-based IPC (prompt.txt -> run.sh -> output.json
--> exitcode) so that a main-process restart never kills a running claude job.
+process.  Communication uses file-based IPC (prompt.txt -> run.sh ->
+stream.jsonl -> exitcode) so that a main-process restart never kills a
+running claude job.
+
+Output uses ``--output-format stream-json --verbose``, wrapped in
+``script -qfec`` to force line-buffered writes via a PTY.  Events are
+read incrementally and delivered to callbacks in real time.
 """
 
 import asyncio
@@ -69,8 +74,8 @@ DeliveryCallback = Callable[[str, str, dict], Awaitable[None]]
 # ---------------------------------------------------------------------------
 
 class SessionManager:
-    POLL_INTERVAL = 1.0        # seconds between exitcode checks
-    HEARTBEAT_INTERVAL = 60.0  # seconds between "still working" notifications
+    STREAM_POLL_INTERVAL = 0.3  # seconds between stream.jsonl reads
+    HEARTBEAT_INTERVAL = 30.0   # seconds between "still working" notifications
 
     def __init__(
         self,
@@ -306,7 +311,8 @@ class SessionManager:
             if session.status == SessionStatus.BUSY:
                 if tmux_alive and exitcode_exists:
                     # Finished while we were down — buffer result for delivery
-                    result_text, metadata = self._parse_result(child)
+                    result_text, metadata = self._parse_stream_result(child)
+                    metadata["is_final"] = True
                     session.status = SessionStatus.IDLE
                     session.last_result_metadata = metadata
                     self._save_state(session)
@@ -355,6 +361,13 @@ class SessionManager:
                         session.error = "Failed to recreate tmux session"
                         self._save_state(session)
                         self.sessions[session.id] = session
+                        self._setup_queue(session.id)
+
+            elif session.status == SessionStatus.DEAD:
+                # Load dead sessions so users can see and /delete them
+                self.sessions[session.id] = session
+                self._setup_queue(session.id)
+                log.info("Recovered dead session #%d '%s'", session.slot, session.name)
 
     # -- internal: queue & execution ----------------------------------------
 
@@ -388,7 +401,8 @@ class SessionManager:
         sdir = self.session_dir(session_id)
 
         # Clean previous artifacts
-        for fname in ("output.json", "output.json.tmp", "stderr.log", "exitcode"):
+        for fname in ("stream.jsonl", "output.json", "output.json.tmp",
+                       "stderr.log", "exitcode", "claude_cmd.sh"):
             (sdir / fname).unlink(missing_ok=True)
 
         # Write prompt file
@@ -400,9 +414,10 @@ class SessionManager:
         session.status = SessionStatus.BUSY
         session.last_active_at = datetime.now(timezone.utc).isoformat()
 
-        # Generate and write run script
-        script = self._generate_run_script(session, sdir, is_first)
-        (sdir / "run.sh").write_text(script, encoding="utf-8")
+        # Generate and write run scripts (inner + outer)
+        claude_cmd, run_sh = self._generate_run_scripts(session, sdir, is_first)
+        (sdir / "claude_cmd.sh").write_text(claude_cmd, encoding="utf-8")
+        (sdir / "run.sh").write_text(run_sh, encoding="utf-8")
         self._save_state(session)
 
         # Execute in tmux
@@ -411,11 +426,12 @@ class SessionManager:
             f"bash {shlex.quote(str(sdir / 'run.sh'))}",
         )
 
-        # Poll for completion
-        result_text, metadata = await self._poll_completion(session_id, sdir)
+        # Stream completion (delivers events in real time)
+        result_text, metadata = await self._stream_completion(session_id, sdir)
 
-        # If session was stopped/destroyed while we were polling, don't overwrite
+        # If session was stopped/destroyed while we were streaming
         if session.status in (SessionStatus.STOPPED, SessionStatus.DEAD):
+            await self._deliver(session_id, "", {"is_stopped": True, "is_final": True})
             return
         if session_id not in self.sessions:
             return
@@ -432,8 +448,9 @@ class SessionManager:
         session.error = None
         self._save_state(session)
 
-        # Deliver result
-        await self._deliver(session_id, result_text, metadata)
+        # Final delivery (text already streamed; metadata-only)
+        metadata["is_final"] = True
+        await self._deliver(session_id, "", metadata)
 
     async def _deliver(self, session_id: str, text: str, metadata: dict) -> None:
         """Fan out delivery to all registered callbacks."""
@@ -457,15 +474,20 @@ class SessionManager:
             servers[name] = entry
         return {"mcpServers": servers}
 
-    def _generate_run_script(self, session: Session, sdir: Path, is_first: bool) -> str:
+    def _generate_run_scripts(self, session: Session, sdir: Path, is_first: bool) -> tuple[str, str]:
+        """Generate the inner claude_cmd.sh and outer run.sh (PTY wrapper).
+
+        Returns (claude_cmd_content, run_sh_content).
+        """
         prompt_file = shlex.quote(str(sdir / "prompt.txt"))
-        output_tmp = shlex.quote(str(sdir / "output.json.tmp"))
-        output_file = shlex.quote(str(sdir / "output.json"))
         stderr_file = shlex.quote(str(sdir / "stderr.log"))
+        stream_file = shlex.quote(str(sdir / "stream.jsonl"))
         exitcode_file = shlex.quote(str(sdir / "exitcode"))
+        claude_cmd_path = shlex.quote(str(sdir / "claude_cmd.sh"))
         work_dir = shlex.quote(session.working_dir)
 
-        cmd_parts = ["claude", "-p", '"$PROMPT"', "--output-format", "json"]
+        cmd_parts = ["claude", "-p", '"$PROMPT"',
+                      "--output-format", "stream-json", "--verbose"]
 
         model = self.engine_config.get("model")
         if model:
@@ -487,7 +509,6 @@ class SessionManager:
 
         # MCP config (per-session, includes session-specific env vars)
         mcp_config = self._generate_mcp_config(session, sdir)
-        mcp_line = ""
         if mcp_config:
             mcp_path = sdir / "mcp_config.json"
             mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
@@ -495,37 +516,190 @@ class SessionManager:
 
         cmd_str = " ".join(cmd_parts)
 
-        return (
+        claude_cmd = (
             "#!/bin/bash\n"
             "unset CLAUDECODE\n"
             f"PROMPT=$(cat {prompt_file})\n"
             f"cd {work_dir}\n"
-            f"{cmd_str} > {output_tmp} 2> {stderr_file}\n"
-            f"CLAUDE_EXIT=$?\n"
-            f"mv {output_tmp} {output_file} 2>/dev/null || true\n"
-            f"echo $CLAUDE_EXIT > {exitcode_file}\n"
+            f"{cmd_str} 2>{stderr_file}\n"
         )
 
-    async def _poll_completion(
+        run_sh = (
+            "#!/bin/bash\n"
+            f"script -qfec \"bash {claude_cmd_path}\" {stream_file}\n"
+            f"echo $? > {exitcode_file}\n"
+        )
+
+        return claude_cmd, run_sh
+
+    # -- stream event classification -----------------------------------------
+
+    @staticmethod
+    def _classify_stream_event(event: dict) -> tuple[str, dict] | None:
+        """Classify a stream-json event into a deliverable (text, metadata) or None.
+
+        Returns None for events that should be skipped (thinking, tool_result,
+        system, rate_limit_event, etc.).
+        """
+        etype = event.get("type")
+
+        # Final result event — extract metadata, don't deliver text
+        if etype == "result":
+            meta = {
+                "claude_session_id": event.get("session_id"),
+                "total_cost_usd": event.get("total_cost_usd"),
+                "duration_ms": event.get("duration_ms"),
+                "duration_api_ms": event.get("duration_api_ms"),
+                "num_turns": event.get("num_turns"),
+                "is_error": event.get("is_error", False),
+                "model": event.get("model"),
+                "_is_result": True,  # internal flag
+            }
+            return "", meta
+
+        # Assistant message — inspect content blocks
+        if etype == "assistant":
+            message = event.get("message", {})
+            content = message.get("content", [])
+            deliveries = []
+            for block in content:
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if text:
+                        deliveries.append((
+                            text,
+                            {"is_stream": True, "stream_type": "text"},
+                        ))
+                elif btype == "tool_use":
+                    deliveries.append((
+                        "",
+                        {
+                            "is_stream": True,
+                            "stream_type": "tool_use",
+                            "tool_name": block.get("name", ""),
+                            "tool_input": block.get("input", {}),
+                        },
+                    ))
+                # thinking, tool_result in assistant blocks — skip
+            if deliveries:
+                # Return only the first delivery; caller will get others
+                # by re-parsing.  In practice assistant events have one block.
+                return deliveries[0]
+            return None
+
+        # Everything else (user, system, rate_limit_event) — skip
+        return None
+
+    # -- streaming completion -----------------------------------------------
+
+    async def _stream_completion(
         self, session_id: str, sdir: Path, timeout: float = 600,
     ) -> tuple[str, dict]:
-        start = time.monotonic()
+        """Read stream.jsonl incrementally, deliver events in real time.
+
+        Returns ("", final_metadata) on success — text is already delivered
+        via streaming callbacks.
+        """
+        stream_path = sdir / "stream.jsonl"
         exitcode_path = sdir / "exitcode"
-        last_heartbeat = start
+        file_pos = 0
+        line_buffer = ""
+        final_metadata: dict = {}
+        start = time.monotonic()
+        last_delivery = start
 
         while True:
             elapsed = time.monotonic() - start
             if elapsed >= timeout:
                 return "[Error] Claude Code timed out.", {"is_error": True, "timed_out": True}
 
+            # Incremental read of stream.jsonl
+            if stream_path.exists():
+                try:
+                    with open(stream_path, "r", encoding="utf-8", errors="replace") as f:
+                        f.seek(file_pos)
+                        new_data = f.read()
+                        file_pos = f.tell()
+                except OSError:
+                    new_data = ""
+
+                if new_data:
+                    line_buffer += new_data
+                    lines = line_buffer.split("\n")
+                    # Last element is either "" (complete line) or partial
+                    line_buffer = lines[-1]
+
+                    for line in lines[:-1]:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                        except (json.JSONDecodeError, ValueError):
+                            continue  # script header or malformed line
+
+                        classified = self._classify_stream_event(event)
+                        if classified is None:
+                            continue
+
+                        text, meta = classified
+                        if meta.get("_is_result"):
+                            meta.pop("_is_result", None)
+                            final_metadata = meta
+                            continue
+
+                        # Deliver stream event
+                        session = self.sessions.get(session_id)
+                        if session and session.status == SessionStatus.BUSY:
+                            await self._deliver(session_id, text, meta)
+                            last_delivery = time.monotonic()
+
+            # Check for completion
             if exitcode_path.exists():
-                return self._parse_result(sdir)
+                # Final read to catch any remaining data
+                if stream_path.exists():
+                    try:
+                        with open(stream_path, "r", encoding="utf-8", errors="replace") as f:
+                            f.seek(file_pos)
+                            remaining = f.read()
+                    except OSError:
+                        remaining = ""
+                    if remaining:
+                        tail = (line_buffer + remaining).strip()
+                        for line in tail.split("\n"):
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
+                            classified = self._classify_stream_event(event)
+                            if classified is None:
+                                continue
+                            text, meta = classified
+                            if meta.get("_is_result"):
+                                meta.pop("_is_result", None)
+                                final_metadata = meta
+                                continue
+                            session = self.sessions.get(session_id)
+                            if session and session.status == SessionStatus.BUSY:
+                                await self._deliver(session_id, text, meta)
 
-            await asyncio.sleep(self.POLL_INTERVAL)
+                # If no result event was found, fall back to old parser
+                if not final_metadata:
+                    _, fallback = self._parse_result(sdir)
+                    final_metadata = fallback
 
-            # Periodic heartbeat notification (skip if stopped/dead)
-            if (time.monotonic() - last_heartbeat) >= self.HEARTBEAT_INTERVAL:
-                last_heartbeat = time.monotonic()
+                return "", final_metadata
+
+            await asyncio.sleep(self.STREAM_POLL_INTERVAL)
+
+            # Heartbeat (only if no recent delivery)
+            now_mono = time.monotonic()
+            if (now_mono - last_delivery) >= self.HEARTBEAT_INTERVAL:
+                last_delivery = now_mono
                 session = self.sessions.get(session_id)
                 if session and session.status == SessionStatus.BUSY and self._delivery_cbs:
                     await self._deliver(
@@ -533,7 +707,7 @@ class SessionManager:
                         {"is_heartbeat": True, "elapsed_s": int(elapsed)},
                     )
 
-            # Check tmux health
+            # tmux health check
             session = self.sessions.get(session_id)
             if session and not await self._tmux_has_session(session.tmux_session):
                 session.status = SessionStatus.DEAD
@@ -543,7 +717,7 @@ class SessionManager:
 
     async def _resume_monitor(self, session_id: str, sdir: Path) -> None:
         """Resume monitoring a session that was running before restart."""
-        result_text, metadata = await self._poll_completion(session_id, sdir)
+        result_text, metadata = await self._stream_completion(session_id, sdir)
         session = self.sessions.get(session_id)
         if not session or session.status in (SessionStatus.STOPPED, SessionStatus.DEAD):
             return
@@ -552,9 +726,49 @@ class SessionManager:
         if metadata.get("claude_session_id"):
             session.claude_session_id = metadata["claude_session_id"]
         self._save_state(session)
+        metadata["is_final"] = True
         await self._deliver(session_id, result_text, metadata)
 
     # -- result parsing -----------------------------------------------------
+
+    def _parse_stream_result(self, sdir: Path) -> tuple[str, dict]:
+        """Parse stream.jsonl to extract full text + final metadata.
+
+        Used during recovery when events were not streamed in real time.
+        """
+        stream_path = sdir / "stream.jsonl"
+        if not stream_path.exists() or stream_path.stat().st_size == 0:
+            # Fall back to legacy output.json
+            return self._parse_result(sdir)
+
+        text_parts: list[str] = []
+        final_meta: dict = {}
+
+        try:
+            for line in stream_path.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                classified = self._classify_stream_event(event)
+                if classified is None:
+                    continue
+                text, meta = classified
+                if meta.get("_is_result"):
+                    meta.pop("_is_result", None)
+                    final_meta = meta
+                elif meta.get("stream_type") == "text" and text:
+                    text_parts.append(text)
+        except OSError:
+            return self._parse_result(sdir)
+
+        full_text = "".join(text_parts)
+        if not final_meta and not full_text:
+            return self._parse_result(sdir)
+        return full_text, final_meta
 
     def _parse_result(self, sdir: Path) -> tuple[str, dict]:
         output_path = sdir / "output.json"

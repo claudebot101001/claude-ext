@@ -1,8 +1,10 @@
 """Telegram bot extension - multi-session bridge to Claude Code via tmux."""
 
+import asyncio
 import json
 import logging
 import os
+from dataclasses import dataclass, field
 
 from telegram import BotCommand, Update
 from telegram.ext import (
@@ -20,6 +22,17 @@ from core.status import format_status, get_auth_info, get_usage
 log = logging.getLogger(__name__)
 
 MAX_TG_MESSAGE = 4000  # Telegram limit is 4096; leave margin
+STREAM_FLUSH_DELAY = 2.0  # seconds to wait before flushing text buffer
+
+
+@dataclass
+class _StreamBuffer:
+    """Per-session buffer for debouncing stream text events."""
+    chat_id: int
+    slot: int
+    name: str
+    text_parts: list[str] = field(default_factory=list)
+    flush_task: asyncio.Task | None = None
 
 
 class ExtensionImpl(Extension):
@@ -31,6 +44,7 @@ class ExtensionImpl(Extension):
         self.allowed_users = set(config.get("allowed_users", []))
         self.working_dir = config.get("working_dir") or os.getcwd()
         self.app: Application | None = None
+        self._stream_buffers: dict[str, _StreamBuffer] = {}  # session_id -> buffer
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -89,6 +103,7 @@ class ExtensionImpl(Extension):
         if not chat_id:
             return
 
+        # --- Heartbeat ---
         if metadata.get("is_heartbeat"):
             elapsed_s = metadata.get("elapsed_s", 0)
             mins = elapsed_s // 60
@@ -96,16 +111,108 @@ class ExtensionImpl(Extension):
             await self._send_chunked(chat_id, text)
             return
 
-        prefix = f"[#{session.slot} {session.name}] "
+        # --- Stream: text event (debounced) ---
+        if metadata.get("is_stream") and metadata.get("stream_type") == "text":
+            buf = self._stream_buffers.get(session_id)
+            if not buf:
+                buf = _StreamBuffer(chat_id=chat_id, slot=session.slot, name=session.name)
+                self._stream_buffers[session_id] = buf
+            buf.text_parts.append(result_text)
+            # Reset flush timer
+            if buf.flush_task and not buf.flush_task.done():
+                buf.flush_task.cancel()
+            buf.flush_task = asyncio.create_task(
+                self._delayed_flush(session_id)
+            )
+            return
 
-        cost = metadata.get("total_cost_usd")
-        turns = metadata.get("num_turns")
-        footer = ""
-        if cost is not None and not metadata.get("is_error"):
-            footer = f"\n\n--- ${cost:.4f} | {turns} turns ---"
+        # --- Stream: tool_use event (immediate) ---
+        if metadata.get("is_stream") and metadata.get("stream_type") == "tool_use":
+            await self._flush_stream_buffer(session_id)
+            summary = self._format_tool_use(metadata)
+            prefix = f"[#{session.slot} {session.name}] "
+            await self._send_chunked(chat_id, f"{prefix}{summary}")
+            return
 
-        text = f"{prefix}{result_text}{footer}"
-        await self._send_chunked(chat_id, text)
+        # --- Stopped ---
+        if metadata.get("is_stopped"):
+            await self._flush_stream_buffer(session_id)
+            prefix = f"[#{session.slot} {session.name}] "
+            await self._send_chunked(chat_id, f"{prefix}Task stopped.")
+            return
+
+        # --- Final result (streaming mode: text already delivered) ---
+        if metadata.get("is_final"):
+            await self._flush_stream_buffer(session_id)
+            self._stream_buffers.pop(session_id, None)
+
+            cost = metadata.get("total_cost_usd")
+            turns = metadata.get("num_turns")
+            if metadata.get("is_error"):
+                prefix = f"[#{session.slot} {session.name}] "
+                err_text = result_text or "[Error]"
+                await self._send_chunked(chat_id, f"{prefix}{err_text}")
+            elif cost is not None:
+                prefix = f"[#{session.slot} {session.name}] "
+                await self._send_chunked(chat_id, f"{prefix}--- ${cost:.4f} | {turns} turns ---")
+            return
+
+        # --- Fallback (recovery with full text, backward compat) ---
+        if result_text:
+            prefix = f"[#{session.slot} {session.name}] "
+            cost = metadata.get("total_cost_usd")
+            turns = metadata.get("num_turns")
+            footer = ""
+            if cost is not None and not metadata.get("is_error"):
+                footer = f"\n\n--- ${cost:.4f} | {turns} turns ---"
+            await self._send_chunked(chat_id, f"{prefix}{result_text}{footer}")
+
+    # -- stream buffer helpers -----------------------------------------------
+
+    async def _delayed_flush(self, session_id: str) -> None:
+        """Wait then flush the text buffer for a session."""
+        await asyncio.sleep(STREAM_FLUSH_DELAY)
+        await self._flush_stream_buffer(session_id)
+
+    async def _flush_stream_buffer(self, session_id: str) -> None:
+        """Send accumulated text in the stream buffer, if any."""
+        buf = self._stream_buffers.get(session_id)
+        if not buf or not buf.text_parts:
+            return
+        # Cancel pending flush timer
+        if buf.flush_task and not buf.flush_task.done():
+            buf.flush_task.cancel()
+        text = "".join(buf.text_parts)
+        buf.text_parts.clear()
+        buf.flush_task = None
+        if text.strip():
+            prefix = f"[#{buf.slot} {buf.name}] "
+            await self._send_chunked(buf.chat_id, f"{prefix}{text}")
+
+    @staticmethod
+    def _format_tool_use(metadata: dict) -> str:
+        """Format a tool_use event into a concise summary."""
+        tool_name = metadata.get("tool_name", "Tool")
+        tool_input = metadata.get("tool_input", {})
+
+        # Try common field names for a detail snippet
+        detail = ""
+        for key in ("file_path", "command", "pattern", "description", "prompt", "query", "url"):
+            val = tool_input.get(key)
+            if val and isinstance(val, str):
+                detail = val
+                break
+
+        if not detail:
+            # For Glob, try "pattern" key
+            detail = tool_input.get("glob", "")
+
+        if detail:
+            # Truncate long details
+            if len(detail) > 60:
+                detail = detail[:57] + "..."
+            return f"\U0001f527 {tool_name}: {detail}"
+        return f"\U0001f527 {tool_name}"
 
     async def _send_chunked(self, chat_id: int, text: str) -> None:
         """Send text in chunks, splitting at newline boundaries when possible."""
@@ -406,6 +513,12 @@ class ExtensionImpl(Extension):
         slot = found.slot
         name = found.name
         session_id = found.id
+
+        # Clean up stream buffer
+        buf = self._stream_buffers.pop(session_id, None)
+        if buf and buf.flush_task and not buf.flush_task.done():
+            buf.flush_task.cancel()
+
         await self.sm.destroy_session(session_id)
 
         if ctx.user_data.get("active_session_id") == session_id:
@@ -494,6 +607,12 @@ class ExtensionImpl(Extension):
         log.info("Telegram bot started polling.")
 
     async def stop(self) -> None:
+        # Cancel all pending stream flush tasks
+        for buf in self._stream_buffers.values():
+            if buf.flush_task and not buf.flush_task.done():
+                buf.flush_task.cancel()
+        self._stream_buffers.clear()
+
         if self.app:
             await self.app.updater.stop()
             await self.app.stop()

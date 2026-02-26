@@ -53,7 +53,7 @@ claude-ext/
      │                                              │
      │  SessionManager（多会话，推荐）:              │
      │    tmux session → run.sh → claude -p         │
-     │    文件 IPC: prompt.txt → output.json        │
+     │    文件 IPC: prompt.txt → stream.jsonl       │
      │    状态持久化: state.json                     │
      │    与主进程解耦，支持崩溃恢复                  │
      │    delivery_callbacks: [cb_tg, cb_cron, ...]  │
@@ -123,29 +123,45 @@ async def create_session(
 |------|------|
 | `state.json` | 持久化的 session 元数据（原子写入） |
 | `prompt.txt` | 当前 prompt 内容 |
-| `run.sh` | 自动生成的执行脚本 |
-| `output.json` | claude 的 JSON 输出（先写 .tmp 再 mv，原子写入） |
+| `claude_cmd.sh` | 内层脚本：实际 claude 调用（含 `--output-format stream-json --verbose`） |
+| `run.sh` | 外层脚本：PTY 包装（`script -qfec` → 强制 line buffering） |
+| `stream.jsonl` | claude 的流式 JSON 输出（由 `script` 写入，逐行增长） |
 | `stderr.log` | 错误输出 |
 | `exitcode` | 完成标记（文件存在 = 命令结束），内容为 claude 退出码 |
 | `mcp_config.json` | 可选。MCP server 配置（含 session-specific 环境变量） |
 
-#### run.sh 模板
+#### run.sh 双文件模板
 
+**问题**：`claude -p ... > file.jsonl` 时，Node.js 对文件 stdout 采用 block buffering，导致文件长时间为 0 字节。
+**解决**：`script -qfec` 创建 PTY → Node.js 检测到 TTY → line buffering → 事件逐行写入。
+
+**claude_cmd.sh**（内层，实际 claude 调用）：
 ```bash
 #!/bin/bash
-unset CLAUDECODE                  # 防止嵌套 session 检测
-PROMPT=$(cat "/path/prompt.txt")  # 从文件读取，避免 shell 转义问题
+unset CLAUDECODE
+PROMPT=$(cat "/path/prompt.txt")
 cd "/working/dir"
-claude -p "$PROMPT" --output-format json \
-  --session-id "uuid"             # 首次用 --session-id
+claude -p "$PROMPT" --output-format stream-json --verbose \
+  --session-id "uuid" \           # 首次用 --session-id
   # 或 --resume "uuid"            # 后续用 --resume
   --permission-mode bypassPermissions \
-  --mcp-config "/path/mcp_config.json" \  # 可选，有注册 MCP server 时自动添加
-  > "/path/output.json.tmp" 2>"/path/stderr.log"
-CLAUDE_EXIT=$?
-mv "/path/output.json.tmp" "/path/output.json" 2>/dev/null || true
-echo $CLAUDE_EXIT > "/path/exitcode"
+  --mcp-config "/path/mcp_config.json" \  # 可选
+  2>"/path/stderr.log"
 ```
+
+**run.sh**（外层，PTY 包装）：
+```bash
+#!/bin/bash
+script -qfec "bash /path/claude_cmd.sh" /path/stream.jsonl
+echo $? > /path/exitcode
+```
+
+关键变化（相比旧的单文件 run.sh）：
+- `--output-format json` → `--output-format stream-json --verbose`
+- stdout 不再重定向到 `output.json`，由 `script` 写入 `stream.jsonl`
+- `script -f` 每次写入后 flush；`-e` 传递子进程 exit code
+- `stream.jsonl` 开头可能有一行 script header（非 JSON），解析时跳过
+- `exitcode` 仍是完成信号
 
 **关于 prompt 安全性**：`PROMPT=$(cat file)` 将文件内容赋值给变量时不会发生 shell 解释。`"$PROMPT"` 作为双引号包裹的变量传给 `claude -p` 时，内容中的 `$`、反引号等特殊字符不会被递归解释。这是 bash 变量展开的标准行为。
 
@@ -178,23 +194,49 @@ echo $CLAUDE_EXIT > "/path/exitcode"
                                    → (tmux 死亡) → DEAD
 ```
 
-**状态保护**：`_execute_prompt` 在 poll 返回后检查 `session.status`，如果已被 `stop_session` 设为 STOPPED 则不覆盖。
+**状态保护**：`_execute_prompt` 在流式循环返回后检查 `session.status`，如果已被 `stop_session` 设为 STOPPED 则投递 `is_stopped` 通知而非静默丢弃。
 
 #### 启动恢复矩阵
 
 | state.json status | tmux 存活? | exitcode 存在? | 动作 |
 |---|---|---|---|
-| busy | Yes | Yes | 读取结果，标记 idle，缓冲到 pending_deliveries |
-| busy | Yes | No | 仍在运行，恢复 poll 监控 |
+| busy | Yes | Yes | 用 `_parse_stream_result` 读取结果，标记 idle，缓冲到 pending_deliveries |
+| busy | Yes | No | 仍在运行，恢复流式监控 |
 | busy | No | — | 标记 dead |
 | idle/stopped | Yes | — | 直接重连 |
 | idle/stopped | No | — | 重建 tmux session |
+| dead | — | — | 加载到内存，用户可查看并 /delete 清理 |
 
 **关键时序**：`recover()` 在 `start_all()` 之前执行（此时 delivery callback 尚未设置），因此完成的结果缓冲到 `_pending_deliveries`。当扩展调用 `add_delivery_callback()` 时自动刷新缓冲区。
 
-#### 心跳
+#### 流式输出与心跳
 
-长时间运行的任务（>60s）会每分钟通过 delivery callback 发送结构化心跳事件：`result_text=""`, `metadata={"is_heartbeat": True, "elapsed_s": <int>}`。扩展自行格式化为用户可读消息（如 Telegram 扩展格式化为 "Still working... (Nm elapsed)"）。仅在 session 状态为 BUSY 时发送，STOPPED 后不再发出。
+SessionManager 使用 `--output-format stream-json --verbose`，通过 `_stream_completion` 增量读取 `stream.jsonl`，实时将事件投递给 delivery callback。
+
+**流式事件分类**（`_classify_stream_event`）：
+
+| 事件类型 | content block | 动作 | metadata |
+|----------|--------------|------|----------|
+| `assistant` | `text` | **投递** | `{"is_stream": True, "stream_type": "text"}` |
+| `assistant` | `tool_use` | **投递** | `{"is_stream": True, "stream_type": "tool_use", "tool_name": ..., "tool_input": ...}` |
+| `assistant` | `thinking` | 跳过 | — |
+| `user` | `tool_result` | 跳过 | — |
+| `system` | — | 跳过 | — |
+| `result` | — | 提取 metadata | `{"is_final": True, "claude_session_id": ..., "total_cost_usd": ..., ...}` |
+
+**Delivery metadata 约定**：
+
+| 字段 | 含义 |
+|------|------|
+| `is_stream: True` | 这是一个流式中间事件 |
+| `stream_type: "text"` | Claude 的文字回复 |
+| `stream_type: "tool_use"` | Claude 调用了工具 |
+| `is_heartbeat: True` | 心跳事件（仅在无近期投递时发送） |
+| `is_final: True` | 任务完成，包含 cost/turns 等汇总信息 |
+| `is_stopped: True` | 任务被 /stop 中断 |
+| `is_error: True` | 发生错误（超时、tmux 死亡等） |
+
+**心跳**：仅在最后一次投递后超过 30 秒无新事件时发送（`HEARTBEAT_INTERVAL = 30.0`）。流式事件本身就是活跃信号，因此正常执行时不会触发心跳。
 
 #### MCP Server 注册
 
@@ -358,7 +400,19 @@ Telegram Bot 桥接，基于 tmux 多会话管理。
 3. 活跃 session idle → 提交 prompt，回复 "Processing..."
 4. 后台 worker 执行完成 → 通过 delivery callback 异步投递结果到 chat
 
-**结果投递**：异步模式。用户发消息后立即收到确认，结果完成后推送。每条结果前加 `[#slot name]` 前缀标识来源。长消息按换行符边界分片（上限 4000 字符），发送失败时中断后续分片避免 log 刷屏。
+**流式投递**：Claude 的每一步操作实时推送到 Telegram。文字事件做 2 秒 debounce 聚合（避免消息洪水），工具调用事件立即发送。
+
+| 事件 | 显示 |
+|------|------|
+| 文字回复 | 聚合后发送完整文本块 |
+| 工具调用 | `🔧 Read: /path/to/file.py`、`🔧 Bash: git status...` 等摘要 |
+| 任务完成 | `--- $cost \| N turns ---` |
+| 任务停止 | `Task stopped.` |
+| 心跳 | `Still working... (Nm elapsed)` |
+
+每条消息前加 `[#slot name]` 前缀标识来源。长消息按换行符边界分片（上限 4000 字符），发送失败时中断后续分片避免 log 刷屏。
+
+**Debounce 机制**：每个 session 维护一个 `_StreamBuffer`。文字事件追加到 buffer 并重置 2 秒定时器。定时器到期、工具调用、或任务结束时 flush 发送。
 
 ### 现有扩展：cron
 
@@ -521,8 +575,9 @@ python main.py
 
 ## 已知限制
 
-- **Context window 百分比**：`claude -p --output-format json` 的响应中不包含 `context_window.used_percentage`，此字段仅在交互模式的 statusline 数据中可用。如需此信息，需改用 `--output-format stream-json` 解析流式事件。
+- **script PTY 副作用**：`script -qfec` 在 `stream.jsonl` 开头可能写入一行 header（如 `Script started on ...`），解析时需跳过非 JSON 行。极少数情况下 PTY 可能注入 ANSI 转义序列。
 - **Token 刷新**：`~/.claude/.credentials.json` 中的 `accessToken` 有过期时间，当前未处理自动刷新（Claude Code CLI 自身会处理刷新，但直接调用 usage API 时如果 token 过期会失败）。
 - **全局 session 上限**：当前只有 per-user 的 `max_sessions_per_user` 限制，没有全局上限。多用户场景下需注意服务器资源。
 - **MCP server 状态共享**：stdio 模式下每个 Claude session 启动独立 MCP server 进程。多进程通过 flock 共享同一个 `cron_jobs.json` 文件。高并发写入时可能有短暂锁竞争。
 - **Cron session 恢复**：`--resume` 依赖 Claude Code 自身的 session 存储（`~/.claude/`）。极旧的 session 可能已被 Claude Code 清理，此时 fallback resume 会退化为新对话。
+- **Backward compat**：旧 session 目录中可能存在 `output.json`（batch 模式遗留）。`_parse_stream_result` 优先读取 `stream.jsonl`，不存在时 fallback 到 `_parse_result`（读取 `output.json`）。

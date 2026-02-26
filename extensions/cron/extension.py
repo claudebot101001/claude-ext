@@ -262,8 +262,10 @@ class ExtensionImpl(Extension):
         if not job_id:
             return  # Not a cron-triggered session
 
-        # Skip heartbeats
-        if metadata.get("is_heartbeat"):
+        # Skip heartbeats and streaming events — cron only cares about final results
+        if metadata.get("is_heartbeat") or metadata.get("is_stream"):
+            return
+        if not metadata.get("is_final"):
             return
 
         # Update job's last_run in store
