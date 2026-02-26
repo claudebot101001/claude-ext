@@ -125,19 +125,22 @@ echo $CLAUDE_EXIT > "/path/exitcode"
 |------|------|
 | `create_session()` | 分配槽位 + 创建 tmux session + 状态目录 + 启动 queue worker |
 | `send_prompt()` | 将 prompt 放入 per-session 队列，返回队列位置 |
-| `stop_session()` | 清空队列 → 标记 STOPPED → Ctrl-C → 后台 5s 写 exitcode（非阻塞） |
-| `destroy_session()` | 杀 tmux + 取消 worker + 删除状态目录 |
+| `send_prompt()` | 将 prompt 放入 per-session 队列，返回队列位置。拒绝 DEAD session，自动重置 STOPPED |
+| `stop_session()` | 清空队列 → 标记 STOPPED → Ctrl-C → 后台 5s 写 exitcode（非阻塞）。对 IDLE session 仅清空队列。返回 `(bool, int)` |
+| `destroy_session()` | 杀 tmux + 取消 worker + 删除状态目录 + 清理 `active_sessions.json` |
 | `recover()` | 启动时扫描磁盘状态 + 检查 tmux 存活，恢复/重连（结果缓冲到 pending） |
 | `shutdown()` | 取消所有 worker，**不杀 tmux session**（核心设计点） |
 | `set_delivery_callback()` | 注册结果投递回调 + 刷新 recover 期间缓冲的待投递结果 |
+| `set_user_active_session()` | 持久化用户的活跃 session 选择到 `active_sessions.json` |
+| `get_user_active_session()` | 读取持久化的活跃 session（重启后恢复） |
 
 #### 槽位机制
 
-每个用户最多 N 个并发 session（默认 5，可配置）。每个 session 创建时分配最小可用槽位号。槽位号在 session 生命周期内固定不变，删除后释放供新 session 复用。用户通过槽位号而非列表序号引用 session，避免删除后编号混乱。
+每个用户最多 N 个并发 session（默认 5，可配置）。每个 session 创建时分配最小可用槽位号。槽位号在 session 生命周期内固定不变，删除后释放供新 session 复用。用户通过槽位号而非列表序号引用 session，避免删除后编号混乱。自动命名规则为 `session-{slot}`，确保槽位号与名称数字一致（如 `#1 session-1`、`#2 session-2`）。
 
 #### 队列机制
 
-每个 session 有独立的 asyncio.Queue 和 worker task。多条消息发给同一个 session 时自动排队，依次执行。`/stop` 会同时清空队列。
+每个 session 有独立的 asyncio.Queue 和 worker task。多条消息发给同一个 session 时自动排队，依次执行。`/stop` 会同时清空队列。worker 在取出 prompt 后会检查 session 状态，跳过 STOPPED 和 DEAD 的 session。
 
 #### 状态机
 
@@ -163,7 +166,11 @@ echo $CLAUDE_EXIT > "/path/exitcode"
 
 #### 心跳
 
-长时间运行的任务（>60s）会每分钟通过 delivery callback 发送 "Still working..." 通知，避免用户端完全沉默。
+长时间运行的任务（>60s）会每分钟通过 delivery callback 发送 "Still working..." 通知，避免用户端完全沉默。仅在 session 状态为 BUSY 时发送，STOPPED 后不再发出（避免 "Stopping..." 后又收到 "Still working..." 的矛盾信息）。
+
+#### 活跃 session 持久化
+
+用户的活跃 session 选择通过 `active_sessions.json` 持久化到磁盘。主进程重启后，Telegram 扩展从此文件恢复用户的活跃 session，无需用户重新 `/switch`。`destroy_session()` 会自动清理此文件中的引用。
 
 ### core/engine.py — ClaudeEngine
 
@@ -285,20 +292,20 @@ Telegram Bot 桥接，基于 tmux 多会话管理。
 | 命令 | 功能 |
 |------|------|
 | `/start` | 欢迎信息 |
-| `/new [name] [dir]` | 创建新 session（可选名称和工作目录） |
+| `/new [name] [dir]` | 创建新 session（可选名称和工作目录）。单参数为目录时自动识别 |
 | `/sessions` | 列出所有 session，`*` 标记当前活跃 |
 | `/switch <slot\|name>` | 切换活跃 session（按槽位号或名称） |
 | `/status` | Auth + Usage + 当前 session 信息 |
 | `/stop` | 停止当前 session 的运行任务 + 清空队列 |
-| `/delete <slot\|name>` | 删除 session（杀 tmux + 清文件） |
+| `/delete <slot\|name> [force]` | 删除 session（杀 tmux + 清文件）。BUSY session 需 `force` |
 
 **消息处理流程：**
-1. 用户发消息 → 检查是否有活跃 session，没有则自动创建 "default"（槽位 #1）
+1. 用户发消息 → 检查是否有活跃 session，没有则自动创建 `session-1`（槽位 #1）。自动选择时优先 IDLE > STOPPED > BUSY，跳过 DEAD
 2. 活跃 session busy → 消息入队列，回复 "Queued (position N)"
 3. 活跃 session idle → 提交 prompt，回复 "Processing..."
 4. 后台 worker 执行完成 → 通过 delivery callback 异步投递结果到 chat
 
-**结果投递**：异步模式。用户发消息后立即收到确认，结果完成后推送。每条结果前加 `[#slot name]` 前缀标识来源。
+**结果投递**：异步模式。用户发消息后立即收到确认，结果完成后推送。每条结果前加 `[#slot name]` 前缀标识来源。长消息按换行符边界分片（上限 4000 字符），发送失败时中断后续分片避免 log 刷屏。
 
 ---
 
