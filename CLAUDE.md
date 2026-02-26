@@ -13,9 +13,14 @@ claude-ext/
 │   ├── session.py                 # tmux-backed 多会话管理（核心模块）
 │   └── status.py                  # 状态查询（auth + usage API）
 ├── extensions/                    # 扩展层（每个子目录完全独立）
-│   └── telegram/
-│       ├── extension.py           # Telegram Bot 桥接（多会话）
-│       └── requirements.txt       # 该扩展的独立依赖
+│   ├── telegram/
+│   │   ├── extension.py           # Telegram Bot 桥接（多会话）
+│   │   └── requirements.txt       # 该扩展的独立依赖
+│   └── cron/
+│       ├── extension.py           # 定时任务调度器 + MCP 工具注册
+│       ├── mcp_server.py          # MCP stdio server（Claude 可调用的 cron 工具）
+│       ├── store.py               # Job 持久化（JSON + flock）
+│       └── requirements.txt       # croniter
 ├── config.yaml                    # 全局配置（引擎参数 + 扩展开关 + 扩展配置）（.gitignore）
 ├── config.yaml.example            # 配置模板（已跟踪）
 ├── main.py                        # 入口（加载配置 → 创建引擎 → 初始化会话 → 注册扩展 → 运行）
@@ -38,9 +43,10 @@ claude-ext/
               ▼                ▼                 ▼
      ┌──────────────┐ ┌──────────────┐ ┌──────────────┐
      │  Extension A  │ │  Extension B  │ │  Extension C  │
-     │  (telegram)   │ │  (未来扩展)   │ │  (未来扩展)   │
+     │  (telegram)   │ │  (cron)       │ │  (未来扩展)   │
+     │  用户桥接     │ │  调度+MCP工具  │ │               │
      └──────┬───────┘ └──────┬───────┘ └──────┬───────┘
-            │                │                 │
+            │ cb_tg          │ cb_cron         │
             ▼                ▼                 ▼
      ┌─────────────────────────────────────────────┐
      │       ClaudeEngine + SessionManager          │
@@ -50,6 +56,8 @@ claude-ext/
      │    文件 IPC: prompt.txt → output.json        │
      │    状态持久化: state.json                     │
      │    与主进程解耦，支持崩溃恢复                  │
+     │    delivery_callbacks: [cb_tg, cb_cron, ...]  │
+     │    mcp_servers: {"cron": {...}}  → run.sh     │
      │                                              │
      │  engine.ask()（轻量单次调用，向后兼容）:       │
      │    直接 subprocess → claude -p                │
@@ -57,7 +65,7 @@ claude-ext/
                          │
                          ▼
                    tmux sessions
-                   └── claude -p <prompt> --output-format json
+                   └── claude -p ... --mcp-config mcp_config.json
 ```
 
 **数据流方向是单向的：扩展 → engine/session_manager → tmux → CLI。扩展之间互不通信。**
@@ -119,6 +127,7 @@ async def create_session(
 | `output.json` | claude 的 JSON 输出（先写 .tmp 再 mv，原子写入） |
 | `stderr.log` | 错误输出 |
 | `exitcode` | 完成标记（文件存在 = 命令结束），内容为 claude 退出码 |
+| `mcp_config.json` | 可选。MCP server 配置（含 session-specific 环境变量） |
 
 #### run.sh 模板
 
@@ -131,6 +140,7 @@ claude -p "$PROMPT" --output-format json \
   --session-id "uuid"             # 首次用 --session-id
   # 或 --resume "uuid"            # 后续用 --resume
   --permission-mode bypassPermissions \
+  --mcp-config "/path/mcp_config.json" \  # 可选，有注册 MCP server 时自动添加
   > "/path/output.json.tmp" 2>"/path/stderr.log"
 CLAUDE_EXIT=$?
 mv "/path/output.json.tmp" "/path/output.json" 2>/dev/null || true
@@ -149,7 +159,8 @@ echo $CLAUDE_EXIT > "/path/exitcode"
 | `destroy_session()` | 杀 tmux + 取消 worker + 删除状态目录 |
 | `recover()` | 启动时扫描磁盘状态 + 检查 tmux 存活，恢复/重连（结果缓冲到 pending） |
 | `shutdown()` | 取消所有 worker，**不杀 tmux session**（核心设计点） |
-| `set_delivery_callback()` | 注册结果投递回调 + 刷新 recover 期间缓冲的待投递结果 |
+| `add_delivery_callback()` | 注册结果投递回调（支持多个）。首次注册时刷新 recover 期间缓冲的待投递结果 |
+| `register_mcp_server()` | 注册 MCP server 配置。所有后续 session 的 run.sh 自动添加 `--mcp-config` |
 
 #### 槽位机制
 
@@ -179,11 +190,36 @@ echo $CLAUDE_EXIT > "/path/exitcode"
 | idle/stopped | Yes | — | 直接重连 |
 | idle/stopped | No | — | 重建 tmux session |
 
-**关键时序**：`recover()` 在 `start_all()` 之前执行（此时 delivery callback 尚未设置），因此完成的结果缓冲到 `_pending_deliveries`。当扩展调用 `set_delivery_callback()` 时自动刷新缓冲区。
+**关键时序**：`recover()` 在 `start_all()` 之前执行（此时 delivery callback 尚未设置），因此完成的结果缓冲到 `_pending_deliveries`。当扩展调用 `add_delivery_callback()` 时自动刷新缓冲区。
 
 #### 心跳
 
 长时间运行的任务（>60s）会每分钟通过 delivery callback 发送结构化心跳事件：`result_text=""`, `metadata={"is_heartbeat": True, "elapsed_s": <int>}`。扩展自行格式化为用户可读消息（如 Telegram 扩展格式化为 "Still working... (Nm elapsed)"）。仅在 session 状态为 BUSY 时发送，STOPPED 后不再发出。
+
+#### MCP Server 注册
+
+扩展可通过 `register_mcp_server()` 给 Claude session 提供自定义工具：
+
+```python
+# 扩展的 start() 中注册
+self.engine.session_manager.register_mcp_server("cron", {
+    "command": "python",
+    "args": ["/path/to/mcp_server.py"],
+    "env": {"CRON_STORE_PATH": "/path/to/store.json"},
+})
+```
+
+SessionManager 自动为每个 session 生成 `mcp_config.json`，注入 session-specific 环境变量（`CLAUDE_EXT_SESSION_ID`、`CLAUDE_EXT_STATE_DIR`），并在 run.sh 中添加 `--mcp-config` 标志。MCP server 进程通过这些环境变量获取当前 session 的上下文。
+
+#### 多 Delivery Callback
+
+`add_delivery_callback()` 支持注册多个回调。每次结果投递时所有回调都被触发，各自根据 `session.context` 判断是否需要处理：
+
+```python
+# Telegram callback: 检查 context["chat_id"]
+# Cron callback: 检查 context["cron_job_id"]
+# 两者对同一事件独立触发，互不干扰
+```
 
 #### 活跃 session 持久化（扩展层职责）
 
@@ -277,7 +313,7 @@ class ExtensionImpl(Extension):
 
     async def start(self) -> None:
         # 注册 delivery callback（如需多会话）
-        self.engine.session_manager.set_delivery_callback(self._deliver)
+        self.engine.session_manager.add_delivery_callback(self._deliver)
         # 启动逻辑
         ...
 
@@ -324,6 +360,90 @@ Telegram Bot 桥接，基于 tmux 多会话管理。
 
 **结果投递**：异步模式。用户发消息后立即收到确认，结果完成后推送。每条结果前加 `[#slot name]` 前缀标识来源。长消息按换行符边界分片（上限 4000 字符），发送失败时中断后续分片避免 log 刷屏。
 
+### 现有扩展：cron
+
+定时任务调度器。同时扮演两个角色：
+1. **Scheduler**：按 cron 表达式或一次性延迟触发 Claude 会话执行任务。
+2. **MCP 工具提供者**：注册 MCP server 让 Claude 在对话中动态创建/管理定时任务。
+
+#### 两种 Job 来源
+
+| 来源 | 创建方式 | 典型场景 |
+|------|----------|----------|
+| 静态（config.yaml） | 管理员在配置中预定义 | 每日代码审查、每周依赖检查 |
+| 动态（Claude 调用 MCP 工具） | Claude 在对话中调用 `cron_create` | "20分钟后检查上传状态"、"每天8点总结邮箱" |
+
+#### MCP 工具
+
+Claude 在 session 中自动获得以下工具（通过 `--mcp-config` 注入）：
+
+| 工具 | 功能 |
+|------|------|
+| `cron_create` | 创建定时任务。`cron_expr` 用于周期性，`run_at` 用于一次性延迟（如 `+20m`） |
+| `cron_list` | 列出当前用户的所有 job |
+| `cron_delete` | 删除 job（支持 ID 前缀匹配） |
+| `cron_status` | 查询 job 详情 |
+
+MCP server 通过环境变量 `CLAUDE_EXT_SESSION_ID` 和 `CLAUDE_EXT_STATE_DIR` 获取当前 session 上下文，自动继承 `user_id`、`context`（含 `chat_id`）和 `working_dir`。
+
+#### Session 策略
+
+| 策略 | 说明 | 典型场景 |
+|------|------|----------|
+| `new` | 每次触发创建独立 session，完成后自动清理 | 无上下文依赖的独立任务 |
+| `reuse` | 沿用创建 job 时的 session，保留完整对话上下文 | "20分钟后检查数据是否上传完成" |
+
+#### Reuse 策略的健壮性
+
+当 reuse 目标 session 被用户 DELETE 时：
+1. 调度器检测到 session 不存在
+2. **Fallback**：创建新 session，设置 `claude_session_id` 为原 session 的 Claude CLI UUID + `prompt_count=1`
+3. run.sh 自动使用 `--resume` 而非 `--session-id`，从 Claude Code 自身的存储中恢复对话上下文
+4. 通知用户："原 session 已删除，在新 session 中恢复了 Claude 上下文"
+
+关键原因：`destroy_session()` 只删除 `~/.claude-ext/sessions/{uuid}/` 和杀 tmux，不碰 Claude Code 的 `~/.claude/` 目录。`--resume` 从 Claude Code 自身存储中恢复。
+
+当 reuse 目标 session 被 STOP 时：无需特殊处理，`send_prompt()` 会自动将 STOPPED 重置为 IDLE。
+
+#### 槽位与自动回收
+
+`new` 策略的 session 占用槽位。如果用户槽位已满：
+1. 调度器尝试回收已完成的 cron session（标记了 `cron_auto_cleanup`）
+2. 若无可回收槽位，job 延迟到下一个检查周期，并通知用户
+
+#### 结果投递
+
+Cron 任务的结果通过 `session.context` 路由：
+- `context["chat_id"]` → Telegram callback 投递到用户
+- `context["cron_job_id"]` → Cron callback 更新 job 状态
+
+两个 callback 对同一个 delivery 事件独立触发，互不干扰。
+
+#### Job 数据模型
+
+```python
+@dataclass
+class CronJob:
+    id: str                          # UUID
+    name: str                        # 人类可读名称
+    prompt: str                      # 触发时发送的 prompt
+    working_dir: str                 # 工作目录
+    user_id: str                     # 所属用户
+
+    cron_expr: str | None            # "0 8 * * *" — 周期性
+    run_at: str | None               # ISO timestamp — 一次性
+
+    session_strategy: str            # "new" | "reuse"
+    session_id: str | None           # reuse 目标（我们的 session ID）
+    claude_session_id: str | None    # Claude CLI session UUID（用于 --resume fallback）
+
+    notify_context: dict             # 通知路由（如 {"chat_id": 12345}）
+    enabled: bool
+    created_by: str                  # 来源 session_id 或 "config"
+    last_run: str | None
+    next_run: str | None
+```
+
 ---
 
 ## 配置文件 config.yaml
@@ -342,12 +462,21 @@ sessions:
 
 enabled:                          # 启用的扩展名（对应 extensions/ 下的目录名）
   - telegram
+  # - cron                        # 定时任务调度器
 
 extensions:                       # 每个扩展的独立配置
   telegram:
     token: "BOT_TOKEN"
     allowed_users: [123456789]    # Telegram user ID 白名单
     working_dir: null             # 默认工作目录，null = 当前目录；可通过 /new 覆盖
+  cron:
+    jobs:                         # 静态 job 列表（可选，Claude 也可动态创建）
+      - name: daily-review
+        cron_expr: "0 9 * * *"
+        prompt: "Review yesterday's commits"
+        working_dir: /path/to/project
+        user_id: "123456789"
+        notify_context: {chat_id: 123456789}
 ```
 
 **注意：`config.yaml` 包含敏感信息（bot token），已在 `.gitignore` 中排除。请复制 `config.yaml.example` 并填入实际值。**
@@ -386,7 +515,7 @@ python main.py
 - tmux 3.x+（用于多会话管理）
 - Claude Code CLI 已安装且 `claude` 命令在 PATH 中
 - 已通过 `claude auth login` 登录（订阅用户）
-- pip 依赖：`python-telegram-bot>=21.0`, `pyyaml>=6.0`
+- pip 依赖：`python-telegram-bot>=21.0`, `pyyaml>=6.0`, `croniter>=1.0.0`（cron 扩展）
 
 ---
 
@@ -394,5 +523,6 @@ python main.py
 
 - **Context window 百分比**：`claude -p --output-format json` 的响应中不包含 `context_window.used_percentage`，此字段仅在交互模式的 statusline 数据中可用。如需此信息，需改用 `--output-format stream-json` 解析流式事件。
 - **Token 刷新**：`~/.claude/.credentials.json` 中的 `accessToken` 有过期时间，当前未处理自动刷新（Claude Code CLI 自身会处理刷新，但直接调用 usage API 时如果 token 过期会失败）。
-- **Delivery callback 单一**：当前 `SessionManager.set_delivery_callback()` 只支持一个回调。如果多个扩展都需要投递结果，需改为回调列表或 pub/sub 模式。
 - **全局 session 上限**：当前只有 per-user 的 `max_sessions_per_user` 限制，没有全局上限。多用户场景下需注意服务器资源。
+- **MCP server 状态共享**：stdio 模式下每个 Claude session 启动独立 MCP server 进程。多进程通过 flock 共享同一个 `cron_jobs.json` 文件。高并发写入时可能有短暂锁竞争。
+- **Cron session 恢复**：`--resume` 依赖 Claude Code 自身的 session 存储（`~/.claude/`）。极旧的 session 可能已被 Claude Code 清理，此时 fallback resume 会退化为新对话。

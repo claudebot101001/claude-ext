@@ -465,7 +465,7 @@ class ExtensionImpl(Extension):
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
-        self.sm.set_delivery_callback(self._deliver_result)
+        self.sm.add_delivery_callback(self._deliver_result)
 
         self.app = Application.builder().token(self.token).build()
         self.app.add_handler(CommandHandler("start", self._cmd_start))

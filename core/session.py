@@ -85,16 +85,31 @@ class SessionManager:
         self._queues: dict[str, asyncio.Queue] = {}
         self._workers: dict[str, asyncio.Task] = {}
         self._monitors: dict[str, asyncio.Task] = {}
-        self._delivery_cb: DeliveryCallback | None = None
+        self._delivery_cbs: list[DeliveryCallback] = []
         self._pending_deliveries: list[tuple] = []  # queued until callback is set
+        self._mcp_servers: dict[str, dict] = {}  # name -> MCP server config
 
-    def set_delivery_callback(self, cb: DeliveryCallback) -> None:
-        """Register the result delivery callback.  Flushes any pending deliveries
-        that were queued during recover() before this was set."""
-        self._delivery_cb = cb
-        for args in self._pending_deliveries:
-            asyncio.create_task(cb(*args))
-        self._pending_deliveries.clear()
+    def add_delivery_callback(self, cb: DeliveryCallback) -> None:
+        """Register a result delivery callback.  Multiple callbacks supported.
+        On first registration, flushes any pending deliveries from recover()."""
+        self._delivery_cbs.append(cb)
+        if self._pending_deliveries:
+            for args in self._pending_deliveries:
+                asyncio.create_task(cb(*args))
+            self._pending_deliveries.clear()
+
+    def register_mcp_server(self, name: str, config: dict) -> None:
+        """Register an MCP server that will be available to all sessions.
+
+        Config follows Claude Code MCP format::
+
+            {"command": "python", "args": ["/path/to/server.py"], "env": {...}}
+
+        Session-specific env vars (CLAUDE_EXT_SESSION_ID, CLAUDE_EXT_STATE_DIR)
+        are injected automatically per session.
+        """
+        self._mcp_servers[name] = config
+        log.info("Registered MCP server: %s", name)
 
     # -- directory helpers --------------------------------------------------
 
@@ -273,7 +288,7 @@ class SessionManager:
 
     async def recover(self) -> None:
         """On startup: reload persisted state and reconnect to tmux.
-        Pending result deliveries are buffered until set_delivery_callback()."""
+        Pending result deliveries are buffered until add_delivery_callback()."""
         sessions_dir = self.base_dir / "sessions"
         if not sessions_dir.exists():
             return
@@ -418,8 +433,29 @@ class SessionManager:
         self._save_state(session)
 
         # Deliver result
-        if self._delivery_cb:
-            await self._delivery_cb(session_id, result_text, metadata)
+        await self._deliver(session_id, result_text, metadata)
+
+    async def _deliver(self, session_id: str, text: str, metadata: dict) -> None:
+        """Fan out delivery to all registered callbacks."""
+        for cb in self._delivery_cbs:
+            try:
+                await cb(session_id, text, metadata)
+            except Exception:
+                log.exception("Delivery callback error")
+
+    def _generate_mcp_config(self, session: Session, sdir: Path) -> dict | None:
+        """Build per-session MCP config with session-specific env vars."""
+        if not self._mcp_servers:
+            return None
+        servers = {}
+        for name, cfg in self._mcp_servers.items():
+            entry = dict(cfg)
+            env = dict(entry.get("env", {}))
+            env["CLAUDE_EXT_SESSION_ID"] = session.id
+            env["CLAUDE_EXT_STATE_DIR"] = str(sdir)
+            entry["env"] = env
+            servers[name] = entry
+        return {"mcpServers": servers}
 
     def _generate_run_script(self, session: Session, sdir: Path, is_first: bool) -> str:
         prompt_file = shlex.quote(str(sdir / "prompt.txt"))
@@ -448,6 +484,14 @@ class SessionManager:
             cmd_parts.extend(["--session-id", session.claude_session_id])
         else:
             cmd_parts.extend(["--resume", session.claude_session_id])
+
+        # MCP config (per-session, includes session-specific env vars)
+        mcp_config = self._generate_mcp_config(session, sdir)
+        mcp_line = ""
+        if mcp_config:
+            mcp_path = sdir / "mcp_config.json"
+            mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
+            cmd_parts.extend(["--mcp-config", shlex.quote(str(mcp_path))])
 
         cmd_str = " ".join(cmd_parts)
 
@@ -483,8 +527,8 @@ class SessionManager:
             if (time.monotonic() - last_heartbeat) >= self.HEARTBEAT_INTERVAL:
                 last_heartbeat = time.monotonic()
                 session = self.sessions.get(session_id)
-                if session and session.status == SessionStatus.BUSY and self._delivery_cb:
-                    await self._delivery_cb(
+                if session and session.status == SessionStatus.BUSY and self._delivery_cbs:
+                    await self._deliver(
                         session_id, "",
                         {"is_heartbeat": True, "elapsed_s": int(elapsed)},
                     )
@@ -508,8 +552,7 @@ class SessionManager:
         if metadata.get("claude_session_id"):
             session.claude_session_id = metadata["claude_session_id"]
         self._save_state(session)
-        if self._delivery_cb:
-            await self._delivery_cb(session_id, result_text, metadata)
+        await self._deliver(session_id, result_text, metadata)
 
     # -- result parsing -----------------------------------------------------
 

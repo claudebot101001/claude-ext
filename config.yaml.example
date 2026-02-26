@@ -25,6 +25,7 @@ sessions:
 # Extensions to enable (must match directory names under extensions/)
 enabled:
   - telegram
+  # - cron                         # Uncomment to enable scheduled tasks
 
 # Per-extension configuration
 extensions:
@@ -36,3 +37,17 @@ extensions:
     # Default working directory for Claude Code. null = current directory.
     # Can be overridden per-session with /new <name> <dir>
     working_dir: null
+
+  cron:
+    # Static jobs (optional). Claude can also create jobs dynamically via MCP tools.
+    jobs: []
+    # Example static job:
+    # jobs:
+    #   - name: daily-review
+    #     cron_expr: "0 9 * * *"
+    #     prompt: "Review yesterday's git commits and summarize changes"
+    #     working_dir: /home/user/project
+    #     user_id: "123456789"           # Must match a Telegram user_id for notifications
+    #     session_strategy: new           # "new" or "reuse"
+    #     notify_context:                 # Routing info for result delivery
+    #       chat_id: 123456789            # Telegram chat ID to send results to
