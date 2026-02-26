@@ -1,0 +1,38 @@
+# Claude Code engine settings
+engine:
+  # model: claude-sonnet-4-6   # optional, uses default if omitted
+  max_turns: 0                  # 0 = unlimited
+
+  # Permission mode for non-interactive use. Options:
+  #   bypassPermissions - skip all permission checks (full auto, use with caution)
+  #   acceptEdits       - auto-accept file edits, still ask for bash
+  #   default           - ask for everything (won't work in -p mode)
+  permission_mode: bypassPermissions
+
+  # Optional: whitelist specific tools instead of allowing all.
+  # Examples: ["Bash", "Edit", "Read", "Write", "Glob", "Grep"]
+  # Leave empty/null to allow all tools.
+  # allowed_tools: ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
+  allowed_tools: null
+
+# Persistent state directory for sessions (supports ~ expansion)
+state_dir: ~/.claude-ext
+
+# Session management
+sessions:
+  max_sessions_per_user: 5       # Max concurrent sessions per user (= slot count)
+
+# Extensions to enable (must match directory names under extensions/)
+enabled:
+  - telegram
+
+# Per-extension configuration
+extensions:
+  telegram:
+    token: "YOUR_BOT_TOKEN"
+    # Telegram user IDs or usernames allowed to use the bot.
+    # Empty list = no restriction (NOT recommended for production).
+    allowed_users: []
+    # Default working directory for Claude Code. null = current directory.
+    # Can be overridden per-session with /new <name> <dir>
+    working_dir: null

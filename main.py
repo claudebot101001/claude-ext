@@ -40,6 +40,15 @@ async def main():
         allowed_tools=eng_cfg.get("allowed_tools"),
     )
 
+    # Initialize tmux-backed session manager
+    state_dir = Path(config.get("state_dir", "~/.claude-ext")).expanduser()
+    session_cfg = config.get("sessions", {})
+    engine.init_sessions(
+        state_dir,
+        max_sessions_per_user=session_cfg.get("max_sessions_per_user", 5),
+    )
+    await engine.session_manager.recover()
+
     registry = Registry(engine, config)
 
     enabled = config.get("enabled", [])
@@ -68,6 +77,7 @@ async def main():
 
     log.info("Shutting down...")
     await registry.stop_all()
+    await engine.session_manager.shutdown()
 
 
 if __name__ == "__main__":

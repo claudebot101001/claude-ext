@@ -7,16 +7,18 @@
 ```
 claude-ext/
 ├── core/                          # 核心层（稳定，极少修改）
-│   ├── engine.py                  # Claude Code CLI 封装
+│   ├── engine.py                  # Claude Code CLI 封装 + SessionManager 入口
 │   ├── extension.py               # 扩展基类（接口契约）
 │   ├── registry.py                # 扩展发现、加载、生命周期
+│   ├── session.py                 # tmux-backed 多会话管理（核心模块）
 │   └── status.py                  # 状态查询（auth + usage API）
 ├── extensions/                    # 扩展层（每个子目录完全独立）
 │   └── telegram/
-│       ├── extension.py           # Telegram Bot 桥接
+│       ├── extension.py           # Telegram Bot 桥接（多会话）
 │       └── requirements.txt       # 该扩展的独立依赖
-├── config.yaml                    # 全局配置（引擎参数 + 扩展开关 + 扩展配置）
-├── main.py                        # 入口（加载配置 → 创建引擎 → 注册扩展 → 运行）
+├── config.yaml                    # 全局配置（引擎参数 + 扩展开关 + 扩展配置）（.gitignore）
+├── config.yaml.example            # 配置模板（已跟踪）
+├── main.py                        # 入口（加载配置 → 创建引擎 → 初始化会话 → 注册扩展 → 运行）
 ├── requirements.txt               # 全局 Python 依赖
 └── CLAUDE.md                      # 本文档
 ```
@@ -26,11 +28,11 @@ claude-ext/
 ## 架构总览
 
 ```
-┌─────────────┐     ┌──────────────────────────────────┐
-│  config.yaml │────▶│            main.py                │
-└─────────────┘     │  load config → build engine →     │
-                    │  registry.discover/load/start_all │
-                    └──────────┬───────────────────────┘
+┌─────────────┐     ┌──────────────────────────────────────────┐
+│  config.yaml │────▶│              main.py                      │
+└─────────────┘     │  load config → build engine →             │
+                    │  init_sessions → recover → registry.start │
+                    └──────────┬─────────────────────────────── ┘
                                │
               ┌────────────────┼────────────────┐
               ▼                ▼                 ▼
@@ -41,45 +43,143 @@ claude-ext/
             │                │                 │
             ▼                ▼                 ▼
      ┌─────────────────────────────────────────────┐
-     │              ClaudeEngine                    │
-     │  claude -p <prompt> --output-format json     │
-     │  --permission-mode bypassPermissions         │
+     │       ClaudeEngine + SessionManager          │
+     │                                              │
+     │  SessionManager（多会话，推荐）:              │
+     │    tmux session → run.sh → claude -p         │
+     │    文件 IPC: prompt.txt → output.json        │
+     │    状态持久化: state.json                     │
+     │    与主进程解耦，支持崩溃恢复                  │
+     │                                              │
+     │  engine.ask()（轻量单次调用，向后兼容）:       │
+     │    直接 subprocess → claude -p                │
      └─────────────────────────────────────────────┘
                          │
                          ▼
-                  Claude Code CLI
+                   tmux sessions
+                   └── claude -p <prompt> --output-format json
 ```
 
-**数据流方向是单向的：扩展 → engine → CLI。扩展之间互不通信。**
+**数据流方向是单向的：扩展 → engine/session_manager → tmux → CLI。扩展之间互不通信。**
 
 ---
 
 ## 核心层详解
 
-### core/engine.py — ClaudeEngine
+### core/session.py — SessionManager（核心模块）
 
-Claude Code CLI 的 async 封装。**全框架唯一与 `claude` 命令交互的地方。**
+**tmux-backed 多会话管理器。每个 Claude Code 会话运行在独立的 tmux session 中，与主进程完全解耦。**
+
+#### Session 数据结构
 
 ```python
-engine = ClaudeEngine(
-    model="claude-sonnet-4-6",       # 可选，不传则用 CLI 默认模型
-    max_turns=0,                     # 0 = 无限制
-    permission_mode="bypassPermissions",  # -p 模式必须设置，否则无法授权工具
-    allowed_tools=["Bash", "Edit"],  # 可选白名单，null = 全部允许
-)
-
-response_text = await engine.ask(
-    prompt="fix the bug in main.py",
-    cwd="/path/to/project",          # 工作目录
-    continue_session=True,           # 是否 --continue 续接上次会话
-    timeout=300,                     # 超时秒数
-)
+@dataclass
+class Session:
+    id: str                    # UUID
+    name: str                  # 用户可见名称
+    slot: int                  # 固定槽位号（1-N），删除后可被复用
+    user_id: int               # 所属用户（Telegram user ID）
+    chat_id: int               # 投递结果的 Telegram chat ID
+    working_dir: str           # Claude Code 工作目录
+    status: SessionStatus      # idle / busy / dead / stopped
+    claude_session_id: str     # Claude CLI session UUID（用于 --resume）
+    tmux_session: str          # tmux session 名称 "cc-{uuid}"
+    prompt_count: int          # 已发送 prompt 数
 ```
 
-**关键设计决策：**
-- 使用 `--output-format json` 而非 `text`，这样每次调用后自动解析 JSON，将 `result` 文本返回给调用者，同时将 session 元数据存入 `engine.last_session`。
-- `last_session` 字段包含：`session_id`, `total_cost_usd`, `duration_ms`, `duration_api_ms`, `num_turns`, `is_error`, `model`。供 `/status` 等功能读取。
-- 关于 `--permission-mode bypassPermissions`：`claude -p` 是非交互模式，没有人能点击"允许"按钮，因此 **必须** 设置此参数才能让 Claude Code 正常执行工具调用（读写文件、运行命令等）。这意味着安全边界完全由 `allowed_users` 白名单保证。
+#### 文件式 IPC
+
+每个 session 在 `~/.claude-ext/sessions/{uuid}/` 下有：
+
+| 文件 | 用途 |
+|------|------|
+| `state.json` | 持久化的 session 元数据（原子写入） |
+| `prompt.txt` | 当前 prompt 内容 |
+| `run.sh` | 自动生成的执行脚本 |
+| `output.json` | claude 的 JSON 输出（先写 .tmp 再 mv，原子写入） |
+| `stderr.log` | 错误输出 |
+| `exitcode` | 完成标记（文件存在 = 命令结束），内容为 claude 退出码 |
+
+#### run.sh 模板
+
+```bash
+#!/bin/bash
+unset CLAUDECODE                  # 防止嵌套 session 检测
+PROMPT=$(cat "/path/prompt.txt")  # 从文件读取，避免 shell 转义问题
+cd "/working/dir"
+claude -p "$PROMPT" --output-format json \
+  --session-id "uuid"             # 首次用 --session-id
+  # 或 --resume "uuid"            # 后续用 --resume
+  --permission-mode bypassPermissions \
+  > "/path/output.json.tmp" 2>"/path/stderr.log"
+CLAUDE_EXIT=$?
+mv "/path/output.json.tmp" "/path/output.json" 2>/dev/null || true
+echo $CLAUDE_EXIT > "/path/exitcode"
+```
+
+**关于 prompt 安全性**：`PROMPT=$(cat file)` 将文件内容赋值给变量时不会发生 shell 解释。`"$PROMPT"` 作为双引号包裹的变量传给 `claude -p` 时，内容中的 `$`、反引号等特殊字符不会被递归解释。这是 bash 变量展开的标准行为。
+
+#### 核心方法
+
+| 方法 | 职责 |
+|------|------|
+| `create_session()` | 分配槽位 + 创建 tmux session + 状态目录 + 启动 queue worker |
+| `send_prompt()` | 将 prompt 放入 per-session 队列，返回队列位置 |
+| `stop_session()` | Ctrl-C → 等待 5s → 写 exitcode → 清空队列 → 标记 STOPPED |
+| `destroy_session()` | 杀 tmux + 取消 worker + 删除状态目录 |
+| `recover()` | 启动时扫描磁盘状态 + 检查 tmux 存活，恢复/重连（结果缓冲到 pending） |
+| `shutdown()` | 取消所有 worker，**不杀 tmux session**（核心设计点） |
+| `set_delivery_callback()` | 注册结果投递回调 + 刷新 recover 期间缓冲的待投递结果 |
+
+#### 槽位机制
+
+每个用户最多 N 个并发 session（默认 5，可配置）。每个 session 创建时分配最小可用槽位号。槽位号在 session 生命周期内固定不变，删除后释放供新 session 复用。用户通过槽位号而非列表序号引用 session，避免删除后编号混乱。
+
+#### 队列机制
+
+每个 session 有独立的 asyncio.Queue 和 worker task。多条消息发给同一个 session 时自动排队，依次执行。`/stop` 会同时清空队列。
+
+#### 状态机
+
+```
+创建 → IDLE → (send_prompt) → BUSY → (完成) → IDLE
+                                   → (stop) → STOPPED → (send_prompt) → IDLE
+                                   → (tmux 死亡) → DEAD
+```
+
+**状态保护**：`_execute_prompt` 在 poll 返回后检查 `session.status`，如果已被 `stop_session` 设为 STOPPED 则不覆盖。
+
+#### 启动恢复矩阵
+
+| state.json status | tmux 存活? | exitcode 存在? | 动作 |
+|---|---|---|---|
+| busy | Yes | Yes | 读取结果，标记 idle，缓冲到 pending_deliveries |
+| busy | Yes | No | 仍在运行，恢复 poll 监控 |
+| busy | No | — | 标记 dead |
+| idle/stopped | Yes | — | 直接重连 |
+| idle/stopped | No | — | 重建 tmux session |
+
+**关键时序**：`recover()` 在 `start_all()` 之前执行（此时 delivery callback 尚未设置），因此完成的结果缓冲到 `_pending_deliveries`。当扩展调用 `set_delivery_callback()` 时自动刷新缓冲区。
+
+#### 心跳
+
+长时间运行的任务（>60s）会每分钟通过 delivery callback 发送 "Still working..." 通知，避免用户端完全沉默。
+
+### core/engine.py — ClaudeEngine
+
+提供两种调用模式：
+
+1. **SessionManager（推荐）**：通过 `engine.session_manager` 访问，tmux-backed，支持多会话、崩溃恢复、异步投递。Telegram 扩展使用此模式。
+2. **`engine.ask()`（轻量）**：直接 subprocess 调用 `claude -p`，同步等待结果。适合不需要持久化/多会话的简单扩展（如 cron、webhook）。
+
+```python
+# SessionManager 模式（Telegram 等需要多会话的扩展）
+session = await engine.session_manager.create_session(name="task1", ...)
+await engine.session_manager.send_prompt(session.id, "fix the bug")
+
+# 轻量模式（简单一次性调用）
+response = await engine.ask(prompt="what is 1+1", cwd="/tmp")
+```
 
 ### core/extension.py — Extension 基类
 
@@ -101,7 +201,7 @@ class Extension(ABC):
     async def stop(self) -> None: ...   # 优雅停止
 ```
 
-每个扩展只需实现 `start()` 和 `stop()`。通过 `self.engine` 调用 Claude Code，通过 `self.config` 读取自身配置。
+扩展通过 `self.engine.session_manager` 管理多会话，或通过 `self.engine.ask()` 做简单调用。
 
 ### core/registry.py — Registry
 
@@ -119,7 +219,7 @@ class Extension(ABC):
 |------|----------|----------|
 | `get_auth_info()` | `claude auth status` 命令 | `{loggedIn, email, subscriptionType, ...}` |
 | `get_usage()` | `GET api.anthropic.com/api/oauth/usage`（读取 `~/.claude/.credentials.json` 中的 OAuth token） | `{five_hour: {utilization, resets_at}, seven_day: {...}, extra_usage: {...}}` |
-| `format_status(auth, usage, session)` | 上述两者 + `engine.last_session` | 格式化的文本字符串 |
+| `format_status(auth, usage, session)` | 上述两者 + session 元数据 | 格式化的文本字符串 |
 
 ---
 
@@ -149,15 +249,16 @@ class ExtensionImpl(Extension):
 
     def configure(self, engine, config):
         super().configure(engine, config)
-        # 从 config 中读取该扩展自己的配置
         self.token = config["token"]
 
     async def start(self) -> None:
-        # 启动逻辑（连接、轮询等）
+        # 注册 delivery callback（如需多会话）
+        self.engine.session_manager.set_delivery_callback(self._deliver)
+        # 启动逻辑
         ...
 
     async def stop(self) -> None:
-        # 停止逻辑（断开连接、清理资源）
+        # 停止逻辑
         ...
 ```
 
@@ -166,40 +267,38 @@ class ExtensionImpl(Extension):
 ```yaml
 enabled:
   - telegram
-  - discord        # 加到启用列表
+  - discord
 
 extensions:
-  telegram:
-    ...
-  discord:          # 添加该扩展的配置段
+  discord:
     token: "YOUR_DISCORD_BOT_TOKEN"
-```
-
-**第四步：安装依赖（如有）**
-
-```bash
-pip install -r extensions/discord/requirements.txt
 ```
 
 **完成。无需修改 core/ 下任何文件，无需修改 main.py，无需修改其他扩展。**
 
 ### 现有扩展：telegram
 
-Telegram Bot 桥接，将聊天消息转发到 `claude -p`。
+Telegram Bot 桥接，基于 tmux 多会话管理。
 
-**功能：**
-- 普通消息 → `engine.ask(prompt, continue_session=True)` → 返回结果
-- `/start` → 欢迎信息
-- `/new` → 重置会话（下次消息不再 `--continue`）
-- `/status` → 调用 `core/status.py` 展示 Auth + Usage Quota + Session 信息
-- `set_my_commands()` → 注册 Telegram 命令菜单（输入 `/` 时自动补全）
-- `allowed_users` → 白名单鉴权（Telegram user ID）
-- 自动分片 → 超过 4000 字符的响应自动拆分发送
+**命令：**
 
-**会话续接机制：**
-- 首条消息：`continue_session=False`，Claude Code 创建新 session
-- 后续消息：`continue_session=True`，CLI 自动加 `--continue` 续接上一个 session
-- `/new` 命令将 `ctx.user_data["continue"]` 重置为 `False`
+| 命令 | 功能 |
+|------|------|
+| `/start` | 欢迎信息 |
+| `/new [name] [dir]` | 创建新 session（可选名称和工作目录） |
+| `/sessions` | 列出所有 session，`*` 标记当前活跃 |
+| `/switch <slot\|name>` | 切换活跃 session（按槽位号或名称） |
+| `/status` | Auth + Usage + 当前 session 信息 |
+| `/stop` | 停止当前 session 的运行任务 + 清空队列 |
+| `/delete <slot\|name>` | 删除 session（杀 tmux + 清文件） |
+
+**消息处理流程：**
+1. 用户发消息 → 检查是否有活跃 session，没有则自动创建 "default"（槽位 #1）
+2. 活跃 session busy → 消息入队列，回复 "Queued (position N)"
+3. 活跃 session idle → 提交 prompt，回复 "Processing..."
+4. 后台 worker 执行完成 → 通过 delivery callback 异步投递结果到 chat
+
+**结果投递**：异步模式。用户发消息后立即收到确认，结果完成后推送。每条结果前加 `[#slot name]` 前缀标识来源。
 
 ---
 
@@ -212,6 +311,11 @@ engine:
   permission_mode: bypassPermissions  # 必须，-p 模式下不设此项则工具无法执行
   allowed_tools: null             # null = 全部允许；或指定白名单列表
 
+state_dir: ~/.claude-ext          # session 状态持久化目录
+
+sessions:
+  max_sessions_per_user: 5        # 每用户最大并发 session 数（= 槽位数）
+
 enabled:                          # 启用的扩展名（对应 extensions/ 下的目录名）
   - telegram
 
@@ -219,10 +323,10 @@ extensions:                       # 每个扩展的独立配置
   telegram:
     token: "BOT_TOKEN"
     allowed_users: [123456789]    # Telegram user ID 白名单
-    working_dir: null             # Claude Code 工作目录，null = 当前目录
+    working_dir: null             # 默认工作目录，null = 当前目录；可通过 /new 覆盖
 ```
 
-**配置传递路径：** `config.yaml` → `main.py` 解析 → `engine` 段传给 `ClaudeEngine` 构造器 → `extensions.<name>` 段传给对应扩展的 `configure(engine, config)` 方法。
+**注意：`config.yaml` 包含敏感信息（bot token），已在 `.gitignore` 中排除。请复制 `config.yaml.example` 并填入实际值。**
 
 ---
 
@@ -232,28 +336,30 @@ extensions:                       # 每个扩展的独立配置
 
 1. **core 不 import 任何 extension。** 扩展发现完全通过 `importlib` 动态导入。如果你发现自己在 core/ 中写了 `from extensions.xxx import ...`，说明设计有问题。
 
-2. **扩展之间互不依赖。** 扩展 A 不 import 扩展 B，不调用扩展 B 的方法，不读取扩展 B 的状态。如果两个扩展需要共享数据，应该通过 core 层的共享服务（如 `engine.last_session`）间接实现。
+2. **扩展之间互不依赖。** 扩展 A 不 import 扩展 B，不调用扩展 B 的方法，不读取扩展 B 的状态。如果两个扩展需要共享数据，应该通过 core 层的共享服务（如 `engine.session_manager`）间接实现。
 
-3. **每个扩展是完全自包含的目录。** 删除一个扩展目录 + 从 `enabled` 列表移除 = 零影响。不需要改任何其他代码。
+3. **每个扩展是完全自包含的目录。** 删除一个扩展目录 + 从 `enabled` 列表移除 = 零影响。
 
-4. **新增功能 = 新增目录，不改已有代码。** 这是检验解耦是否成功的标准。如果添加新扩展需要修改 `core/` 或其他扩展，说明抽象泄漏了。
+4. **新增功能 = 新增目录，不改已有代码。** 如果添加新扩展需要修改 `core/` 或其他扩展，说明抽象泄漏了。
 
-5. **core 层的公共服务要通用化。** 如 `core/status.py` 不绑定 Telegram，任何扩展都可以调用它。如果新功能对所有扩展都有价值（如日志、通知），放在 core/ 里；如果只对某个扩展有价值，放在该扩展目录内。
+5. **core 层的公共服务要通用化。** `core/session.py` 不绑定 Telegram，通过 delivery callback 解耦。任何扩展都可以注册自己的回调。
 
-6. **配置即声明。** 扩展的行为由 `config.yaml` 控制，不硬编码。新扩展的可调参数都应该放在 `extensions.<name>` 配置段中。
+6. **配置即声明。** 扩展的行为由 `config.yaml` 控制，不硬编码。
 
 ---
 
 ## 运行
 
 ```bash
-cd ~/tmp/claude-ext
+cd ~/claude-ext
 source .venv/bin/activate    # Python 3.12+, 依赖装在 .venv 内
+cp config.yaml.example config.yaml  # 首次运行前填入实际配置
 python main.py
 ```
 
 环境要求：
 - Python 3.12+（用到了 `str | None` 类型语法）
+- tmux 3.x+（用于多会话管理）
 - Claude Code CLI 已安装且 `claude` 命令在 PATH 中
 - 已通过 `claude auth login` 登录（订阅用户）
 - pip 依赖：`python-telegram-bot>=21.0`, `pyyaml>=6.0`
@@ -263,17 +369,6 @@ python main.py
 ## 已知限制
 
 - **Context window 百分比**：`claude -p --output-format json` 的响应中不包含 `context_window.used_percentage`，此字段仅在交互模式的 statusline 数据中可用。如需此信息，需改用 `--output-format stream-json` 解析流式事件。
-- **并发**：当前 `engine.last_session` 是单实例共享的，如果未来有多用户并发场景，需要改为按用户存储。
 - **Token 刷新**：`~/.claude/.credentials.json` 中的 `accessToken` 有过期时间，当前未处理自动刷新（Claude Code CLI 自身会处理刷新，但直接调用 usage API 时如果 token 过期会失败）。
-
----
-
-## 可能的后续扩展方向（仅供参考）
-
-| 扩展名 | 用途 | 实现思路 |
-|--------|------|----------|
-| `cron` | 定时任务 | `asyncio` 定时器 + `engine.ask()` |
-| `discord` | Discord Bot 桥接 | 同 telegram 模式，换 `discord.py` 库 |
-| `webhook` | HTTP API 接口 | `aiohttp` 起一个轻量 web server |
-| `notify` | 任务完成通知 | hook 到 `engine.ask()` 返回后，推送到指定渠道 |
-| `filewatch` | 文件变更触发 | `watchdog` 监听文件系统事件 → 触发 `engine.ask()` |
+- **Delivery callback 单一**：当前 `SessionManager.set_delivery_callback()` 只支持一个回调。如果多个扩展都需要投递结果，需改为回调列表或 pub/sub 模式。
+- **全局 session 上限**：当前只有 per-user 的 `max_sessions_per_user` 限制，没有全局上限。多用户场景下需注意服务器资源。
