@@ -125,7 +125,7 @@ echo $CLAUDE_EXIT > "/path/exitcode"
 |------|------|
 | `create_session()` | 分配槽位 + 创建 tmux session + 状态目录 + 启动 queue worker |
 | `send_prompt()` | 将 prompt 放入 per-session 队列，返回队列位置 |
-| `stop_session()` | Ctrl-C → 等待 5s → 写 exitcode → 清空队列 → 标记 STOPPED |
+| `stop_session()` | 清空队列 → 标记 STOPPED → Ctrl-C → 后台 5s 写 exitcode（非阻塞） |
 | `destroy_session()` | 杀 tmux + 取消 worker + 删除状态目录 |
 | `recover()` | 启动时扫描磁盘状态 + 检查 tmux 存活，恢复/重连（结果缓冲到 pending） |
 | `shutdown()` | 取消所有 worker，**不杀 tmux session**（核心设计点） |

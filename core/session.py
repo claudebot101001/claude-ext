@@ -297,6 +297,16 @@ class SessionManager:
         if sdir.exists():
             shutil.rmtree(sdir)
 
+        # Clean up active session references
+        data = self._load_active_map()
+        dirty = False
+        for uid, sid in list(data.items()):
+            if sid == session_id:
+                data.pop(uid)
+                dirty = True
+        if dirty:
+            self._save_active_map(data)
+
         log.info("Destroyed session #%d '%s' (%s)", session.slot, session.name, session_id[:8])
 
     async def shutdown(self) -> None:
@@ -396,8 +406,8 @@ class SessionManager:
                 prompt = await queue.get()
                 try:
                     session = self.sessions.get(session_id)
-                    # Skip if session was stopped/destroyed while queued
-                    if not session or session.status == SessionStatus.STOPPED:
+                    # Skip if session was stopped/dead/destroyed while queued
+                    if not session or session.status in (SessionStatus.STOPPED, SessionStatus.DEAD):
                         continue
                     await self._execute_prompt(session_id, prompt)
                 except Exception:
@@ -521,11 +531,11 @@ class SessionManager:
 
             await asyncio.sleep(self.POLL_INTERVAL)
 
-            # Periodic heartbeat notification
+            # Periodic heartbeat notification (skip if stopped/dead)
             if (time.monotonic() - last_heartbeat) >= self.HEARTBEAT_INTERVAL:
                 last_heartbeat = time.monotonic()
                 session = self.sessions.get(session_id)
-                if session and self._delivery_cb:
+                if session and session.status == SessionStatus.BUSY and self._delivery_cb:
                     mins = int(elapsed / 60)
                     await self._delivery_cb(
                         session_id, session.user_id, session.chat_id,

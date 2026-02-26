@@ -140,11 +140,13 @@ class ExtensionImpl(Extension):
         if active_id:
             return self.sm.sessions[active_id], False
 
-        # Auto-select: pick existing or create new
+        # Auto-select: pick first non-dead session, or create new
         user_sessions = self.sm.get_sessions_for_user(user_id)
-        if user_sessions:
-            session = user_sessions[0]
+        alive = [s for s in user_sessions if s.status != SessionStatus.DEAD]
+        if alive:
+            session = alive[0]
         else:
+            # All dead or none — create a fresh one
             session = await self.sm.create_session(
                 name="default",
                 user_id=user_id,
@@ -179,20 +181,23 @@ class ExtensionImpl(Extension):
         user_id = update.effective_user.id
         chat_id = update.effective_chat.id
 
-        # Parse: /new [name] [working_dir]
+        # Parse: /new [name] [working_dir]  or  /new <dir>
         parts = update.message.text.split(maxsplit=2)
         name = None
         work_dir = self.working_dir
 
-        if len(parts) >= 2:
+        if len(parts) == 2 and os.path.isdir(parts[1].strip()):
+            # Single arg is an existing directory — treat as dir, auto-name
+            work_dir = parts[1].strip()
+        elif len(parts) >= 2:
             name = parts[1].strip()
-        if len(parts) >= 3:
-            candidate = parts[2].strip()
-            if os.path.isdir(candidate):
-                work_dir = candidate
-            else:
-                await update.message.reply_text(f"Directory not found: {candidate}")
-                return
+            if len(parts) >= 3:
+                candidate = parts[2].strip()
+                if os.path.isdir(candidate):
+                    work_dir = candidate
+                else:
+                    await update.message.reply_text(f"Directory not found: {candidate}")
+                    return
 
         # Auto-name based on slot if not given
         if not name:
