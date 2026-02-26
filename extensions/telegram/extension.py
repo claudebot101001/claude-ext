@@ -148,9 +148,15 @@ class ExtensionImpl(Extension):
         if alive:
             session = alive[0]
         else:
-            # All dead or none — create a fresh one
+            # All dead or none — create a fresh one, name matches slot
+            used_slots = {s.slot for s in user_sessions}
+            slot_name = "session-1"
+            for i in range(1, self.sm.max_sessions_per_user + 1):
+                if i not in used_slots:
+                    slot_name = f"session-{i}"
+                    break
             session = await self.sm.create_session(
-                name="default",
+                name=slot_name,
                 user_id=user_id,
                 chat_id=chat_id,
                 working_dir=self.working_dir,
@@ -201,12 +207,13 @@ class ExtensionImpl(Extension):
                     await update.message.reply_text(f"Directory not found: {candidate}")
                     return
 
-        # Auto-name: find first unused "session-N" name (independent of slot)
+        # Auto-name: session-{slot} where slot is the one that will be assigned
         if not name:
-            for i in range(1, self.sm.max_sessions_per_user + 2):
-                candidate = f"session-{i}"
-                if not self.sm.get_session_by_name(user_id, candidate):
-                    name = candidate
+            user_sessions = self.sm.get_sessions_for_user(user_id)
+            used_slots = {s.slot for s in user_sessions}
+            for i in range(1, self.sm.max_sessions_per_user + 1):
+                if i not in used_slots:
+                    name = f"session-{i}"
                     break
             if not name:
                 name = "session"
