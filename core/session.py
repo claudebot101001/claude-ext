@@ -431,7 +431,7 @@ class SessionManager:
 
         # If session was stopped/destroyed while we were streaming
         if session.status in (SessionStatus.STOPPED, SessionStatus.DEAD):
-            await self._deliver(session_id, "", {"is_stopped": True, "is_final": True})
+            await self.deliver(session_id, "", {"is_stopped": True, "is_final": True})
             return
         if session_id not in self.sessions:
             return
@@ -450,9 +450,9 @@ class SessionManager:
 
         # Final delivery (text already streamed; metadata-only)
         metadata["is_final"] = True
-        await self._deliver(session_id, "", metadata)
+        await self.deliver(session_id, "", metadata)
 
-    async def _deliver(self, session_id: str, text: str, metadata: dict) -> None:
+    async def deliver(self, session_id: str, text: str, metadata: dict) -> None:
         """Fan out delivery to all registered callbacks."""
         for cb in self._delivery_cbs:
             try:
@@ -655,7 +655,7 @@ class SessionManager:
                         # Deliver stream event
                         session = self.sessions.get(session_id)
                         if session and session.status == SessionStatus.BUSY:
-                            await self._deliver(session_id, text, meta)
+                            await self.deliver(session_id, text, meta)
                             last_delivery = time.monotonic()
 
             # Check for completion
@@ -688,7 +688,7 @@ class SessionManager:
                                 continue
                             session = self.sessions.get(session_id)
                             if session and session.status == SessionStatus.BUSY:
-                                await self._deliver(session_id, text, meta)
+                                await self.deliver(session_id, text, meta)
 
                 # If no result event was found, fall back to old parser
                 if not final_metadata:
@@ -705,7 +705,7 @@ class SessionManager:
                 last_delivery = now_mono
                 session = self.sessions.get(session_id)
                 if session and session.status == SessionStatus.BUSY and self._delivery_cbs:
-                    await self._deliver(
+                    await self.deliver(
                         session_id, "",
                         {"is_heartbeat": True, "elapsed_s": int(elapsed)},
                     )
@@ -730,7 +730,7 @@ class SessionManager:
             session.claude_session_id = metadata["claude_session_id"]
         self._save_state(session)
         metadata["is_final"] = True
-        await self._deliver(session_id, result_text, metadata)
+        await self.deliver(session_id, result_text, metadata)
 
     # -- result parsing -----------------------------------------------------
 

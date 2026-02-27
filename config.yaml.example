@@ -25,6 +25,7 @@ sessions:
 # Extensions to enable (must match directory names under extensions/)
 enabled:
   - telegram
+  # - ask_user                     # Uncomment to let Claude ask the user questions mid-session
   # - cron                         # Uncomment to enable scheduled tasks
 
 # Per-extension configuration
@@ -37,6 +38,9 @@ extensions:
     # Default working directory for Claude Code. null = current directory.
     # Can be overridden per-session with /new <name> <dir>
     working_dir: null
+
+  ask_user:
+    timeout: 300                   # Seconds to wait for user response before timing out
 
   cron:
     # Static jobs (optional). Claude can also create jobs dynamically via MCP tools.

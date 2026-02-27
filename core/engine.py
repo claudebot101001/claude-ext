@@ -6,6 +6,7 @@ import logging
 from pathlib import Path
 
 from core.bridge import BridgeServer
+from core.pending import PendingStore
 from core.session import SessionManager
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class ClaudeEngine:
         self.last_session: dict = {}  # metadata from last JSON response
         self.session_manager: SessionManager | None = None
         self.bridge: BridgeServer | None = None
+        self.pending = PendingStore()
 
     def init_sessions(self, base_dir: Path, max_sessions_per_user: int = 5) -> None:
         """Initialize the tmux-backed session manager."""

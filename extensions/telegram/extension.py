@@ -6,9 +6,10 @@ import logging
 import os
 from dataclasses import dataclass, field
 
-from telegram import BotCommand, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -45,6 +46,7 @@ class ExtensionImpl(Extension):
         self.working_dir = config.get("working_dir") or os.getcwd()
         self.app: Application | None = None
         self._stream_buffers: dict[str, _StreamBuffer] = {}  # session_id -> buffer
+        self._awaiting_text_answer: dict[str, str] = {}  # session_id -> request_id
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -101,6 +103,33 @@ class ExtensionImpl(Extension):
             return
         chat_id = session.context.get("chat_id")
         if not chat_id:
+            return
+
+        # --- Question from Claude (ask_user) ---
+        if metadata.get("is_question"):
+            request_id = metadata["request_id"]
+            options = metadata.get("options") or []
+            prefix = f"[#{session.slot} {session.name}] "
+            question_text = f"{prefix}\u2753 {result_text}"
+
+            if options:
+                keyboard = [
+                    [InlineKeyboardButton(opt, callback_data=f"q:{request_id}:{i}")]
+                    for i, opt in enumerate(options)
+                ]
+                keyboard.append([InlineKeyboardButton(
+                    "Other...", callback_data=f"q:{request_id}:t",
+                )])
+                await self.app.bot.send_message(
+                    chat_id, question_text,
+                    reply_markup=InlineKeyboardMarkup(keyboard),
+                )
+            else:
+                self._awaiting_text_answer[session_id] = request_id
+                await self.app.bot.send_message(
+                    chat_id,
+                    f"{question_text}\n\n(Reply with your answer)",
+                )
             return
 
         # --- Heartbeat ---
@@ -232,6 +261,57 @@ class ExtensionImpl(Extension):
             except Exception:
                 log.exception("Failed to deliver message to chat %s", chat_id)
                 break  # subsequent chunks will almost certainly fail too
+
+    # -- ask_user callback handling ------------------------------------------
+
+    async def _handle_callback_query(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle InlineKeyboard button presses for ask_user questions."""
+        query = update.callback_query
+        if not query or not query.data or not query.data.startswith("q:"):
+            return
+
+        await query.answer()
+
+        # Parse callback_data: "q:{request_id}:{index_or_t}"
+        parts = query.data.split(":", 2)
+        if len(parts) != 3:
+            return
+        _, request_id, action = parts
+
+        pending = self.engine.pending
+        entry = pending.get(request_id)
+
+        if not entry:
+            # Question expired or already answered
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("Question expired or already answered.")
+            return
+
+        if action == "t":
+            # Switch to free-text mode
+            session_id = entry.session_id
+            self._awaiting_text_answer[session_id] = request_id
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("Type your answer:")
+            return
+
+        # Numeric index — resolve with the chosen option
+        try:
+            idx = int(action)
+            options = entry.data.get("options", [])
+            if 0 <= idx < len(options):
+                answer = options[idx]
+            else:
+                answer = f"Option {idx}"
+        except ValueError:
+            answer = action
+
+        if pending.resolve(request_id, answer):
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(f"Answer sent: {answer}")
+        else:
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text("Question expired or already answered.")
 
     # -- helpers ------------------------------------------------------------
 
@@ -469,6 +549,10 @@ class ExtensionImpl(Extension):
 
         stopped, drained = await self.sm.stop_session(active_id)
 
+        # Cancel any pending ask_user questions for this session
+        self.engine.pending.cancel_for_session(active_id)
+        self._awaiting_text_answer.pop(active_id, None)
+
         if stopped:
             msg = f"Stopping #{session.slot} '{session.name}'..."
             if drained:
@@ -545,6 +629,15 @@ class ExtensionImpl(Extension):
         if not text:
             return
 
+        # --- Intercept text answer for pending ask_user question ---
+        active_id = ctx.user_data.get("active_session_id")
+        if active_id and active_id in self._awaiting_text_answer:
+            request_id = self._awaiting_text_answer.pop(active_id)
+            if self.engine.pending.resolve(request_id, text):
+                await update.message.reply_text(f"Answer sent: {text[:100]}")
+                return
+            # resolve() returned False = question expired, fall through
+
         session, auto_selected = await self._ensure_active_session(update, ctx)
 
         # Dead sessions need manual intervention
@@ -588,6 +681,7 @@ class ExtensionImpl(Extension):
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop))
         self.app.add_handler(CommandHandler("delete", self._cmd_delete))
+        self.app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
@@ -612,6 +706,7 @@ class ExtensionImpl(Extension):
             if buf.flush_task and not buf.flush_task.done():
                 buf.flush_task.cancel()
         self._stream_buffers.clear()
+        self._awaiting_text_answer.clear()
 
         if self.app:
             await self.app.updater.stop()
