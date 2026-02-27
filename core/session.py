@@ -93,6 +93,7 @@ class SessionManager:
         self._delivery_cbs: list[DeliveryCallback] = []
         self._pending_deliveries: list[tuple] = []  # queued until callback is set
         self._mcp_servers: dict[str, dict] = {}  # name -> MCP server config
+        self._system_prompt_parts: list[str] = []  # fragments appended to system prompt
 
     def add_delivery_callback(self, cb: DeliveryCallback) -> None:
         """Register a result delivery callback.  Multiple callbacks supported.
@@ -115,6 +116,15 @@ class SessionManager:
         """
         self._mcp_servers[name] = config
         log.info("Registered MCP server: %s", name)
+
+    def add_system_prompt(self, text: str) -> None:
+        """Append a fragment to the system prompt for all sessions.
+
+        Fragments are joined with blank lines and passed to claude via
+        ``--append-system-prompt``.  Call during extension ``start()``.
+        """
+        self._system_prompt_parts.append(text)
+        log.info("Added system prompt fragment (%d chars)", len(text))
 
     # -- directory helpers --------------------------------------------------
 
@@ -517,12 +527,28 @@ class SessionManager:
             mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
             cmd_parts.extend(["--mcp-config", shlex.quote(str(mcp_path))])
 
+        # System prompt fragments (registered by extensions)
+        sys_prompt_file = ""
+        if self._system_prompt_parts:
+            sys_prompt_path = sdir / "system_prompt.txt"
+            sys_prompt_path.write_text(
+                "\n\n".join(self._system_prompt_parts), encoding="utf-8",
+            )
+            sys_prompt_file = shlex.quote(str(sys_prompt_path))
+
         cmd_str = " ".join(cmd_parts)
+
+        # Build append-system-prompt via file read (same safe pattern as PROMPT)
+        sys_prompt_line = ""
+        if sys_prompt_file:
+            sys_prompt_line = f'SYS_PROMPT=$(cat {sys_prompt_file})\n'
+            cmd_str += ' --append-system-prompt "$SYS_PROMPT"'
 
         claude_cmd = (
             "#!/bin/bash\n"
             "unset CLAUDECODE\n"
             f"PROMPT=$(cat {prompt_file})\n"
+            f"{sys_prompt_line}"
             f"cd {work_dir}\n"
             f"{cmd_str} 2>{stderr_file}\n"
         )

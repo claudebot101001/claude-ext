@@ -44,6 +44,16 @@ class ExtensionImpl(Extension):
 
         # Register bridge handler for reverse-channel calls from MCP server
         self.engine.bridge.add_handler(self._bridge_handler)
+
+        # Tell Claude to use our MCP tool instead of built-in AskUserQuestion
+        self.sm.add_system_prompt(
+            "When you need to ask the user a question, get clarification, or "
+            "present choices, use the ask_user MCP tool. Do NOT use the "
+            "built-in AskUserQuestion tool — it does not work in this "
+            "environment. The ask_user tool will deliver your question to "
+            "the user and return their response."
+        )
+
         log.info("ask_user extension started (timeout=%ss)", self._timeout)
 
     async def stop(self) -> None:
