@@ -48,6 +48,8 @@ async def main():
         max_sessions_per_user=session_cfg.get("max_sessions_per_user", 5),
     )
     await engine.session_manager.recover()
+    if engine.bridge:
+        await engine.bridge.start()
 
     registry = Registry(engine, config)
 
@@ -77,6 +79,8 @@ async def main():
 
     log.info("Shutting down...")
     await registry.stop_all()
+    if engine.bridge:
+        await engine.bridge.stop()
     await engine.session_manager.shutdown()
 
 

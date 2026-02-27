@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 
+from core.bridge import BridgeServer
 from core.session import SessionManager
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class ClaudeEngine:
         self.allowed_tools = allowed_tools
         self.last_session: dict = {}  # metadata from last JSON response
         self.session_manager: SessionManager | None = None
+        self.bridge: BridgeServer | None = None
 
     def init_sessions(self, base_dir: Path, max_sessions_per_user: int = 5) -> None:
         """Initialize the tmux-backed session manager."""
@@ -39,6 +41,7 @@ class ClaudeEngine:
             },
             max_sessions_per_user=max_sessions_per_user,
         )
+        self.bridge = BridgeServer(base_dir / "bridge.sock")
 
     def _build_cmd(self, prompt: str, continue_session: bool = False) -> list[str]:
         cmd = ["claude", "-p", prompt, "--output-format", "json"]
