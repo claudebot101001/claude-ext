@@ -458,9 +458,13 @@ class SessionManager:
         session.error = None
         self._save_state(session)
 
-        # Final delivery (text already streamed; metadata-only)
+        # Final delivery — include full result text as fallback in case
+        # stream text events were lost (e.g. Telegram send failure during
+        # debounce flush).  Frontends should prefer their stream buffer and
+        # only use this fallback when the buffer was empty.
+        fallback_text, _ = self._parse_stream_result(sdir)
         metadata["is_final"] = True
-        await self.deliver(session_id, "", metadata)
+        await self.deliver(session_id, fallback_text, metadata)
 
     async def deliver(self, session_id: str, text: str, metadata: dict) -> None:
         """Fan out delivery to all registered callbacks."""
@@ -694,8 +698,8 @@ class SessionManager:
                             remaining = f.read()
                     except OSError:
                         remaining = ""
-                    if remaining:
-                        tail = (line_buffer + remaining).strip()
+                    tail = (line_buffer + remaining).strip()
+                    if tail:
                         for line in tail.split("\n"):
                             line = line.strip()
                             if not line:

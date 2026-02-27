@@ -172,17 +172,27 @@ class ExtensionImpl(Extension):
 
         # --- Final result (streaming mode: text already delivered) ---
         if metadata.get("is_final"):
-            await self._flush_stream_buffer(session_id)
+            flushed = await self._flush_stream_buffer(session_id)
             self._stream_buffers.pop(session_id, None)
+
+            prefix = f"[#{session.slot} {session.name}] "
+
+            # Fallback: if stream buffer was empty (text events were lost
+            # during debounce, or never delivered), use result_text from
+            # _parse_stream_result as a safety net.
+            if not flushed and result_text and not metadata.get("is_error"):
+                log.warning(
+                    "Stream text was not buffered for session %s, using fallback",
+                    session_id[:8],
+                )
+                await self._send_chunked(chat_id, f"{prefix}{result_text}")
 
             cost = metadata.get("total_cost_usd")
             turns = metadata.get("num_turns")
             if metadata.get("is_error"):
-                prefix = f"[#{session.slot} {session.name}] "
                 err_text = result_text or "[Error]"
                 await self._send_chunked(chat_id, f"{prefix}{err_text}")
             elif cost is not None:
-                prefix = f"[#{session.slot} {session.name}] "
                 await self._send_chunked(chat_id, f"{prefix}--- ${cost:.4f} | {turns} turns ---")
             return
 
@@ -203,11 +213,14 @@ class ExtensionImpl(Extension):
         await asyncio.sleep(STREAM_FLUSH_DELAY)
         await self._flush_stream_buffer(session_id)
 
-    async def _flush_stream_buffer(self, session_id: str) -> None:
-        """Send accumulated text in the stream buffer, if any."""
+    async def _flush_stream_buffer(self, session_id: str) -> bool:
+        """Send accumulated text in the stream buffer, if any.
+
+        Returns True if text was flushed (regardless of send success).
+        """
         buf = self._stream_buffers.get(session_id)
         if not buf or not buf.text_parts:
-            return
+            return False
         # Cancel pending flush timer
         if buf.flush_task and not buf.flush_task.done():
             buf.flush_task.cancel()
@@ -217,6 +230,8 @@ class ExtensionImpl(Extension):
         if text.strip():
             prefix = f"[#{buf.slot} {buf.name}] "
             await self._send_chunked(buf.chat_id, f"{prefix}{text}")
+            return True
+        return False
 
     @staticmethod
     def _format_tool_use(metadata: dict) -> str:
