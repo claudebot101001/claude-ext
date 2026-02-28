@@ -38,7 +38,7 @@ class Registry:
         for name in names:
             try:
                 mod = importlib.import_module(f"extensions.{name}.extension")
-                cls = getattr(mod, "ExtensionImpl")
+                cls = mod.ExtensionImpl
                 ext: Extension = cls()
                 ext_config = self.config.get("extensions", {}).get(name, {})
                 ext.configure(self.engine, ext_config)
@@ -75,7 +75,7 @@ class Registry:
             try:
                 result = await asyncio.wait_for(ext.health_check(), timeout=5.0)
                 return ext.name, result
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return ext.name, {"status": "error", "detail": "timeout"}
             except Exception as e:
                 return ext.name, {"status": "error", "detail": str(e)}

@@ -5,7 +5,7 @@ import json
 import logging
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -20,12 +20,12 @@ class CronJob:
     user_id: str
 
     # Trigger (exactly one should be set)
-    cron_expr: str | None = None     # "0 8 * * *" — recurring
-    run_at: str | None = None        # ISO timestamp — one-time
+    cron_expr: str | None = None  # "0 8 * * *" — recurring
+    run_at: str | None = None  # ISO timestamp — one-time
 
     # Session strategy
-    session_strategy: str = "new"    # "new" | "reuse"
-    session_id: str | None = None    # our session ID (reuse target)
+    session_strategy: str = "new"  # "new" | "reuse"
+    session_id: str | None = None  # our session ID (reuse target)
     claude_session_id: str | None = None  # Claude CLI session UUID (for --resume fallback)
 
     # Notification routing (merged into new session's context)
@@ -33,9 +33,9 @@ class CronJob:
 
     # State
     enabled: bool = True
-    created_by: str = ""             # source session_id or "config"
-    last_run: str | None = None      # ISO timestamp
-    next_run: str | None = None      # ISO timestamp
+    created_by: str = ""  # source session_id or "config"
+    last_run: str | None = None  # ISO timestamp
+    next_run: str | None = None  # ISO timestamp
     created_at: str = ""
 
 
@@ -72,7 +72,7 @@ def parse_relative_time(expr: str) -> datetime | None:
     if total.total_seconds() <= 0:
         return None
 
-    return datetime.now(timezone.utc) + total
+    return datetime.now(UTC) + total
 
 
 def compute_next_run(cron_expr: str, after: datetime | None = None) -> str | None:
@@ -84,11 +84,11 @@ def compute_next_run(cron_expr: str, after: datetime | None = None) -> str | Non
         return None
 
     if after is None:
-        after = datetime.now(timezone.utc)
+        after = datetime.now(UTC)
     cron = croniter(cron_expr, after)
     nxt = cron.get_next(datetime)
     if nxt.tzinfo is None:
-        nxt = nxt.replace(tzinfo=timezone.utc)
+        nxt = nxt.replace(tzinfo=UTC)
     return nxt.isoformat()
 
 
@@ -104,7 +104,7 @@ class JobStore:
     def _read_locked(self) -> list[dict]:
         if not self.path.exists():
             return []
-        with open(self.path, "r", encoding="utf-8") as f:
+        with open(self.path, encoding="utf-8") as f:
             fcntl.flock(f, fcntl.LOCK_SH)
             try:
                 data = json.load(f)
@@ -166,7 +166,7 @@ class JobStore:
     def get_due_jobs(self, now: datetime | None = None) -> list[CronJob]:
         """Return enabled jobs whose next_run is <= now."""
         if now is None:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
         now_iso = now.isoformat()
         result = []
         for d in self._read_locked():
@@ -193,7 +193,7 @@ class JobStore:
         notify_context: dict | None = None,
         created_by: str = "",
     ) -> CronJob:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         # Compute next_run
         if run_at:

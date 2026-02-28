@@ -1,11 +1,11 @@
 """Tests for memory extension lifecycle."""
 
 import asyncio
-import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
-from extensions.memory.extension import ExtensionImpl, _SEED_MEMORY, _SYSTEM_PROMPT
+import pytest
+
+from extensions.memory.extension import ExtensionImpl
 
 
 def _run(coro):
@@ -79,6 +79,7 @@ class TestMemoryExtensionStart:
         assert "memory" in ext.engine.services
         # Service should be a MemoryStore instance
         from extensions.memory.store import MemoryStore
+
         assert isinstance(ext.engine.services["memory"], MemoryStore)
 
 

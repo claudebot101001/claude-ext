@@ -160,7 +160,9 @@ class HeartbeatMCPServer(MCPServerBase):
         store = self._get_store()
         content = store.read_instructions()
         if content is None:
-            return "No heartbeat instructions set yet. Use heartbeat_set_instructions to create them."
+            return (
+                "No heartbeat instructions set yet. Use heartbeat_set_instructions to create them."
+            )
         return content
 
     def _handle_set_instructions(self, args: dict) -> str:
@@ -207,12 +209,16 @@ class HeartbeatMCPServer(MCPServerBase):
         source = f"session:{ctx.get('id', 'unknown')[:8]}" if ctx else "session"
 
         try:
-            result = self.bridge.call("heartbeat_trigger", {
-                "source": source,
-                "event_type": event_type,
-                "urgency": urgency,
-                "payload": payload,
-            }, timeout=5)
+            result = self.bridge.call(
+                "heartbeat_trigger",
+                {
+                    "source": source,
+                    "event_type": event_type,
+                    "urgency": urgency,
+                    "payload": payload,
+                },
+                timeout=5,
+            )
         except Exception as e:
             return f"Error: {e}"
 

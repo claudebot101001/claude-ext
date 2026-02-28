@@ -1,9 +1,7 @@
 """Tests for core/events.py — structured event log."""
 
 import json
-import os
 import threading
-from pathlib import Path
 
 import pytest
 

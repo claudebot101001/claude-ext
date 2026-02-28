@@ -131,9 +131,14 @@ class VaultMCPServer(MCPServerBase):
             return "Error: 'value' is required."
 
         try:
-            result = self._bridge_call("vault_store", {
-                "key": key, "value": value, "tags": tags,
-            })
+            result = self._bridge_call(
+                "vault_store",
+                {
+                    "key": key,
+                    "value": value,
+                    "tags": tags,
+                },
+            )
         except (TimeoutError, ConnectionError, RuntimeError) as e:
             return f"Error: {e}"
 

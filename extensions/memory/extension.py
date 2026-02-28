@@ -72,17 +72,21 @@ class ExtensionImpl(Extension):
 
         # 3. Register MCP server (inject MEMORY_DIR env var)
         mcp_script = str(Path(__file__).parent / "mcp_server.py")
-        self.sm.register_mcp_server("memory", {
-            "command": sys.executable,
-            "args": [mcp_script],
-            "env": {"MEMORY_DIR": str(memory_dir)},
-        }, tools=[
-            {"name": "memory_read", "description": "Read a memory file"},
-            {"name": "memory_write", "description": "Overwrite/create a memory file"},
-            {"name": "memory_append", "description": "Append content with UTC timestamp"},
-            {"name": "memory_search", "description": "Regex search across all memory files"},
-            {"name": "memory_list", "description": "List memory files by modification time"},
-        ])
+        self.sm.register_mcp_server(
+            "memory",
+            {
+                "command": sys.executable,
+                "args": [mcp_script],
+                "env": {"MEMORY_DIR": str(memory_dir)},
+            },
+            tools=[
+                {"name": "memory_read", "description": "Read a memory file"},
+                {"name": "memory_write", "description": "Overwrite/create a memory file"},
+                {"name": "memory_append", "description": "Append content with UTC timestamp"},
+                {"name": "memory_search", "description": "Regex search across all memory files"},
+                {"name": "memory_list", "description": "List memory files by modification time"},
+            ],
+        )
 
         # 4. System prompt injection
         self.sm.add_system_prompt(_SYSTEM_PROMPT)

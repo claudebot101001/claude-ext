@@ -1,21 +1,17 @@
 """Tests for heartbeat extension lifecycle, triggers, scheduling."""
 
 import asyncio
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.session import SessionStatus
 from extensions.heartbeat.extension import (
+    _BACKOFF_MAX_MULTIPLIER,
     ExtensionImpl,
     TriggerEvent,
-    _SEED_INSTRUCTIONS,
-    _SYSTEM_PROMPT,
-    _BACKOFF_TABLE,
-    _BACKOFF_MAX_MULTIPLIER,
 )
-from core.session import SessionStatus
 from extensions.heartbeat.store import HeartbeatState, HeartbeatStore
 
 
@@ -66,6 +62,7 @@ def ext(engine, config):
 
 
 # -- Lifecycle: start -------------------------------------------------------
+
 
 class TestHeartbeatStart:
     def test_start_creates_directory(self, ext, heartbeat_dir):
@@ -128,6 +125,7 @@ class TestHeartbeatStart:
 
 # -- Lifecycle: recovery (stale active_session_id) --------------------------
 
+
 class TestHeartbeatRecovery:
     def test_clears_stale_dead_session(self, ext, heartbeat_dir):
         # Pre-create state with an active_session_id pointing to a dead session
@@ -176,6 +174,7 @@ class TestHeartbeatRecovery:
 
 # -- Lifecycle: stop --------------------------------------------------------
 
+
 class TestHeartbeatStop:
     def test_stop_removes_service(self, ext):
         _run(ext.start())
@@ -191,10 +190,12 @@ class TestHeartbeatStop:
             assert not task.done()
             await ext.stop()
             assert task.cancelled()
+
         asyncio.run(_start_and_stop())
 
 
 # -- Health check -----------------------------------------------------------
+
 
 class TestHeartbeatHealth:
     def test_health_not_initialized(self, ext):
@@ -210,6 +211,7 @@ class TestHeartbeatHealth:
             assert "runs_today" in result
             assert "interval" in result
             ext._scheduler_task.cancel()
+
         asyncio.run(_check())
 
     def test_health_paused(self, ext, heartbeat_dir):
@@ -222,6 +224,7 @@ class TestHeartbeatHealth:
 
 
 # -- Trigger mechanism ------------------------------------------------------
+
 
 class TestHeartbeatTrigger:
     def test_immediate_trigger_enters_queue(self, ext):
@@ -268,13 +271,17 @@ class TestHeartbeatTrigger:
 
 # -- Active hours -----------------------------------------------------------
 
+
 class TestHeartbeatActiveHours:
     def _make_ext(self, engine, active_hours):
         ext = ExtensionImpl()
-        ext.configure(engine, {
-            "user_id": "123",
-            "active_hours": active_hours,
-        })
+        ext.configure(
+            engine,
+            {
+                "user_id": "123",
+                "active_hours": active_hours,
+            },
+        )
         return ext
 
     def test_no_config_always_active(self, engine):
@@ -335,6 +342,7 @@ class TestHeartbeatActiveHours:
 
 # -- Backoff ----------------------------------------------------------------
 
+
 class TestHeartbeatBackoff:
     def test_no_noop_1x(self, ext):
         _run(ext.start())
@@ -371,6 +379,7 @@ class TestHeartbeatBackoff:
 
 
 # -- Tier 2/3 integration --------------------------------------------------
+
 
 class TestTier2Decision:
     def test_nothing_increments_noop(self, ext):
@@ -453,6 +462,7 @@ class TestTier2Decision:
 class TestDeliveryCallback:
     def test_final_clears_active_session(self, ext):
         """Delivery callback with is_final clears active_session_id."""
+
         async def _run_test():
             await ext.start()
             ext._store.update_state(active_session_id="sess-123")
@@ -473,6 +483,7 @@ class TestDeliveryCallback:
 
     def test_non_final_ignored(self, ext):
         """Delivery callback without is_final should not clear active_session_id."""
+
         async def _run_test():
             await ext.start()
             ext._store.update_state(active_session_id="sess-123")
@@ -491,6 +502,7 @@ class TestDeliveryCallback:
 
     def test_non_heartbeat_session_ignored(self, ext):
         """Delivery for non-heartbeat session should be ignored."""
+
         async def _run_test():
             await ext.start()
             ext._store.update_state(active_session_id="hb-sess")
@@ -510,9 +522,11 @@ class TestDeliveryCallback:
 
 # -- Bridge handler ---------------------------------------------------------
 
+
 class TestBridgeHandler:
     def test_bridge_handler_trigger_immediate(self, ext):
         """Bridge call with immediate urgency → event enters _trigger_queue."""
+
         async def _run_test():
             await ext.start()
             result = await ext._handle_bridge_request(
@@ -531,6 +545,7 @@ class TestBridgeHandler:
 
     def test_bridge_handler_trigger_normal(self, ext):
         """Bridge call with normal urgency → event enters _pending_events."""
+
         async def _run_test():
             await ext.start()
             result = await ext._handle_bridge_request(
@@ -547,6 +562,7 @@ class TestBridgeHandler:
 
     def test_bridge_handler_missing_event_type(self, ext):
         """Bridge call without event_type → error."""
+
         async def _run_test():
             await ext.start()
             result = await ext._handle_bridge_request(
@@ -561,6 +577,7 @@ class TestBridgeHandler:
 
     def test_bridge_handler_unknown_method(self, ext):
         """Non-heartbeat_trigger method → returns None (pass to next handler)."""
+
         async def _run_test():
             await ext.start()
             result = await ext._handle_bridge_request("vault_store", {"key": "x"})
@@ -571,12 +588,18 @@ class TestBridgeHandler:
 
     def test_bridge_handler_with_payload(self, ext):
         """Bridge call with payload → payload forwarded to trigger event."""
+
         async def _run_test():
             await ext.start()
             payload = {"asset": "BTC", "price": 95000}
             result = await ext._handle_bridge_request(
                 "heartbeat_trigger",
-                {"source": "session:abc", "event_type": "price_alert", "urgency": "immediate", "payload": payload},
+                {
+                    "source": "session:abc",
+                    "event_type": "price_alert",
+                    "urgency": "immediate",
+                    "payload": payload,
+                },
             )
             assert result["ok"] is True
             event = ext._trigger_queue.get_nowait()
@@ -611,7 +634,13 @@ class TestBridgeHandler:
         """MCP server registration includes heartbeat_trigger in tools metadata."""
         _run(ext.start())
         call_args = ext.engine.session_manager.register_mcp_server.call_args
-        tools = call_args[1]["tools"] if "tools" in call_args[1] else call_args[0][2] if len(call_args[0]) > 2 else None
+        tools = (
+            call_args[1]["tools"]
+            if "tools" in call_args[1]
+            else call_args[0][2]
+            if len(call_args[0]) > 2
+            else None
+        )
         # Find from kwargs
         if tools is None:
             tools = call_args.kwargs.get("tools", [])
@@ -625,17 +654,20 @@ class TestBridgeHandler:
 class TestDailyLimit:
     def test_trigger_respects_daily_limit(self, ext):
         """Trigger channel should also be subject to daily limit."""
+
         async def _run_test():
             await ext.start()
             ext._store.write_instructions("# Check stuff")
             ext._store.update_state(
                 runs_today=48,
-                runs_today_date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                runs_today_date=datetime.now(UTC).strftime("%Y-%m-%d"),
             )
 
             trigger = TriggerEvent(
-                source="test", event_type="alert",
-                urgency="immediate", payload={},
+                source="test",
+                event_type="alert",
+                urgency="immediate",
+                payload={},
             )
             await ext._handle_trigger(trigger)
 

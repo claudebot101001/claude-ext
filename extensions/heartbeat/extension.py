@@ -13,7 +13,7 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from core.extension import Extension
@@ -90,11 +90,11 @@ _CLEANUP_DELAY = 5.0
 
 @dataclass
 class TriggerEvent:
-    source: str          # Source extension name
-    event_type: str      # Event category
-    urgency: str         # "immediate" | "normal"
-    payload: dict        # Event data
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    source: str  # Source extension name
+    event_type: str  # Event category
+    urgency: str  # "immediate" | "normal"
+    payload: dict  # Event data
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 class ExtensionImpl(Extension):
@@ -124,7 +124,9 @@ class ExtensionImpl(Extension):
 
     # -- public API (called by other extensions) -----------------------------
 
-    def trigger(self, source: str, event_type: str, urgency: str, payload: dict | None = None) -> None:
+    def trigger(
+        self, source: str, event_type: str, urgency: str, payload: dict | None = None
+    ) -> None:
         """Submit a trigger event. Sync method (put_nowait / append).
 
         urgency="immediate": wakes scheduler immediately.
@@ -139,9 +141,13 @@ class ExtensionImpl(Extension):
         if urgency == "immediate":
             self._trigger_queue.put_nowait(event)
             if self.engine.events:
-                self.engine.events.log("heartbeat.triggered", detail={
-                    "source": source, "event_type": event_type,
-                })
+                self.engine.events.log(
+                    "heartbeat.triggered",
+                    detail={
+                        "source": source,
+                        "event_type": event_type,
+                    },
+                )
         else:
             self._pending_events.append(event)
 
@@ -166,9 +172,13 @@ class ExtensionImpl(Extension):
         if state.active_session_id:
             session = self.sm.sessions.get(state.active_session_id)
             if not session or session.status in (
-                SessionStatus.DEAD, SessionStatus.STOPPED, SessionStatus.IDLE
+                SessionStatus.DEAD,
+                SessionStatus.STOPPED,
+                SessionStatus.IDLE,
             ):
-                log.warning("Cleared stale active_session_id: %s", (state.active_session_id or "")[:8])
+                log.warning(
+                    "Cleared stale active_session_id: %s", (state.active_session_id or "")[:8]
+                )
                 self._store.update_state(active_session_id=None)
 
         # 3. Register service (self, not store — includes trigger())
@@ -176,19 +186,35 @@ class ExtensionImpl(Extension):
 
         # 4. Register MCP server
         mcp_script = str(Path(__file__).parent / "mcp_server.py")
-        self.sm.register_mcp_server("heartbeat", {
-            "command": sys.executable,
-            "args": [mcp_script],
-            "env": {"HEARTBEAT_DIR": str(heartbeat_dir)},
-        }, tools=[
-            {"name": "heartbeat_get_instructions", "description": "Read heartbeat standing instructions"},
-            {"name": "heartbeat_set_instructions", "description": "Update heartbeat standing instructions"},
-            {"name": "heartbeat_get_status", "description": "Get heartbeat scheduler status"},
-            {"name": "heartbeat_pause", "description": "Pause autonomous heartbeat"},
-            {"name": "heartbeat_resume", "description": "Resume autonomous heartbeat"},
-            {"name": "heartbeat_trigger", "description": "Submit event to trigger heartbeat check"},
-            {"name": "heartbeat_get_trigger_command", "description": "Get shell command for external heartbeat trigger"},
-        ])
+        self.sm.register_mcp_server(
+            "heartbeat",
+            {
+                "command": sys.executable,
+                "args": [mcp_script],
+                "env": {"HEARTBEAT_DIR": str(heartbeat_dir)},
+            },
+            tools=[
+                {
+                    "name": "heartbeat_get_instructions",
+                    "description": "Read heartbeat standing instructions",
+                },
+                {
+                    "name": "heartbeat_set_instructions",
+                    "description": "Update heartbeat standing instructions",
+                },
+                {"name": "heartbeat_get_status", "description": "Get heartbeat scheduler status"},
+                {"name": "heartbeat_pause", "description": "Pause autonomous heartbeat"},
+                {"name": "heartbeat_resume", "description": "Resume autonomous heartbeat"},
+                {
+                    "name": "heartbeat_trigger",
+                    "description": "Submit event to trigger heartbeat check",
+                },
+                {
+                    "name": "heartbeat_get_trigger_command",
+                    "description": "Get shell command for external heartbeat trigger",
+                },
+            ],
+        )
 
         # 5. Bridge handler (MCP → trigger)
         if self.engine.bridge:
@@ -214,7 +240,8 @@ class ExtensionImpl(Extension):
         )
         log.info(
             "Heartbeat extension started. interval=%ds, user=%s",
-            self._interval, self._user_id,
+            self._interval,
+            self._user_id,
         )
 
     async def stop(self) -> None:
@@ -231,12 +258,13 @@ class ExtensionImpl(Extension):
         if self._store is None:
             return {"status": "error", "detail": "HeartbeatStore not initialized"}
         state = self._store.load_state()
-        scheduler_alive = (
-            self._scheduler_task is not None
-            and not self._scheduler_task.done()
-        )
+        scheduler_alive = self._scheduler_task is not None and not self._scheduler_task.done()
         result = {
-            "status": "ok" if scheduler_alive and state.enabled else "degraded" if not state.enabled else "error",
+            "status": "ok"
+            if scheduler_alive and state.enabled
+            else "degraded"
+            if not state.enabled
+            else "error",
             "scheduler": "running" if scheduler_alive else "stopped",
             "enabled": state.enabled,
             "runs_today": state.runs_today,
@@ -272,10 +300,8 @@ class ExtensionImpl(Extension):
             while True:
                 remaining = max(1, self._seconds_to_next_run())
                 try:
-                    trigger = await asyncio.wait_for(
-                        self._trigger_queue.get(), timeout=remaining
-                    )
-                except asyncio.TimeoutError:
+                    trigger = await asyncio.wait_for(self._trigger_queue.get(), timeout=remaining)
+                except TimeoutError:
                     trigger = None
 
                 try:
@@ -295,7 +321,7 @@ class ExtensionImpl(Extension):
             return float(self._interval)
         try:
             next_dt = datetime.fromisoformat(state.next_run)
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             remaining = (next_dt - now).total_seconds()
             return max(1, remaining)
         except (ValueError, TypeError):
@@ -306,7 +332,7 @@ class ExtensionImpl(Extension):
     def _check_daily_limit(self) -> tuple[bool, HeartbeatState]:
         """Reset daily counter if needed and check limit. Returns (allowed, state)."""
         state = self._store.load_state()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         if state.runs_today_date != today:
             self._store.update_state(runs_today=0, runs_today_date=today)
             state.runs_today = 0
@@ -461,8 +487,8 @@ class ExtensionImpl(Extension):
         )
 
         # Update counters
-        now_iso = datetime.now(timezone.utc).isoformat()
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now_iso = datetime.now(UTC).isoformat()
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
         state = self._store.load_state()
 
         # Daily reset check
@@ -493,9 +519,13 @@ class ExtensionImpl(Extension):
         if response.startswith("[Error]"):
             log.warning("Tier 2 failed: %s", response[:200])
             if self.engine.events:
-                self.engine.events.log("heartbeat.skipped", detail={
-                    "reason": "tier2_error", "error": response[:200],
-                })
+                self.engine.events.log(
+                    "heartbeat.skipped",
+                    detail={
+                        "reason": "tier2_error",
+                        "error": response[:200],
+                    },
+                )
             return
 
         decision = response.strip()
@@ -504,18 +534,24 @@ class ExtensionImpl(Extension):
             state = self._store.load_state()
             self._store.update_state(consecutive_noop=state.consecutive_noop + 1)
             if self.engine.events:
-                self.engine.events.log("heartbeat.noop", detail={
-                    "consecutive": state.consecutive_noop + 1,
-                })
+                self.engine.events.log(
+                    "heartbeat.noop",
+                    detail={
+                        "consecutive": state.consecutive_noop + 1,
+                    },
+                )
             return
 
         # Action needed — reset noop counter and execute
         self._store.update_state(consecutive_noop=0)
         if self.engine.events:
-            self.engine.events.log("heartbeat.decided", detail={
-                "decision": decision[:200],
-                "trigger_source": trigger.source if trigger else None,
-            })
+            self.engine.events.log(
+                "heartbeat.decided",
+                detail={
+                    "decision": decision[:200],
+                    "trigger_source": trigger.source if trigger else None,
+                },
+            )
         await self._tier3_execute(decision, instructions, trigger)
 
     # -- Tier 3: full session execution --------------------------------------
@@ -560,9 +596,13 @@ class ExtensionImpl(Extension):
         self._store.update_state(active_session_id=session.id)
 
         if self.engine.events:
-            self.engine.events.log("heartbeat.started", session_id=session.id, detail={
-                "decision": decision[:200],
-            })
+            self.engine.events.log(
+                "heartbeat.started",
+                session_id=session.id,
+                detail={
+                    "decision": decision[:200],
+                },
+            )
 
         # Build Tier 3 prompt
         trigger_context = ""
@@ -576,7 +616,7 @@ class ExtensionImpl(Extension):
 
         prompt = _TIER3_PROMPT_TEMPLATE.format(
             run_count=state.run_count,
-            timestamp=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+            timestamp=datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
             decision=decision,
             instructions=instructions,
             trigger_context=trigger_context,
@@ -604,9 +644,13 @@ class ExtensionImpl(Extension):
 
         cost = metadata.get("total_cost_usd")
         if self.engine.events:
-            self.engine.events.log("heartbeat.completed", session_id=session_id, detail={
-                "cost_usd": cost,
-            })
+            self.engine.events.log(
+                "heartbeat.completed",
+                session_id=session_id,
+                detail={
+                    "cost_usd": cost,
+                },
+            )
 
         # Auto-cleanup after delay
         if session.context.get("heartbeat_auto_cleanup"):
@@ -664,8 +708,8 @@ class ExtensionImpl(Extension):
         """Compute and persist the next timer run."""
         multiplier = self._get_backoff_multiplier()
         interval = self._interval * multiplier
-        next_run = datetime.now(timezone.utc).timestamp() + interval
-        next_iso = datetime.fromtimestamp(next_run, tz=timezone.utc).isoformat()
+        next_run = datetime.now(UTC).timestamp() + interval
+        next_iso = datetime.fromtimestamp(next_run, tz=UTC).isoformat()
         self._store.update_state(next_run=next_iso)
 
     # -- active hours --------------------------------------------------------
@@ -684,7 +728,7 @@ class ExtensionImpl(Extension):
             log.warning("Invalid active_hours format: %s", self._active_hours)
             return True
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         now_minutes = now.hour * 60 + now.minute
         start_minutes = start_h * 60 + start_m
         end_minutes = end_h * 60 + end_m
@@ -714,6 +758,10 @@ class ExtensionImpl(Extension):
     def _log_skipped(self, reason: str, detail: str = "") -> None:
         log.debug("Heartbeat skipped: %s %s", reason, detail)
         if self.engine.events:
-            self.engine.events.log("heartbeat.skipped", detail={
-                "reason": reason, "detail": detail,
-            })
+            self.engine.events.log(
+                "heartbeat.skipped",
+                detail={
+                    "reason": reason,
+                    "detail": detail,
+                },
+            )

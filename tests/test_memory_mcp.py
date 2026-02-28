@@ -1,8 +1,6 @@
 """Tests for memory MCP server tool handlers (unit-level, no actual MCP protocol)."""
 
-import os
 import pytest
-from pathlib import Path
 
 from extensions.memory.mcp_server import MemoryMCPServer
 

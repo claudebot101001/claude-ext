@@ -17,7 +17,7 @@ from telegram.ext import (
 )
 
 from core.extension import Extension
-from core.session import SessionStatus
+from core.session import Session, SessionStatus
 from core.status import format_status, get_auth_info, get_usage
 
 log = logging.getLogger(__name__)
@@ -29,6 +29,7 @@ STREAM_FLUSH_DELAY = 2.0  # seconds to wait before flushing text buffer
 @dataclass
 class _StreamBuffer:
     """Per-session buffer for debouncing stream text events."""
+
     chat_id: int
     slot: int
     name: str
@@ -52,9 +53,8 @@ class ExtensionImpl(Extension):
         if not self.allowed_users:
             return True
         user = update.effective_user
-        return (
-            user is not None
-            and (user.id in self.allowed_users or user.username in self.allowed_users)
+        return user is not None and (
+            user.id in self.allowed_users or user.username in self.allowed_users
         )
 
     @property
@@ -124,11 +124,17 @@ class ExtensionImpl(Extension):
                     [InlineKeyboardButton(opt, callback_data=f"q:{request_id}:{i}")]
                     for i, opt in enumerate(options)
                 ]
-                keyboard.append([InlineKeyboardButton(
-                    "Other...", callback_data=f"q:{request_id}:t",
-                )])
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "Other...",
+                            callback_data=f"q:{request_id}:t",
+                        )
+                    ]
+                )
                 await self.app.bot.send_message(
-                    chat_id, question_text,
+                    chat_id,
+                    question_text,
                     reply_markup=InlineKeyboardMarkup(keyboard),
                 )
             else:
@@ -157,9 +163,7 @@ class ExtensionImpl(Extension):
             # Reset flush timer
             if buf.flush_task and not buf.flush_task.done():
                 buf.flush_task.cancel()
-            buf.flush_task = asyncio.create_task(
-                self._delayed_flush(session_id)
-            )
+            buf.flush_task = asyncio.create_task(self._delayed_flush(session_id))
             return
 
         # --- Stream: tool_use event (immediate) ---
@@ -359,7 +363,9 @@ class ExtensionImpl(Extension):
 
         return None
 
-    def _set_active(self, ctx: ContextTypes.DEFAULT_TYPE, user_id: str, session_id: str | None) -> None:
+    def _set_active(
+        self, ctx: ContextTypes.DEFAULT_TYPE, user_id: str, session_id: str | None
+    ) -> None:
         """Update active session in both memory and persistent storage."""
         ctx.user_data["active_session_id"] = session_id
         data = self._load_active_map()
@@ -370,8 +376,10 @@ class ExtensionImpl(Extension):
         self._save_active_map(data)
 
     async def _ensure_active_session(
-        self, update: Update, ctx: ContextTypes.DEFAULT_TYPE,
-    ) -> tuple["Session", bool]:
+        self,
+        update: Update,
+        ctx: ContextTypes.DEFAULT_TYPE,
+    ) -> tuple[Session, bool]:
         """Return (session, was_auto_selected).  Creates one if needed."""
         user_id = str(update.effective_user.id)
         chat_id = update.effective_chat.id
@@ -597,6 +605,7 @@ class ExtensionImpl(Extension):
                 parts.append(f"{hc['consecutive_noop']} idle")
             if hc.get("next_run"):
                 from core.status import relative_time
+
                 next_str = relative_time(hc["next_run"])
                 if next_str:
                     parts.append(f"next {next_str}")
@@ -770,20 +779,20 @@ class ExtensionImpl(Extension):
         self.app.add_handler(CommandHandler("stop", self._cmd_stop))
         self.app.add_handler(CommandHandler("delete", self._cmd_delete))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback_query))
-        self.app.add_handler(
-            MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
-        )
+        self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
         await self.app.initialize()
-        await self.app.bot.set_my_commands([
-            BotCommand("start", "Show welcome message"),
-            BotCommand("new", "Create new session [name] [dir]"),
-            BotCommand("sessions", "List all sessions"),
-            BotCommand("switch", "Switch active session"),
-            BotCommand("status", "Auth, usage & session info"),
-            BotCommand("stop", "Stop running task + clear queue"),
-            BotCommand("delete", "Delete a session"),
-        ])
+        await self.app.bot.set_my_commands(
+            [
+                BotCommand("start", "Show welcome message"),
+                BotCommand("new", "Create new session [name] [dir]"),
+                BotCommand("sessions", "List all sessions"),
+                BotCommand("switch", "Switch active session"),
+                BotCommand("status", "Auth, usage & session info"),
+                BotCommand("stop", "Stop running task + clear queue"),
+                BotCommand("delete", "Delete a session"),
+            ]
+        )
         await self.app.start()
         await self.app.updater.start_polling(drop_pending_updates=True)
         log.info("Telegram bot started polling.")
@@ -803,11 +812,7 @@ class ExtensionImpl(Extension):
             log.info("Telegram bot stopped.")
 
     async def health_check(self) -> dict:
-        polling = (
-            self.app is not None
-            and self.app.updater is not None
-            and self.app.updater.running
-        )
+        polling = self.app is not None and self.app.updater is not None and self.app.updater.running
         result: dict = {
             "status": "ok" if polling else "error",
             "polling": polling,

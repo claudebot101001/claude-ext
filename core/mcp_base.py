@@ -9,8 +9,8 @@ Zero external dependencies — stdlib only.
 import json
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 
 class MCPServerBase:
@@ -60,6 +60,7 @@ class MCPServerBase:
             sock_path = os.environ.get("CLAUDE_EXT_BRIDGE_SOCKET", "")
             if sock_path:
                 from core.bridge import BridgeClient
+
                 self._bridge = BridgeClient(sock_path)
             else:
                 self._bridge = None

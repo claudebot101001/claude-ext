@@ -1,11 +1,6 @@
 """Tests for vault MCP server tool handlers (unit-level, no actual MCP protocol)."""
 
-import json
-import os
-import sys
 import pytest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 from extensions.vault.mcp_server import VaultMCPServer
 
@@ -37,6 +32,7 @@ class FakeBridge:
 @pytest.fixture
 def vault_store(tmp_path):
     from extensions.vault.store import VaultStore
+
     return VaultStore(tmp_path / "vault", passphrase="test-pw")
 
 

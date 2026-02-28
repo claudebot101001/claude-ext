@@ -18,8 +18,8 @@ import os
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 log = logging.getLogger(__name__)
 
@@ -155,12 +155,10 @@ class VaultStore:
         try:
             decrypted = self._fernet.decrypt(encrypted)
             return json.loads(decrypted.decode("utf-8"))
-        except InvalidToken:
-            raise ValueError(
-                "Failed to decrypt vault. Wrong passphrase or corrupted data."
-            )
+        except InvalidToken as e:
+            raise ValueError("Failed to decrypt vault. Wrong passphrase or corrupted data.") from e
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
-            raise ValueError(f"Vault data corrupted: {e}")
+            raise ValueError(f"Vault data corrupted: {e}") from e
 
     def _encrypt_and_write(self, secrets: dict) -> None:
         """Encrypt and atomically write secrets file. Caller must hold LOCK_EX."""

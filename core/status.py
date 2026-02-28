@@ -3,7 +3,7 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -26,7 +26,9 @@ async def get_auth_info() -> dict:
     """Get auth status via `claude auth status`."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "claude", "auth", "status",
+            "claude",
+            "auth",
+            "status",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -45,10 +47,14 @@ async def get_usage() -> dict:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            "curl", "-s",
-            "-H", f"Authorization: Bearer {token}",
-            "-H", "anthropic-beta: oauth-2025-04-20",
-            "-H", "User-Agent: claude-code/2.1.56",
+            "curl",
+            "-s",
+            "-H",
+            f"Authorization: Bearer {token}",
+            "-H",
+            "anthropic-beta: oauth-2025-04-20",
+            "-H",
+            "User-Agent: claude-code/2.1.56",
             USAGE_API,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -123,7 +129,7 @@ def _progress_bar(percent: float, width: int = 10) -> str:
 def relative_time(iso_str: str) -> str:
     try:
         reset_dt = datetime.fromisoformat(iso_str)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         delta = reset_dt - now
         total_mins = int(delta.total_seconds() / 60)
         if total_mins < 0:

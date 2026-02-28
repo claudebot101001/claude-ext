@@ -65,6 +65,7 @@ class ExtensionImpl(Extension):
             if not passphrase:
                 # File missing or empty — generate a new one
                 import secrets as _secrets
+
                 passphrase = _secrets.token_urlsafe(32)
                 passphrase_file.write_text(passphrase, encoding="utf-8")
                 os.chmod(passphrase_file, 0o600)
@@ -82,16 +83,23 @@ class ExtensionImpl(Extension):
 
         # Register MCP server for Claude session access
         mcp_script = str(Path(__file__).with_name("mcp_server.py"))
-        self.sm.register_mcp_server("vault", {
-            "command": sys.executable,
-            "args": [mcp_script],
-            "env": {},  # No passphrase here — MCP uses bridge RPC
-        }, tools=[
-            {"name": "vault_store", "description": "Store a secret (key + value + optional tags)"},
-            {"name": "vault_list", "description": "List all keys and tags (no values)"},
-            {"name": "vault_retrieve", "description": "Retrieve a secret value by key"},
-            {"name": "vault_delete", "description": "Delete a secret by key"},
-        ])
+        self.sm.register_mcp_server(
+            "vault",
+            {
+                "command": sys.executable,
+                "args": [mcp_script],
+                "env": {},  # No passphrase here — MCP uses bridge RPC
+            },
+            tools=[
+                {
+                    "name": "vault_store",
+                    "description": "Store a secret (key + value + optional tags)",
+                },
+                {"name": "vault_list", "description": "List all keys and tags (no values)"},
+                {"name": "vault_retrieve", "description": "Retrieve a secret value by key"},
+                {"name": "vault_delete", "description": "Delete a secret by key"},
+            ],
+        )
 
         # Register bridge handler for MCP → main process calls
         self.engine.bridge.add_handler(self._bridge_handler)
@@ -182,7 +190,9 @@ class ExtensionImpl(Extension):
                 if not key:
                     return {"error": "Key is required."}
                 if self._is_internal_key(key):
-                    return {"error": f"Key '{key}' is internal-only. Use the dedicated extension tools."}
+                    return {
+                        "error": f"Key '{key}' is internal-only. Use the dedicated extension tools."
+                    }
                 log.info("vault_retrieve key='%s' by session %s", key, session_id[:8])
                 if self.engine.events:
                     self.engine.events.log("vault.retrieve", session_id, {"key": key})

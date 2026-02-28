@@ -18,9 +18,8 @@ bridge layer.
 import contextlib
 import fcntl
 import logging
-import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -88,7 +87,7 @@ class MemoryStore:
             resolved.parent.mkdir(parents=True, exist_ok=True)
             lines = []
             if timestamp:
-                ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+                ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
                 lines.append(f"\n[{ts}]\n")
             lines.append(content)
             if not content.endswith("\n"):
@@ -109,7 +108,7 @@ class MemoryStore:
         try:
             pattern = re.compile(query, re.IGNORECASE)
         except re.error as e:
-            raise ValueError(f"Invalid regex: {e}")
+            raise ValueError(f"Invalid regex: {e}") from e
 
         results = []
         with self._shared_lock():
@@ -127,11 +126,13 @@ class MemoryStore:
                     continue
                 for lineno, line in enumerate(text.splitlines(), 1):
                     if pattern.search(line):
-                        results.append({
-                            "file": rel,
-                            "line": lineno,
-                            "text": line.rstrip(),
-                        })
+                        results.append(
+                            {
+                                "file": rel,
+                                "line": lineno,
+                                "text": line.rstrip(),
+                            }
+                        )
                         if len(results) >= _MAX_SEARCH_RESULTS:
                             return results
         return results
@@ -160,20 +161,20 @@ class MemoryStore:
                 except OSError:
                     continue
                 rel = str(filepath.relative_to(self.memory_dir))
-                entries.append({
-                    "path": rel,
-                    "size": st.st_size,
-                    "modified": datetime.fromtimestamp(
-                        st.st_mtime, tz=timezone.utc
-                    ).isoformat(),
-                })
+                entries.append(
+                    {
+                        "path": rel,
+                        "size": st.st_size,
+                        "modified": datetime.fromtimestamp(st.st_mtime, tz=UTC).isoformat(),
+                    }
+                )
         entries.sort(key=lambda e: e["modified"], reverse=True)
         return entries
 
     @staticmethod
     def today_log_path() -> str:
         """Return the conventional path for today's daily log."""
-        return f"daily/{datetime.now(timezone.utc).strftime('%Y-%m-%d')}.md"
+        return f"daily/{datetime.now(UTC).strftime('%Y-%m-%d')}.md"
 
     # -- path safety (core security boundary) --------------------------------
 

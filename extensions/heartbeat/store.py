@@ -20,8 +20,7 @@ import contextlib
 import fcntl
 import json
 import logging
-import os
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -34,13 +33,13 @@ _INSTRUCTIONS_FILE = "HEARTBEAT.md"
 @dataclass
 class HeartbeatState:
     enabled: bool = True
-    last_run: str | None = None          # ISO (most recent Tier 2 call)
-    next_run: str | None = None          # ISO (next timer expiry)
-    run_count: int = 0                   # Total Tier 2 call count
-    runs_today: int = 0                  # Tier 2 calls today
-    runs_today_date: str | None = None   # YYYY-MM-DD
-    consecutive_noop: int = 0            # Consecutive NOTHING decisions
-    active_session_id: str | None = None # Current Tier 3 session
+    last_run: str | None = None  # ISO (most recent Tier 2 call)
+    next_run: str | None = None  # ISO (next timer expiry)
+    run_count: int = 0  # Total Tier 2 call count
+    runs_today: int = 0  # Tier 2 calls today
+    runs_today_date: str | None = None  # YYYY-MM-DD
+    consecutive_noop: int = 0  # Consecutive NOTHING decisions
+    active_session_id: str | None = None  # Current Tier 3 session
 
 
 class HeartbeatStore:

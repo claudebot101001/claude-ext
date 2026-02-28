@@ -11,8 +11,8 @@ import asyncio
 import json
 import logging
 import socket
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
@@ -23,6 +23,7 @@ BridgeHandler = Callable[[str, dict], Awaitable[dict | None]]
 # ---------------------------------------------------------------------------
 # Server (main process, async)
 # ---------------------------------------------------------------------------
+
 
 class BridgeServer:
     """Async Unix socket server.  Multiple handlers; first non-None wins."""
@@ -39,7 +40,8 @@ class BridgeServer:
         # Remove stale socket file
         self.socket_path.unlink(missing_ok=True)
         self._server = await asyncio.start_unix_server(
-            self._handle_client, path=str(self.socket_path),
+            self._handle_client,
+            path=str(self.socket_path),
         )
         log.info("Bridge server listening on %s", self.socket_path)
 
@@ -52,7 +54,9 @@ class BridgeServer:
         log.info("Bridge server stopped.")
 
     async def _handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
     ) -> None:
         try:
             while True:
@@ -104,6 +108,7 @@ class BridgeServer:
 # Client (MCP child process, sync blocking)
 # ---------------------------------------------------------------------------
 
+
 class BridgeClient:
     """Sync blocking client for Unix socket bridge."""
 
@@ -143,9 +148,9 @@ class BridgeClient:
                 buf += chunk
                 if b"\n" in buf:
                     break
-        except socket.timeout:
+        except TimeoutError:
             self._sock = None
-            raise TimeoutError(f"Bridge call timed out after {timeout}s")
+            raise TimeoutError(f"Bridge call timed out after {timeout}s") from None
         except OSError as e:
             self._sock = None
             raise ConnectionError(f"Bridge communication error: {e}") from e

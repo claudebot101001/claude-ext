@@ -36,13 +36,20 @@ class ExtensionImpl(Extension):
     async def start(self) -> None:
         # Register MCP server so every Claude session gets the ask_user tool
         mcp_script = str(Path(__file__).with_name("mcp_server.py"))
-        self.sm.register_mcp_server("ask_user", {
-            "command": sys.executable,
-            "args": [mcp_script],
-            "env": {"ASK_USER_TIMEOUT": str(self._timeout)},
-        }, tools=[
-            {"name": "ask_user", "description": "Ask the user a question and wait for response"},
-        ])
+        self.sm.register_mcp_server(
+            "ask_user",
+            {
+                "command": sys.executable,
+                "args": [mcp_script],
+                "env": {"ASK_USER_TIMEOUT": str(self._timeout)},
+            },
+            tools=[
+                {
+                    "name": "ask_user",
+                    "description": "Ask the user a question and wait for response",
+                },
+            ],
+        )
 
         # Register bridge handler for reverse-channel calls from MCP server
         self.engine.bridge.add_handler(self._bridge_handler)
@@ -86,11 +93,15 @@ class ExtensionImpl(Extension):
         )
 
         # 2. Deliver the question through the normal delivery pipeline
-        await self.sm.deliver(session_id, question, {
-            "is_question": True,
-            "request_id": entry.key,
-            "options": options,
-        })
+        await self.sm.deliver(
+            session_id,
+            question,
+            {
+                "is_question": True,
+                "request_id": entry.key,
+                "options": options,
+            },
+        )
 
         # 3. Block until user responds, times out, or is cancelled
         try:

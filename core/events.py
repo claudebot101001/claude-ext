@@ -7,7 +7,7 @@ import fcntl
 import json
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -31,12 +31,13 @@ class EventLog:
 
     # -- public API ---------------------------------------------------------
 
-    def log(self, event_type: str, session_id: str | None = None,
-            detail: dict | None = None) -> None:
+    def log(
+        self, event_type: str, session_id: str | None = None, detail: dict | None = None
+    ) -> None:
         """Append an event.  Best-effort — swallows OSError."""
         try:
             entry = {
-                "ts": datetime.now(timezone.utc).isoformat(),
+                "ts": datetime.now(UTC).isoformat(),
                 "type": event_type,
                 "session_id": session_id,
                 "detail": detail or {},
@@ -54,10 +55,13 @@ class EventLog:
         except OSError:
             log.warning("EventLog.log failed", exc_info=True)
 
-    def query(self, event_type: str | None = None,
-              session_id: str | None = None,
-              since: str | None = None,
-              limit: int = 100) -> list[dict]:
+    def query(
+        self,
+        event_type: str | None = None,
+        session_id: str | None = None,
+        since: str | None = None,
+        limit: int = 100,
+    ) -> list[dict]:
         """Read matching events from the current log file.
 
         Filters are ANDed.  *since* is an ISO 8601 timestamp string.

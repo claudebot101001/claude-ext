@@ -2,8 +2,6 @@
 
 import asyncio
 
-import pytest
-
 from core.extension import Extension
 from core.registry import Registry
 
@@ -54,6 +52,7 @@ class TimeoutExtension(Extension):
 
 class DefaultExtension(Extension):
     """Uses the base class default health_check."""
+
     name = "default"
 
     async def start(self):
@@ -73,9 +72,11 @@ class TestDefaultHealthCheck:
 class TestHealthCheckAll:
     def _make_registry(self, extensions):
         """Create a Registry with pre-loaded extensions (bypass load())."""
+
         # Minimal engine stub
         class _Engine:
             events = None
+
         registry = Registry(_Engine(), {})
         registry._extensions = extensions
         return registry
@@ -99,8 +100,13 @@ class TestHealthCheckAll:
 
         class SlowExtension(Extension):
             name = "slow"
-            async def start(self): pass
-            async def stop(self): pass
+
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
             async def health_check(self):
                 await asyncio.sleep(10)
                 return {"status": "ok"}
@@ -108,18 +114,16 @@ class TestHealthCheckAll:
         reg = self._make_registry([SlowExtension()])
 
         # Monkeypatch the timeout to 0.05s for fast test
-        import core.registry as reg_mod
-        orig_hca = reg.health_check_all
-
         async def fast_health_check_all():
             async def _check(ext):
                 try:
                     result = await asyncio.wait_for(ext.health_check(), timeout=0.05)
                     return ext.name, result
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     return ext.name, {"status": "error", "detail": "timeout"}
                 except Exception as e:
                     return ext.name, {"status": "error", "detail": str(e)}
+
             pairs = await asyncio.gather(*[_check(e) for e in reg._extensions])
             return dict(pairs)
 
@@ -133,9 +137,13 @@ class TestHealthCheckAll:
         assert results == {}
 
     def test_mixed_extensions(self):
-        reg = self._make_registry([
-            HealthyExtension(), ErrorExtension(), DefaultExtension(),
-        ])
+        reg = self._make_registry(
+            [
+                HealthyExtension(),
+                ErrorExtension(),
+                DefaultExtension(),
+            ]
+        )
         results = _run(reg.health_check_all())
         assert len(results) == 3
         assert results["healthy"]["status"] == "ok"

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from core.extension import Extension
@@ -41,18 +41,25 @@ class ExtensionImpl(Extension):
     async def start(self) -> None:
         # Register MCP server so Claude sessions can call cron_create etc.
         mcp_script = str(Path(__file__).parent / "mcp_server.py")
-        self.sm.register_mcp_server("cron", {
-            "command": sys.executable,
-            "args": [mcp_script],
-            "env": {
-                "CRON_STORE_PATH": str(self.store.path),
+        self.sm.register_mcp_server(
+            "cron",
+            {
+                "command": sys.executable,
+                "args": [mcp_script],
+                "env": {
+                    "CRON_STORE_PATH": str(self.store.path),
+                },
             },
-        }, tools=[
-            {"name": "cron_create", "description": "Create a scheduled task (cron or one-time)"},
-            {"name": "cron_list", "description": "List all cron jobs for current user"},
-            {"name": "cron_delete", "description": "Delete a cron job by ID"},
-            {"name": "cron_status", "description": "Get detailed status of a cron job"},
-        ])
+            tools=[
+                {
+                    "name": "cron_create",
+                    "description": "Create a scheduled task (cron or one-time)",
+                },
+                {"name": "cron_list", "description": "List all cron jobs for current user"},
+                {"name": "cron_delete", "description": "Delete a cron job by ID"},
+                {"name": "cron_status", "description": "Get detailed status of a cron job"},
+            ],
+        )
 
         # Register delivery callback to track job completion
         self.sm.add_delivery_callback(self._on_delivery)
@@ -61,9 +68,7 @@ class ExtensionImpl(Extension):
         self._load_static_jobs()
 
         # Start scheduler loop
-        self._scheduler_task = asyncio.create_task(
-            self._scheduler_loop(), name="cron-scheduler"
-        )
+        self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="cron-scheduler")
         log.info("Cron extension started. %d job(s) in store.", len(self.store.list_jobs()))
 
     async def stop(self) -> None:
@@ -76,10 +81,7 @@ class ExtensionImpl(Extension):
         log.info("Cron extension stopped.")
 
     async def health_check(self) -> dict:
-        scheduler_alive = (
-            self._scheduler_task is not None
-            and not self._scheduler_task.done()
-        )
+        scheduler_alive = self._scheduler_task is not None and not self._scheduler_task.done()
         jobs = self.store.list_jobs()
         return {
             "status": "ok" if scheduler_alive else "error",
@@ -124,7 +126,7 @@ class ExtensionImpl(Extension):
             return
 
     async def _check_due_jobs(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         due = self.store.get_due_jobs(now)
 
         for job in due:
@@ -149,10 +151,14 @@ class ExtensionImpl(Extension):
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a cron job by creating/reusing a session and sending the prompt."""
         if self.engine.events:
-            self.engine.events.log("cron.triggered", detail={
-                "job_id": job.id, "name": job.name,
-                "strategy": job.session_strategy,
-            })
+            self.engine.events.log(
+                "cron.triggered",
+                detail={
+                    "job_id": job.id,
+                    "name": job.name,
+                    "strategy": job.session_strategy,
+                },
+            )
 
         if job.session_strategy == "reuse":
             await self._execute_reuse(job)
@@ -174,10 +180,11 @@ class ExtensionImpl(Extension):
             if not reclaimed:
                 log.warning(
                     "Cron job '%s' deferred: no slots available for user %s",
-                    job.name, user_id,
+                    job.name,
+                    user_id,
                 )
                 # Nudge next_run forward by one interval to retry
-                retry = datetime.now(timezone.utc)
+                retry = datetime.now(UTC)
                 self.store.update_job(job.id, next_run=retry.isoformat())
                 return
 
@@ -205,7 +212,9 @@ class ExtensionImpl(Extension):
         if session:
             # Session exists — send prompt directly
             if session.status == SessionStatus.DEAD:
-                log.warning("Cron job '%s': target session is dead, falling back to resume", job.name)
+                log.warning(
+                    "Cron job '%s': target session is dead, falling back to resume", job.name
+                )
                 await self._fallback_resume(job)
                 return
 
@@ -215,13 +224,15 @@ class ExtensionImpl(Extension):
             await self.sm.send_prompt(session.id, job.prompt)
             log.info(
                 "Cron job '%s' dispatched to existing session %s",
-                job.name, session.id[:8],
+                job.name,
+                session.id[:8],
             )
         else:
             # Session deleted — fallback: create new session + --resume
             log.warning(
                 "Cron job '%s': session %s not found, attempting resume fallback",
-                job.name, (job.session_id or "")[:8],
+                job.name,
+                (job.session_id or "")[:8],
             )
             await self._fallback_resume(job)
 
@@ -252,21 +263,21 @@ class ExtensionImpl(Extension):
         # Prepend fallback note so the user sees it in the result
         prompt = (
             "[System note: The original session for this scheduled task was deleted. "
-            "Claude context has been resumed in a new session.]\n\n"
-            + job.prompt
+            "Claude context has been resumed in a new session.]\n\n" + job.prompt
         )
         await self.sm.send_prompt(session.id, prompt)
         log.info(
             "Cron job '%s' dispatched via resume fallback (claude session %s)",
-            job.name, (job.claude_session_id or "")[:8],
+            job.name,
+            (job.claude_session_id or "")[:8],
         )
 
     async def _reclaim_cron_session(self, user_id: str) -> bool:
         """Try to destroy an idle cron-created session to free a slot."""
         for s in self.sm.get_sessions_for_user(user_id):
-            if (
-                s.context.get("cron_auto_cleanup")
-                and s.status in (SessionStatus.IDLE, SessionStatus.STOPPED)
+            if s.context.get("cron_auto_cleanup") and s.status in (
+                SessionStatus.IDLE,
+                SessionStatus.STOPPED,
             ):
                 await self.sm.destroy_session(s.id)
                 log.info("Reclaimed cron session %s to free slot", s.id[:8])
@@ -291,7 +302,7 @@ class ExtensionImpl(Extension):
             return
 
         # Update job's last_run in store
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self.store.update_job(job_id, last_run=now)
 
         # Auto-cleanup: destroy sessions created with "new" strategy after delivery
@@ -306,4 +317,3 @@ class ExtensionImpl(Extension):
         if session and session.status in (SessionStatus.IDLE, SessionStatus.STOPPED):
             await self.sm.destroy_session(session_id)
             log.info("Auto-cleaned cron session %s", session_id[:8])
-

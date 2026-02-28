@@ -1,13 +1,8 @@
 """Tests for heartbeat trigger_cli.py standalone CLI script."""
 
-import asyncio
 import json
-import os
-import tempfile
 import threading
-from pathlib import Path
-
-import pytest
+import time
 
 from extensions.heartbeat.trigger_cli import main
 
@@ -46,7 +41,7 @@ class TestTriggerCLI:
         t.start()
 
         # Small delay to let server bind
-        import time; time.sleep(0.1)
+        time.sleep(0.1)
 
         exit_code = main(["--socket", sock_path, "transfer_done"])
         t.join(timeout=5)
@@ -67,14 +62,18 @@ class TestTriggerCLI:
 
         t = threading.Thread(target=_fake_bridge_server, args=(sock_path, response, received))
         t.start()
-        import time; time.sleep(0.1)
+        time.sleep(0.1)
 
         payload = {"asset": "BTC", "price": 95000}
-        exit_code = main([
-            "--socket", sock_path,
-            "price_alert",
-            "--payload", json.dumps(payload),
-        ])
+        exit_code = main(
+            [
+                "--socket",
+                sock_path,
+                "price_alert",
+                "--payload",
+                json.dumps(payload),
+            ]
+        )
         t.join(timeout=5)
 
         assert exit_code == 0
@@ -88,7 +87,7 @@ class TestTriggerCLI:
 
         t = threading.Thread(target=_fake_bridge_server, args=(sock_path, response, received))
         t.start()
-        import time; time.sleep(0.1)
+        time.sleep(0.1)
 
         exit_code = main(["--socket", sock_path, "data_ready", "--urgency", "normal"])
         t.join(timeout=5)
@@ -104,13 +103,17 @@ class TestTriggerCLI:
 
         t = threading.Thread(target=_fake_bridge_server, args=(sock_path, response, received))
         t.start()
-        import time; time.sleep(0.1)
+        time.sleep(0.1)
 
-        exit_code = main([
-            "--socket", sock_path,
-            "build_done",
-            "--source", "ci-pipeline",
-        ])
+        exit_code = main(
+            [
+                "--socket",
+                sock_path,
+                "build_done",
+                "--source",
+                "ci-pipeline",
+            ]
+        )
         t.join(timeout=5)
 
         assert exit_code == 0
@@ -129,7 +132,7 @@ class TestTriggerCLI:
 
         t = threading.Thread(target=_fake_bridge_server, args=(sock_path, response, received))
         t.start()
-        import time; time.sleep(0.1)
+        time.sleep(0.1)
 
         exit_code = main(["--socket", sock_path, "test"])
         t.join(timeout=5)

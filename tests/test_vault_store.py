@@ -5,7 +5,6 @@ import stat
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from pathlib import Path
 
 from extensions.vault.store import VaultStore
 
@@ -116,7 +115,7 @@ class TestVaultStoreEncryption:
         enc_path = vault_dir / "secrets.json.enc"
         # Corrupt the file
         enc_path.write_bytes(b"this is not valid fernet data")
-        with pytest.raises(ValueError, match="decrypt|corrupted"):
+        with pytest.raises(ValueError, match=r"decrypt|corrupted"):
             store.get("key")
 
     def test_truncated_file_raises_valueerror(self, store, vault_dir):
@@ -125,8 +124,8 @@ class TestVaultStoreEncryption:
         enc_path = vault_dir / "secrets.json.enc"
         # Truncate to half
         data = enc_path.read_bytes()
-        enc_path.write_bytes(data[:len(data) // 2])
-        with pytest.raises(ValueError, match="decrypt|corrupted"):
+        enc_path.write_bytes(data[: len(data) // 2])
+        with pytest.raises(ValueError, match=r"decrypt|corrupted"):
             store.get("key")
 
 

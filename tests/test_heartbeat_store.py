@@ -1,7 +1,6 @@
 """Tests for extensions/heartbeat/store.py — HeartbeatStore."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -19,6 +18,7 @@ def store(heartbeat_dir):
 
 
 # -- State: defaults --------------------------------------------------------
+
 
 class TestHeartbeatStateDefaults:
     def test_default_state_values(self):
@@ -39,6 +39,7 @@ class TestHeartbeatStateDefaults:
 
 
 # -- State: save + load roundtrip -------------------------------------------
+
 
 class TestHeartbeatStateSaveLoad:
     def test_save_and_load(self, store):
@@ -91,6 +92,7 @@ class TestHeartbeatStateSaveLoad:
 
 # -- Instructions I/O -------------------------------------------------------
 
+
 class TestHeartbeatInstructions:
     def test_read_none_when_no_file(self, store):
         assert store.read_instructions() is None
@@ -116,6 +118,7 @@ class TestHeartbeatInstructions:
 
 
 # -- Init / directory creation -----------------------------------------------
+
 
 class TestHeartbeatStoreInit:
     def test_creates_directory(self, heartbeat_dir):

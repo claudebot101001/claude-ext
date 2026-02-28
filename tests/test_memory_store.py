@@ -1,13 +1,11 @@
 """Tests for extensions/memory/store.py — MemoryStore."""
 
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import pytest
 
-from extensions.memory.store import MemoryStore, _MAX_SEARCH_RESULTS
+from extensions.memory.store import _MAX_SEARCH_RESULTS, MemoryStore
 
 
 @pytest.fixture
@@ -21,6 +19,7 @@ def store(memory_dir):
 
 
 # -- Basics -----------------------------------------------------------------
+
 
 class TestMemoryStoreBasics:
     def test_write_and_read(self, store):
@@ -77,6 +76,7 @@ class TestMemoryStoreBasics:
 
 # -- Path Safety ------------------------------------------------------------
 
+
 class TestMemoryStorePathSafety:
     def test_reject_empty_path(self, store):
         with pytest.raises(ValueError, match="Empty path"):
@@ -95,11 +95,11 @@ class TestMemoryStorePathSafety:
             store.read("topics/../../etc/passwd.md")
 
     def test_reject_non_md_extension(self, store):
-        with pytest.raises(ValueError, match="Only .md"):
+        with pytest.raises(ValueError, match=r"Only \.md"):
             store.read("file.txt")
 
     def test_reject_no_extension(self, store):
-        with pytest.raises(ValueError, match="Only .md"):
+        with pytest.raises(ValueError, match=r"Only \.md"):
             store.read("README")
 
     def test_reject_lock_file(self, store):
@@ -123,11 +123,12 @@ class TestMemoryStorePathSafety:
         # Create a symlink pointing outside
         link_path = memory_dir / "evil.md"
         link_path.symlink_to("/tmp/evil_target.md")
-        with pytest.raises(ValueError, match="escapes|Symlink"):
+        with pytest.raises(ValueError, match=r"escapes|Symlink"):
             store.read("evil.md")
 
 
 # -- Search -----------------------------------------------------------------
+
 
 class TestMemoryStoreSearch:
     def test_basic_search(self, store):
@@ -179,6 +180,7 @@ class TestMemoryStoreSearch:
 
 # -- List Files -------------------------------------------------------------
 
+
 class TestMemoryStoreList:
     def test_list_all(self, store):
         store.write("MEMORY.md", "index")
@@ -229,6 +231,7 @@ class TestMemoryStoreList:
 
 # -- Directory Creation -----------------------------------------------------
 
+
 class TestMemoryStoreDirectoryCreation:
     def test_creates_memory_dir(self, memory_dir):
         assert not memory_dir.exists()
@@ -246,6 +249,7 @@ class TestMemoryStoreDirectoryCreation:
 
 
 # -- Concurrency ------------------------------------------------------------
+
 
 class TestMemoryStoreConcurrency:
     def test_concurrent_appends_no_data_loss(self, memory_dir):
@@ -289,6 +293,7 @@ class TestMemoryStoreConcurrency:
 
 
 # -- Edge Cases -------------------------------------------------------------
+
 
 class TestMemoryStoreEdgeCases:
     def test_unicode_content(self, store):

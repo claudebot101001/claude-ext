@@ -18,11 +18,11 @@ import shlex
 import shutil
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
-from typing import Awaitable, Callable
 
 log = logging.getLogger(__name__)
 
@@ -31,7 +31,8 @@ log = logging.getLogger(__name__)
 # Data types
 # ---------------------------------------------------------------------------
 
-class SessionStatus(str, Enum):
+
+class SessionStatus(StrEnum):
     IDLE = "idle"
     BUSY = "busy"
     DEAD = "dead"
@@ -59,7 +60,7 @@ class Session:
     def __post_init__(self):
         if not self.tmux_session:
             self.tmux_session = f"cc-{self.id}"
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         if not self.created_at:
             self.created_at = now
         if not self.last_active_at:
@@ -74,9 +75,10 @@ DeliveryCallback = Callable[[str, str, dict], Awaitable[None]]
 # SessionManager
 # ---------------------------------------------------------------------------
 
+
 class SessionManager:
     STREAM_POLL_INTERVAL = 0.3  # seconds between stream.jsonl reads
-    HEARTBEAT_INTERVAL = 30.0   # seconds between "still working" notifications
+    HEARTBEAT_INTERVAL = 30.0  # seconds between "still working" notifications
 
     def __init__(
         self,
@@ -110,8 +112,7 @@ class SessionManager:
                 asyncio.create_task(cb(*args))
             self._pending_deliveries.clear()
 
-    def register_mcp_server(self, name: str, config: dict,
-                            tools: list[dict] | None = None) -> None:
+    def register_mcp_server(self, name: str, config: dict, tools: list[dict] | None = None) -> None:
         """Register an MCP server that will be available to all sessions.
 
         Config follows Claude Code MCP format::
@@ -128,15 +129,13 @@ class SessionManager:
         self._mcp_servers[name] = config
         if tools is not None:
             self._mcp_tool_meta[name] = [
-                {"name": t["name"], "description": t.get("description", "")}
-                for t in tools
+                {"name": t["name"], "description": t.get("description", "")} for t in tools
             ]
         log.info("Registered MCP server: %s (%d tools)", name, len(tools or []))
 
     def list_mcp_tools(self) -> dict[str, list[dict]]:
         """Return registered MCP servers and their declared tool metadata."""
-        return {name: list(self._mcp_tool_meta.get(name, []))
-                for name in self._mcp_servers}
+        return {name: list(self._mcp_tool_meta.get(name, [])) for name in self._mcp_servers}
 
     def add_system_prompt(self, text: str) -> None:
         """Append a fragment to the system prompt for all sessions.
@@ -181,9 +180,7 @@ class SessionManager:
         for i in range(1, self.max_sessions_per_user + 1):
             if i not in used:
                 return i
-        raise RuntimeError(
-            f"Session limit ({self.max_sessions_per_user}) reached"
-        )
+        raise RuntimeError(f"Session limit ({self.max_sessions_per_user}) reached")
 
     def get_session_by_slot(self, user_id: str, slot: int) -> Session | None:
         for s in self.sessions.values():
@@ -202,9 +199,7 @@ class SessionManager:
     ) -> Session:
         user_sessions = self.get_sessions_for_user(user_id)
         if len(user_sessions) >= self.max_sessions_per_user:
-            raise RuntimeError(
-                f"Session limit ({self.max_sessions_per_user}) reached"
-            )
+            raise RuntimeError(f"Session limit ({self.max_sessions_per_user}) reached")
 
         sid = str(uuid.uuid4())
         claude_sid = str(uuid.uuid4())
@@ -232,8 +227,9 @@ class SessionManager:
         self._setup_queue(sid)
         self._save_state(session)
         if self._events:
-            self._events.log("session.created", sid,
-                             {"slot": slot, "name": session.name, "user_id": user_id})
+            self._events.log(
+                "session.created", sid, {"slot": slot, "name": session.name, "user_id": user_id}
+            )
         log.info("Created session #%d '%s' (%s)", slot, session.name, sid[:8])
         return session
 
@@ -244,8 +240,7 @@ class SessionManager:
 
         if session.status == SessionStatus.DEAD:
             raise RuntimeError(
-                f"Session #{session.slot} '{session.name}' is dead. "
-                f"Delete it and create a new one."
+                f"Session #{session.slot} '{session.name}' is dead. Delete it and create a new one."
             )
 
         # Reset stopped sessions on new input
@@ -337,8 +332,9 @@ class SessionManager:
             shutil.rmtree(sdir)
 
         if self._events:
-            self._events.log("session.destroyed", session_id,
-                             {"slot": session.slot, "name": session.name})
+            self._events.log(
+                "session.destroyed", session_id, {"slot": session.slot, "name": session.name}
+            )
         log.info("Destroyed session #%d '%s' (%s)", session.slot, session.name, session_id[:8])
 
     async def shutdown(self) -> None:
@@ -378,9 +374,13 @@ class SessionManager:
                     self._save_state(session)
                     self.sessions[session.id] = session
                     self._setup_queue(session.id)
-                    self._pending_deliveries.append((
-                        session.id, result_text, metadata,
-                    ))
+                    self._pending_deliveries.append(
+                        (
+                            session.id,
+                            result_text,
+                            metadata,
+                        )
+                    )
                     log.info("Recovered completed session %s", session.name)
 
                 elif tmux_alive and not exitcode_exists:
@@ -461,8 +461,14 @@ class SessionManager:
         sdir = self.session_dir(session_id)
 
         # Clean previous artifacts
-        for fname in ("stream.jsonl", "output.json", "output.json.tmp",
-                       "stderr.log", "exitcode", "claude_cmd.sh"):
+        for fname in (
+            "stream.jsonl",
+            "output.json",
+            "output.json.tmp",
+            "stderr.log",
+            "exitcode",
+            "claude_cmd.sh",
+        ):
             (sdir / fname).unlink(missing_ok=True)
 
         # Write prompt file
@@ -472,11 +478,10 @@ class SessionManager:
         session.prompt_count += 1
         session.last_prompt = prompt[:200]
         session.status = SessionStatus.BUSY
-        session.last_active_at = datetime.now(timezone.utc).isoformat()
+        session.last_active_at = datetime.now(UTC).isoformat()
 
         if self._events:
-            self._events.log("session.prompt", session_id,
-                             {"prompt_count": session.prompt_count})
+            self._events.log("session.prompt", session_id, {"prompt_count": session.prompt_count})
 
         # Generate and write run scripts (inner + outer)
         claude_cmd, run_sh = self._generate_run_scripts(session, sdir, is_first)
@@ -491,7 +496,7 @@ class SessionManager:
         )
 
         # Stream completion (delivers events in real time)
-        result_text, metadata = await self._stream_completion(session_id, sdir)
+        _result_text, metadata = await self._stream_completion(session_id, sdir)
 
         # If session was stopped/destroyed while we were streaming
         if session.status in (SessionStatus.STOPPED, SessionStatus.DEAD):
@@ -513,10 +518,14 @@ class SessionManager:
         self._save_state(session)
 
         if self._events:
-            self._events.log("session.completed", session_id, {
-                "cost_usd": metadata.get("total_cost_usd"),
-                "turns": metadata.get("num_turns"),
-            })
+            self._events.log(
+                "session.completed",
+                session_id,
+                {
+                    "cost_usd": metadata.get("total_cost_usd"),
+                    "turns": metadata.get("num_turns"),
+                },
+            )
 
         # Final delivery — include full result text as fallback in case
         # stream text events were lost (e.g. Telegram send failure during
@@ -551,7 +560,9 @@ class SessionManager:
             servers[name] = entry
         return {"mcpServers": servers}
 
-    def _generate_run_scripts(self, session: Session, sdir: Path, is_first: bool) -> tuple[str, str]:
+    def _generate_run_scripts(
+        self, session: Session, sdir: Path, is_first: bool
+    ) -> tuple[str, str]:
         """Generate the inner claude_cmd.sh and outer run.sh (PTY wrapper).
 
         Returns (claude_cmd_content, run_sh_content).
@@ -563,8 +574,7 @@ class SessionManager:
         claude_cmd_path = shlex.quote(str(sdir / "claude_cmd.sh"))
         work_dir = shlex.quote(session.working_dir)
 
-        cmd_parts = ["claude", "-p", '"$PROMPT"',
-                      "--output-format", "stream-json", "--verbose"]
+        cmd_parts = ["claude", "-p", '"$PROMPT"', "--output-format", "stream-json", "--verbose"]
 
         model = self.engine_config.get("model")
         if model:
@@ -577,7 +587,7 @@ class SessionManager:
             cmd_parts.extend(["--permission-mode", perm])
         tools = self.engine_config.get("allowed_tools")
         if tools:
-            cmd_parts.extend(["--allowedTools"] + list(tools))
+            cmd_parts.extend(["--allowedTools", *list(tools)])
 
         # Merge config-level and extension-registered disallowed tools
         disallowed = list(self.engine_config.get("disallowed_tools") or [])
@@ -585,7 +595,7 @@ class SessionManager:
             if t not in disallowed:
                 disallowed.append(t)
         if disallowed:
-            cmd_parts.extend(["--disallowedTools"] + disallowed)
+            cmd_parts.extend(["--disallowedTools", *disallowed])
 
         if is_first:
             cmd_parts.extend(["--session-id", session.claude_session_id])
@@ -604,7 +614,8 @@ class SessionManager:
         if self._system_prompt_parts:
             sys_prompt_path = sdir / "system_prompt.txt"
             sys_prompt_path.write_text(
-                "\n\n".join(self._system_prompt_parts), encoding="utf-8",
+                "\n\n".join(self._system_prompt_parts),
+                encoding="utf-8",
             )
             sys_prompt_file = shlex.quote(str(sys_prompt_path))
 
@@ -613,10 +624,10 @@ class SessionManager:
         # Build append-system-prompt via file read (same safe pattern as PROMPT)
         sys_prompt_line = ""
         if sys_prompt_file:
-            sys_prompt_line = f'SYS_PROMPT=$(cat {sys_prompt_file})\n'
+            sys_prompt_line = f"SYS_PROMPT=$(cat {sys_prompt_file})\n"
             cmd_str += ' --append-system-prompt "$SYS_PROMPT"'
 
-        unset_vars = " ".join(["CLAUDECODE"] + self._env_unset)
+        unset_vars = " ".join(["CLAUDECODE", *self._env_unset])
         claude_cmd = (
             "#!/bin/bash\n"
             f"unset {unset_vars}\n"
@@ -628,7 +639,7 @@ class SessionManager:
 
         run_sh = (
             "#!/bin/bash\n"
-            f"script -qfec \"bash {claude_cmd_path}\" {stream_file}\n"
+            f'script -qfec "bash {claude_cmd_path}" {stream_file}\n'
             f"echo $? > {exitcode_file}\n"
         )
 
@@ -669,20 +680,24 @@ class SessionManager:
                 if btype == "text":
                     text = block.get("text", "")
                     if text:
-                        deliveries.append((
-                            text,
-                            {"is_stream": True, "stream_type": "text"},
-                        ))
+                        deliveries.append(
+                            (
+                                text,
+                                {"is_stream": True, "stream_type": "text"},
+                            )
+                        )
                 elif btype == "tool_use":
-                    deliveries.append((
-                        "",
-                        {
-                            "is_stream": True,
-                            "stream_type": "tool_use",
-                            "tool_name": block.get("name", ""),
-                            "tool_input": block.get("input", {}),
-                        },
-                    ))
+                    deliveries.append(
+                        (
+                            "",
+                            {
+                                "is_stream": True,
+                                "stream_type": "tool_use",
+                                "tool_name": block.get("name", ""),
+                                "tool_input": block.get("input", {}),
+                            },
+                        )
+                    )
                 # thinking, tool_result in assistant blocks — skip
             if deliveries:
                 # Return only the first delivery; caller will get others
@@ -711,7 +726,10 @@ class SessionManager:
     # -- streaming completion -----------------------------------------------
 
     async def _stream_completion(
-        self, session_id: str, sdir: Path, timeout: float = 600,
+        self,
+        session_id: str,
+        sdir: Path,
+        timeout: float = 600,
     ) -> tuple[str, dict]:
         """Read stream.jsonl incrementally, deliver events in real time.
 
@@ -734,7 +752,7 @@ class SessionManager:
             # Incremental read of stream.jsonl
             if stream_path.exists():
                 try:
-                    with open(stream_path, "r", encoding="utf-8", errors="replace") as f:
+                    with open(stream_path, encoding="utf-8", errors="replace") as f:
                         f.seek(file_pos)
                         new_data = f.read()
                         file_pos = f.tell()
@@ -761,7 +779,7 @@ class SessionManager:
                 # Final read to catch any remaining data
                 if stream_path.exists():
                     try:
-                        with open(stream_path, "r", encoding="utf-8", errors="replace") as f:
+                        with open(stream_path, encoding="utf-8", errors="replace") as f:
                             f.seek(file_pos)
                             remaining = f.read()
                     except OSError:
@@ -792,7 +810,8 @@ class SessionManager:
                 session = self.sessions.get(session_id)
                 if session and session.status == SessionStatus.BUSY and self._delivery_cbs:
                     await self.deliver(
-                        session_id, "",
+                        session_id,
+                        "",
                         {"is_heartbeat": True, "elapsed_s": int(elapsed)},
                     )
 
@@ -803,8 +822,9 @@ class SessionManager:
                 session.error = "tmux session died unexpectedly"
                 self._save_state(session)
                 if self._events:
-                    self._events.log("session.dead", session_id,
-                                     {"error": "tmux session died unexpectedly"})
+                    self._events.log(
+                        "session.dead", session_id, {"error": "tmux session died unexpectedly"}
+                    )
                 return "[Error] tmux session died unexpectedly.", {"is_error": True}
 
     async def _resume_monitor(self, session_id: str, sdir: Path) -> None:
@@ -907,7 +927,13 @@ class SessionManager:
         # Clean up any residual session with the same name (#8)
         await self._tmux_kill_session(name)
         proc = await asyncio.create_subprocess_exec(
-            "tmux", "new-session", "-d", "-s", name, "-c", cwd,
+            "tmux",
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-c",
+            cwd,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -918,7 +944,12 @@ class SessionManager:
 
     async def _tmux_send_keys(self, session_name: str, command: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "tmux", "send-keys", "-t", session_name, command, "Enter",
+            "tmux",
+            "send-keys",
+            "-t",
+            session_name,
+            command,
+            "Enter",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -926,7 +957,10 @@ class SessionManager:
 
     async def _tmux_has_session(self, name: str) -> bool:
         proc = await asyncio.create_subprocess_exec(
-            "tmux", "has-session", "-t", name,
+            "tmux",
+            "has-session",
+            "-t",
+            name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -935,7 +969,10 @@ class SessionManager:
 
     async def _tmux_kill_session(self, name: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "tmux", "kill-session", "-t", name,
+            "tmux",
+            "kill-session",
+            "-t",
+            name,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
@@ -943,7 +980,11 @@ class SessionManager:
 
     async def _tmux_send_ctrl_c(self, name: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "tmux", "send-keys", "-t", name, "C-c",
+            "tmux",
+            "send-keys",
+            "-t",
+            name,
+            "C-c",
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )

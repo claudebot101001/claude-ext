@@ -17,9 +17,9 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class PendingEntry:
-    key: str                  # 16-char hex identifier
-    session_id: str           # associated session
-    data: dict                # extension-defined payload (question, options, etc.)
+    key: str  # 16-char hex identifier
+    session_id: str  # associated session
+    data: dict  # extension-defined payload (question, options, etc.)
     future: asyncio.Future = field(repr=False)
     timeout: float = 300.0
 
@@ -82,7 +82,7 @@ class PendingStore:
     def cancel_for_session(self, session_id: str) -> int:
         """Cancel all pending entries for a session.  Returns count cancelled."""
         cancelled = 0
-        for key, entry in list(self._entries.items()):
+        for _key, entry in list(self._entries.items()):
             if entry.session_id == session_id and not entry.future.done():
                 entry.future.cancel()
                 cancelled += 1
