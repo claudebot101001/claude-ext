@@ -11,7 +11,39 @@
 - **store.py**: PBKDF2-HMAC-SHA256 (600K iterations) 密钥派生 + Fernet 加解密 + flock 文件锁 + 原子写入 + 0600 权限
 - **mcp_server.py**: `vault_store` / `vault_list` / `vault_retrieve` / `vault_delete` 四个 MCP 工具，通过 bridge RPC 调用主进程 VaultStore
 - **extension.py**: 注册 `engine.services["vault"]` 供其他扩展程序内调用 + 注册 MCP server + bridge handler + 系统提示约束（不泄露密文）
-- **安全设计**: passphrase 从环境变量 `CLAUDE_EXT_VAULT_PASSPHRASE` 读取，不进配置文件。MCP server 进程不持有 passphrase，所有加解密通过 bridge RPC 在主进程完成
+- **安全设计**: passphrase 从环境变量 `CLAUDE_EXT_VAULT_PASSPHRASE` 读取，不进配置文件。MCP server 进程不持有 passphrase，所有加解密通过 bridge RPC 在主进程完成。每次 bridge 调用携带 `session_id`，handler 记录审计日志
+- **性能基线** (实测): raw socket echo 0.06ms, vault_retrieve 0.24ms, vault_store 0.57ms。瓶颈在 Fernet crypto + 磁盘 I/O，socket 开销可忽略
+
+#### Vault Key 命名规范
+
+所有 vault key 必须使用 `category/service/name` 的命名空间格式：
+
+```
+wallet/eth/privkey          # 钱包私钥
+wallet/eth/0xABC.../privkey # 多钱包时按地址区分
+email/smtp/password         # SMTP 密码
+email/imap/password         # IMAP 密码
+api/github/token            # GitHub API token
+api/openai/key              # OpenAI API key
+```
+
+**为什么现在就定**：Phase 4 (Wallet) 需要添加 `internal_only` 前缀策略（如 `wallet/*` 前缀的 key 只能由 wallet bridge handler 内部读取，不返回给 LLM）。如果现在不按命名空间存储，到时候就需要数据迁移。按前缀匹配的访问控制不需要额外的 tag 字段，key 本身就携带了分类信息。
+
+#### 未来访问控制方向 (Phase 4+)
+
+当前 vault 是全局可读的（受信任 Agent 场景）。Phase 4 引入 wallet 后，bridge handler 层面会添加前缀策略：
+
+```python
+# Phase 4 的 bridge handler 增强（方向，非最终设计）
+INTERNAL_ONLY_PREFIXES = ["wallet/"]  # 这些前缀的 key 只能由 bridge handler 内部读取
+
+if method == "vault_retrieve":
+    key = params["key"]
+    if any(key.startswith(p) for p in INTERNAL_ONLY_PREFIXES):
+        return {"error": "This key is internal-only. Use the dedicated wallet tools."}
+```
+
+这个改动仅涉及 vault extension.py 的 `_bridge_handler` 方法（~5 行），不影响 store.py、MCP server 或其他扩展。session_id 已在 bridge 协议中透传，需要时可进一步按 session context 做细粒度控制。
 
 ---
 

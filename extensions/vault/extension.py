@@ -59,10 +59,13 @@ class ExtensionImpl(Extension):
         # Register bridge handler for MCP → main process calls
         self.engine.bridge.add_handler(self._bridge_handler)
 
-        # System prompt: instruct Claude to never leak secrets
+        # System prompt: instruct Claude on vault usage and key naming
         self.sm.add_system_prompt(
             "You have access to an encrypted credential vault via MCP tools "
             "(vault_store, vault_list, vault_retrieve, vault_delete). "
+            "Key naming convention: use 'category/service/name' namespaced "
+            "format, e.g. 'email/smtp/password', 'wallet/eth/privkey', "
+            "'api/github/token'. "
             "CRITICAL: Never echo or display secret values to the user. "
             "When you retrieve a secret, use it directly in subsequent tool "
             "calls (e.g. as an API key in a curl command, as a password in "
@@ -80,35 +83,40 @@ class ExtensionImpl(Extension):
         log.info("Vault extension stopped.")
 
     async def _bridge_handler(self, method: str, params: dict) -> dict | None:
-        """Handle vault bridge RPCs from MCP server processes."""
+        """Handle vault bridge RPCs from MCP server processes.
+
+        Every call includes ``session_id`` identifying the requesting
+        session.  Currently logged for audit; Phase 4+ can use it for
+        prefix-based access control.
+        """
         if not method.startswith("vault_"):
             return None  # not ours
 
         if self._vault is None:
             return {"error": "Vault not initialized"}
 
+        session_id = params.get("session_id", "unknown")
+
         try:
             if method == "vault_store":
-                self._vault.put(
-                    key=params["key"],
-                    value=params["value"],
-                    tags=params.get("tags"),
-                )
+                key = params["key"]
+                log.info("vault_store key='%s' by session %s", key, session_id[:8])
+                self._vault.put(key, params["value"], params.get("tags"))
                 return {"ok": True}
 
             elif method == "vault_list":
-                keys = self._vault.list_keys(tag=params.get("tag"))
-                return {"keys": keys}
+                return {"keys": self._vault.list_keys(tag=params.get("tag"))}
 
             elif method == "vault_retrieve":
-                value = self._vault.get(params["key"])
-                if value is None:
-                    return {"value": None}
+                key = params["key"]
+                log.info("vault_retrieve key='%s' by session %s", key, session_id[:8])
+                value = self._vault.get(key)
                 return {"value": value}
 
             elif method == "vault_delete":
-                deleted = self._vault.delete(params["key"])
-                return {"deleted": deleted}
+                key = params["key"]
+                log.info("vault_delete key='%s' by session %s", key, session_id[:8])
+                return {"deleted": self._vault.delete(key)}
 
             else:
                 return {"error": f"Unknown vault method: {method}"}

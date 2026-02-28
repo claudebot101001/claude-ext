@@ -32,7 +32,7 @@ class VaultMCPServer(MCPServerBase):
                 "properties": {
                     "key": {
                         "type": "string",
-                        "description": "Unique identifier for the secret (e.g. 'smtp_password', 'github_token')",
+                        "description": "Namespaced key for the secret. Use 'category/service/name' format, e.g. 'email/smtp/password', 'wallet/eth/privkey', 'api/github/token'",
                     },
                     "value": {
                         "type": "string",
@@ -107,9 +107,14 @@ class VaultMCPServer(MCPServerBase):
         }
 
     def _bridge_call(self, method: str, params: dict) -> dict:
-        """Call the main process via bridge RPC."""
+        """Call the main process via bridge RPC.
+
+        Automatically injects session_id so the handler can identify
+        the calling session (needed for future access control).
+        """
         if not self.bridge:
             raise RuntimeError("Bridge not available. Vault cannot function without it.")
+        params = {**params, "session_id": self.session_id}
         timeout = float(os.environ.get("VAULT_BRIDGE_TIMEOUT", "30"))
         return self.bridge.call(method, params, timeout=timeout)
 

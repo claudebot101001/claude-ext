@@ -15,8 +15,10 @@ class FakeBridge:
 
     def __init__(self, store):
         self.store = store
+        self.last_params = {}  # capture for inspection
 
     def call(self, method, params, timeout=30):
+        self.last_params = params
         if method == "vault_store":
             self.store.put(params["key"], params["value"], params.get("tags"))
             return {"ok": True}
@@ -106,6 +108,24 @@ class TestVaultMCPHandlers:
     def test_delete_missing_key(self, mcp):
         result = mcp.handlers["vault_delete"]({"key": ""})
         assert "Error" in result
+
+
+class TestVaultMCPSessionId:
+    def test_session_id_passed_in_bridge_calls(self, mcp):
+        """Verify MCP server injects session_id into every bridge call."""
+        # MCP server reads session_id from CLAUDE_EXT_SESSION_ID env var.
+        # In tests it's empty string; verify it's present in params.
+        mcp.handlers["vault_store"]({"key": "k", "value": "v"})
+        assert "session_id" in mcp._bridge.last_params
+
+        mcp.handlers["vault_retrieve"]({"key": "k"})
+        assert "session_id" in mcp._bridge.last_params
+
+        mcp.handlers["vault_list"]({})
+        assert "session_id" in mcp._bridge.last_params
+
+        mcp.handlers["vault_delete"]({"key": "k"})
+        assert "session_id" in mcp._bridge.last_params
 
 
 class TestVaultMCPNoBridge:
