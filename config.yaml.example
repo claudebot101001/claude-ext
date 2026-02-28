@@ -26,6 +26,7 @@ sessions:
 # Order matters: dependencies must come before dependents.
 enabled:
   # - vault                        # Encrypted credential vault (required by wallet, email)
+  # - memory                       # Persistent cross-session knowledge store (load early)
   - telegram
   # - ask_user                     # Uncomment to let Claude ask the user questions mid-session
   # - cron                         # Uncomment to enable scheduled tasks
@@ -47,6 +48,10 @@ extensions:
   vault:
     # Passphrase is read from CLAUDE_EXT_VAULT_PASSPHRASE environment variable.
     # Do NOT put the passphrase in this file.
+    {}
+
+  memory:
+    # No required configuration. Memory files stored in {state_dir}/memory/
     {}
 
   cron:
