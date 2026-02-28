@@ -85,12 +85,13 @@ Phase 3 前的架构加固。三项改进均为轻量级 core 增强。
 `extensions/heartbeat/` — 双通道调度 + 三层执行的自主周期 Agent。
 
 - **store.py**: HeartbeatState（8 字段）+ HeartbeatStore — JSON + flock 状态持久化 + HEARTBEAT.md 指令文件 I/O + 原子写入 + 损坏文件回退
-- **mcp_server.py**: `heartbeat_get_instructions` / `heartbeat_set_instructions` / `heartbeat_get_status` / `heartbeat_pause` / `heartbeat_resume` / `heartbeat_trigger` 六个 MCP 工具。前五个直接文件 I/O（同 memory 模式），`heartbeat_trigger` 通过 bridge RPC 调用主进程 `trigger()` 方法
+- **mcp_server.py**: `heartbeat_get_instructions` / `heartbeat_set_instructions` / `heartbeat_get_status` / `heartbeat_pause` / `heartbeat_resume` / `heartbeat_trigger` / `heartbeat_get_trigger_command` 七个 MCP 工具。前五个直接文件 I/O（同 memory 模式），`heartbeat_trigger` 通过 bridge RPC 调用主进程 `trigger()` 方法，`heartbeat_get_trigger_command` 返回外部脚本可用的 shell 触发命令
+- **trigger_cli.py**: 纯 stdlib 独立 CLI，外部进程通过 bridge.sock 触发心跳。Agent 通过 `heartbeat_get_trigger_command` 获取完整命令（`shlex.quote()` 安全引用），嵌入后台任务或监控脚本
 - **extension.py**: 双通道调度器（Timer + asyncio.Queue Trigger）+ 三层执行（Tier 0 门控 → Tier 1 预检 → Tier 2 LLM 决策 → Tier 3 完整 session）+ 利用率感知成本控制 + 自适应退避 + delivery callback 自动清理 + 恢复检查 + bridge handler（`heartbeat_trigger` RPC）
 - **与 cron 的区别**: cron 是静态 prompt + 固定时间表；heartbeat 是动态读取指令 + Agent 自主决策是否行动 + 连续无事时自动退避
 - **成本控制五道安全阀**: 日运行上限（默认 48）、利用率节流（80%: 仅 immediate 触发通过）、利用率暂停（95%: 全部暂停）、活跃时段窗口、自适应退避（1x→2x→4x→8x）
 - **静默抑制**: Tier 2 使用 `engine.ask()` 轻量子进程，"NOTHING" 完全静默无通知。仅 Tier 3 创建的 session 有 `chat_id`，前端才投递
-- **事件触发**: 两条路径——① 其他扩展通过 `engine.services["heartbeat"].trigger(source, event_type, urgency, payload)` 提交事件（Python API）；② Agent 在 session 中通过 MCP `heartbeat_trigger` 工具提交事件（bridge RPC → 主进程 `trigger()`）。`immediate` 立即唤醒调度器；`normal` 积累到下次定时器到期。sync 方法，单事件循环内安全
+- **事件触发**: 三条路径——① 其他扩展通过 `engine.services["heartbeat"].trigger(source, event_type, urgency, payload)` 提交事件（Python API）；② Agent 在 session 中通过 MCP `heartbeat_trigger` 工具提交事件（bridge RPC → 主进程 `trigger()`）；③ 外部进程通过 `trigger_cli.py` 连接 bridge.sock 触发（session 外事件唤醒）。`immediate` 立即唤醒调度器；`normal` 积累到下次定时器到期。sync 方法，单事件循环内安全
 - **`notify_context` 路由**: 配置中的 `notify_context` 原样透传到 `session.context`，heartbeat 不解读内容。前端扩展各自从 context 取所需字段（如 Telegram 取 `chat_id`、Discord 取 `channel_id`）。零前端耦合
 
 ---

@@ -5,7 +5,9 @@ Spawned by Claude Code per session.  Inherits MCPServerBase for protocol
 handling; uses direct file I/O via HEARTBEAT_DIR environment variable.
 """
 
+import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -102,6 +104,34 @@ class HeartbeatMCPServer(MCPServerBase):
                 "required": ["event_type"],
             },
         },
+        {
+            "name": "heartbeat_get_trigger_command",
+            "description": (
+                "Get a shell command that triggers the heartbeat from any external process. "
+                "Use this to set up post-completion hooks or monitoring scripts that wake "
+                "the heartbeat when a condition is met, even after the current session ends. "
+                "Example: chain with 'rsync ... && <returned_command>' and run in background."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string",
+                        "description": "Event category (e.g. 'transfer_done', 'cpi_released')",
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["immediate", "normal"],
+                        "description": "immediate: wake heartbeat now. normal: process on next timer.",
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "Optional event data to include",
+                    },
+                },
+                "required": ["event_type"],
+            },
+        },
     ]
 
     def __init__(self):
@@ -113,6 +143,7 @@ class HeartbeatMCPServer(MCPServerBase):
             "heartbeat_pause": self._handle_pause,
             "heartbeat_resume": self._handle_resume,
             "heartbeat_trigger": self._handle_trigger,
+            "heartbeat_get_trigger_command": self._handle_get_trigger_command,
         }
 
     def _get_store(self) -> HeartbeatStore:
@@ -188,6 +219,47 @@ class HeartbeatMCPServer(MCPServerBase):
         if "error" in result:
             return f"Error: {result['error']}"
         return f"Triggered heartbeat ({urgency}): {event_type}"
+
+    def _handle_get_trigger_command(self, args: dict) -> str:
+        socket_path = os.environ.get("CLAUDE_EXT_BRIDGE_SOCKET", "")
+        if not socket_path:
+            return "Error: bridge socket path not available"
+
+        event_type = args.get("event_type", "")
+        if not event_type:
+            return "Error: event_type is required"
+
+        urgency = args.get("urgency", "immediate")
+        payload = args.get("payload")
+
+        trigger_script = str(Path(__file__).resolve().parent / "trigger_cli.py")
+
+        parts = [
+            f"python3 {shlex.quote(trigger_script)}",
+            f"--socket {shlex.quote(socket_path)}",
+            shlex.quote(event_type),
+        ]
+        if urgency != "immediate":
+            parts.append(f"--urgency {shlex.quote(urgency)}")
+        if payload:
+            parts.append(f"--payload {shlex.quote(json.dumps(payload))}")
+
+        command = " ".join(parts)
+
+        return (
+            f"Trigger command:\n  {command}\n\n"
+            f"Usage examples:\n\n"
+            f"  # Chain after a long-running command:\n"
+            f"  nohup bash -c '<your_command> && {command}' &\n\n"
+            f"  # In a monitoring script:\n"
+            f"  while true; do\n"
+            f"    if <check_condition>; then\n"
+            f"      {command}\n"
+            f"      break\n"
+            f"    fi\n"
+            f"    sleep 10\n"
+            f"  done"
+        )
 
 
 if __name__ == "__main__":

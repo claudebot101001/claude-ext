@@ -51,7 +51,9 @@ This file defines what the autonomous heartbeat agent checks periodically.
 _SYSTEM_PROMPT = """\
 You have an autonomous heartbeat that periodically checks standing tasks. \
 Manage via MCP: heartbeat_get/set_instructions, heartbeat_get_status, heartbeat_pause/resume. \
-Use heartbeat_trigger to submit events that wake the heartbeat immediately. \
+Use heartbeat_trigger to submit events that wake the heartbeat from within a session. \
+Use heartbeat_get_trigger_command to get a shell command for triggering from external scripts \
+(e.g., chain with a long-running command: 'rsync ... && <trigger_command>'). \
 When asked to monitor something periodically, consider adding to heartbeat instructions."""
 
 _TIER2_PROMPT_TEMPLATE = """\
@@ -185,6 +187,7 @@ class ExtensionImpl(Extension):
             {"name": "heartbeat_pause", "description": "Pause autonomous heartbeat"},
             {"name": "heartbeat_resume", "description": "Resume autonomous heartbeat"},
             {"name": "heartbeat_trigger", "description": "Submit event to trigger heartbeat check"},
+            {"name": "heartbeat_get_trigger_command", "description": "Get shell command for external heartbeat trigger"},
         ])
 
         # 5. Bridge handler (MCP → trigger)

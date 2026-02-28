@@ -37,7 +37,8 @@ claude-ext/
 │   ├── heartbeat/
 │   │   ├── extension.py           # 自主心跳（双通道调度 + 三层执行 + 利用率感知）
 │   │   ├── store.py               # HeartbeatStore: 状态 + 指令文件 I/O + flock
-│   │   └── mcp_server.py          # MCP stdio server（heartbeat 六工具）
+│   │   ├── mcp_server.py          # MCP stdio server（heartbeat 七工具）
+│   │   └── trigger_cli.py         # 独立 CLI：外部进程通过 bridge.sock 触发心跳
 │   └── ask_user/
 │       ├── extension.py           # 交互式提问扩展（bridge + PendingStore）
 │       └── mcp_server.py          # MCP stdio server（ask_user 工具）
@@ -756,7 +757,7 @@ if hb:
 | 7-9 | 4x | 2 小时 |
 | 10+ | 8x | 4 小时 |
 
-**MCP 工具**（所有 session 可访问，五个直接文件 I/O + `heartbeat_trigger` 走 bridge RPC）：
+**MCP 工具**（所有 session 可访问，五个直接文件 I/O + `heartbeat_trigger` 走 bridge RPC + `heartbeat_get_trigger_command` 返回命令文本）：
 
 | 工具 | 功能 |
 |------|------|
@@ -766,6 +767,9 @@ if hb:
 | `heartbeat_pause` | 暂停心跳 (`enabled=False`) |
 | `heartbeat_resume` | 恢复心跳 (`enabled=True`) |
 | `heartbeat_trigger` | 提交事件触发心跳检查（`immediate` 立即唤醒，`normal` 积累到下次定时器） |
+| `heartbeat_get_trigger_command` | 返回可在外部脚本中使用的 shell 触发命令（含 trigger_cli.py 路径和 bridge.sock 路径，所有参数经 `shlex.quote()` 安全引用） |
+
+**外部触发**：`trigger_cli.py` 是纯 stdlib 的独立 CLI 脚本（checked into repo），任何外部进程（nohup 后台任务、监控脚本、CI pipeline）均可通过它连接 bridge.sock 触发心跳。Agent 通过 `heartbeat_get_trigger_command` MCP 工具获取当前环境下可直接使用的 shell 命令（含 trigger_cli.py 绝对路径和 bridge.sock 路径，所有参数经 `shlex.quote()` 安全引用，防止路径含空格或特殊字符时命令断裂），嵌入到 `nohup bash -c 'rsync ... && <trigger_command>' &` 等工作流中，实现 session 外事件唤醒。
 
 **HeartbeatState 数据结构**：
 
