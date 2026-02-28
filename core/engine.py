@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from core.bridge import BridgeServer
 from core.pending import PendingStore
@@ -30,6 +31,7 @@ class ClaudeEngine:
         self.session_manager: SessionManager | None = None
         self.bridge: BridgeServer | None = None
         self.pending = PendingStore()
+        self.services: dict[str, Any] = {}
 
     def init_sessions(self, base_dir: Path, max_sessions_per_user: int = 5) -> None:
         """Initialize the tmux-backed session manager."""

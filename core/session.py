@@ -11,6 +11,7 @@ read incrementally and delivered to callbacks in real time.
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import shlex
@@ -624,6 +625,21 @@ class SessionManager:
         # Everything else (user, system, rate_limit_event) — skip
         return None
 
+    @staticmethod
+    def _iter_stream_events(lines):
+        """Yield (text, metadata) for each deliverable stream-json event."""
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            classified = SessionManager._classify_stream_event(event)
+            if classified is not None:
+                yield classified
+
     # -- streaming completion -----------------------------------------------
 
     async def _stream_completion(
@@ -663,26 +679,10 @@ class SessionManager:
                     # Last element is either "" (complete line) or partial
                     line_buffer = lines[-1]
 
-                    for line in lines[:-1]:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            event = json.loads(line)
-                        except (json.JSONDecodeError, ValueError):
-                            continue  # script header or malformed line
-
-                        classified = self._classify_stream_event(event)
-                        if classified is None:
-                            continue
-
-                        text, meta = classified
-                        if meta.get("_is_result"):
-                            meta.pop("_is_result", None)
+                    for text, meta in self._iter_stream_events(lines[:-1]):
+                        if meta.pop("_is_result", False):
                             final_metadata = meta
                             continue
-
-                        # Deliver stream event
                         session = self.sessions.get(session_id)
                         if session and session.status == SessionStatus.BUSY:
                             await self.deliver(session_id, text, meta)
@@ -700,20 +700,8 @@ class SessionManager:
                         remaining = ""
                     tail = (line_buffer + remaining).strip()
                     if tail:
-                        for line in tail.split("\n"):
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                event = json.loads(line)
-                            except (json.JSONDecodeError, ValueError):
-                                continue
-                            classified = self._classify_stream_event(event)
-                            if classified is None:
-                                continue
-                            text, meta = classified
-                            if meta.get("_is_result"):
-                                meta.pop("_is_result", None)
+                        for text, meta in self._iter_stream_events(tail.split("\n")):
+                            if meta.pop("_is_result", False):
                                 final_metadata = meta
                                 continue
                             session = self.sessions.get(session_id)
@@ -778,20 +766,9 @@ class SessionManager:
         final_meta: dict = {}
 
         try:
-            for line in stream_path.read_text(encoding="utf-8", errors="replace").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
-                    continue
-                classified = self._classify_stream_event(event)
-                if classified is None:
-                    continue
-                text, meta = classified
-                if meta.get("_is_result"):
-                    meta.pop("_is_result", None)
+            lines = stream_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            for text, meta in self._iter_stream_events(lines):
+                if meta.pop("_is_result", False):
                     final_meta = meta
                 elif meta.get("stream_type") == "text" and text:
                     text_parts.append(text)
@@ -834,57 +811,24 @@ class SessionManager:
     def _save_state(self, session: Session) -> None:
         sdir = self.session_dir(session.id)
         sdir.mkdir(parents=True, exist_ok=True)
-        state = {
-            "id": session.id,
-            "name": session.name,
-            "slot": session.slot,
-            "user_id": session.user_id,
-            "context": session.context,
-            "working_dir": session.working_dir,
-            "status": session.status.value,
-            "claude_session_id": session.claude_session_id,
-            "tmux_session": session.tmux_session,
-            "created_at": session.created_at,
-            "last_active_at": session.last_active_at,
-            "last_prompt": session.last_prompt,
-            "last_result_metadata": session.last_result_metadata,
-            "prompt_count": session.prompt_count,
-            "error": session.error,
-        }
         tmp = sdir / "state.json.tmp"
-        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        tmp.write_text(json.dumps(dataclasses.asdict(session), indent=2), encoding="utf-8")
         tmp.rename(sdir / "state.json")
 
     def _load_state(self, session_id: str) -> Session | None:
-        sdir = self.session_dir(session_id)
-        state_file = sdir / "state.json"
+        state_file = self.session_dir(session_id) / "state.json"
         if not state_file.exists():
             return None
         try:
             data = json.loads(state_file.read_text(encoding="utf-8"))
-            # Backward compat: old format has chat_id at top level, no context
-            context = data.get("context", {})
-            if not context and "chat_id" in data:
-                context = {"chat_id": data["chat_id"]}
-            # Backward compat: old format has user_id as int
-            user_id = str(data["user_id"])
-            return Session(
-                id=data["id"],
-                name=data["name"],
-                slot=data.get("slot", 0),
-                user_id=user_id,
-                working_dir=data["working_dir"],
-                context=context,
-                status=SessionStatus(data.get("status", "idle")),
-                claude_session_id=data.get("claude_session_id", ""),
-                tmux_session=data.get("tmux_session", f"cc-{data['id']}"),
-                created_at=data.get("created_at", ""),
-                last_active_at=data.get("last_active_at", ""),
-                last_prompt=data.get("last_prompt", ""),
-                last_result_metadata=data.get("last_result_metadata", {}),
-                prompt_count=data.get("prompt_count", 0),
-                error=data.get("error"),
-            )
+            # Backward compat: old format has chat_id at top level
+            if not data.get("context") and "chat_id" in data:
+                data["context"] = {"chat_id": data["chat_id"]}
+            data["user_id"] = str(data["user_id"])
+            data["status"] = SessionStatus(data.get("status", "idle"))
+            data.setdefault("slot", 0)
+            known = {f.name for f in dataclasses.fields(Session)}
+            return Session(**{k: v for k, v in data.items() if k in known})
         except Exception:
             log.exception("Failed to load state for session %s", session_id)
             return None

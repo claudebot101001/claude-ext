@@ -7,8 +7,11 @@
 ```
 claude-ext/
 ├── core/                          # 核心层（稳定，极少修改）
-│   ├── engine.py                  # Claude Code CLI 封装 + SessionManager 入口
+│   ├── engine.py                  # Claude Code CLI 封装 + SessionManager 入口 + services 注册表
 │   ├── extension.py               # 扩展基类（接口契约）
+│   ├── bridge.py                  # Unix socket RPC 桥接（主进程 ↔ MCP 子进程）
+│   ├── mcp_base.py                # MCP stdio server 基类（JSON-RPC 样板）
+│   ├── pending.py                 # 异步请求/响应注册表（register → wait → resolve）
 │   ├── registry.py                # 扩展发现、加载、生命周期
 │   ├── session.py                 # tmux-backed 多会话管理（核心模块）
 │   └── status.py                  # 状态查询（auth + usage API）
@@ -16,11 +19,14 @@ claude-ext/
 │   ├── telegram/
 │   │   ├── extension.py           # Telegram Bot 桥接（多会话）
 │   │   └── requirements.txt       # 该扩展的独立依赖
-│   └── cron/
-│       ├── extension.py           # 定时任务调度器 + MCP 工具注册
-│       ├── mcp_server.py          # MCP stdio server（Claude 可调用的 cron 工具）
-│       ├── store.py               # Job 持久化（JSON + flock）
-│       └── requirements.txt       # croniter
+│   ├── cron/
+│   │   ├── extension.py           # 定时任务调度器 + MCP 工具注册
+│   │   ├── mcp_server.py          # MCP stdio server（Claude 可调用的 cron 工具）
+│   │   ├── store.py               # Job 持久化（JSON + flock）
+│   │   └── requirements.txt       # croniter
+│   └── ask_user/
+│       ├── extension.py           # 交互式提问扩展（bridge + PendingStore）
+│       └── mcp_server.py          # MCP stdio server（ask_user 工具）
 ├── config.yaml                    # 全局配置（引擎参数 + 扩展开关 + 扩展配置）（.gitignore）
 ├── config.yaml.example            # 配置模板（已跟踪）
 ├── main.py                        # 入口（加载配置 → 创建引擎 → 初始化会话 → 注册扩展 → 运行）
@@ -68,7 +74,7 @@ claude-ext/
                    └── claude -p ... --mcp-config mcp_config.json
 ```
 
-**数据流方向是单向的：扩展 → engine/session_manager → tmux → CLI。扩展之间互不通信。**
+**数据流**：主方向为 扩展 → engine/session_manager → tmux → CLI。反向通道：CLI 内的 MCP server → bridge.sock (Unix socket RPC) → 主进程 handler → PendingStore/deliver。扩展之间不直接通信，通过 `engine.services` 共享服务实例。
 
 ---
 
@@ -274,6 +280,8 @@ SessionManager 自动为每个 session 生成 `mcp_config.json`，注入 session
 1. **SessionManager（推荐）**：通过 `engine.session_manager` 访问，tmux-backed，支持多会话、崩溃恢复、异步投递。Telegram 扩展使用此模式。
 2. **`engine.ask()`（轻量）**：直接 subprocess 调用 `claude -p`，同步等待结果。适合不需要持久化/多会话的简单扩展（如 cron、webhook）。
 
+**`engine.services: dict[str, Any]`** — 跨扩展服务注册表。扩展在 `start()` 中注册服务实例，其他扩展通过 `.get()` 查找。`config.yaml` 的 `enabled` 列表顺序即加载/启动顺序，先启动的扩展先注册 service。
+
 ```python
 # SessionManager 模式（Telegram 等需要多会话的扩展）
 session = await engine.session_manager.create_session(name="task1", ...)
@@ -281,7 +289,41 @@ await engine.session_manager.send_prompt(session.id, "fix the bug")
 
 # 轻量模式（简单一次性调用）
 response = await engine.ask(prompt="what is 1+1", cwd="/tmp")
+
+# 跨扩展服务发现
+self.engine.services["vault"] = VaultStore(vault_dir)   # vault 扩展 start() 中注册
+vault = self.engine.services.get("vault")                # crypto 扩展中查找
 ```
+
+### core/bridge.py — Bridge RPC
+
+Unix Domain Socket 桥接，让 MCP 子进程（sync blocking）回调主进程（async）。
+
+- **BridgeServer**：主进程 async 端。`add_handler(handler)` 注册多个 handler，请求依次尝试，首个非 None 响应胜出
+- **BridgeClient**：MCP 子进程 sync blocking 端。`call(method, params, timeout)` 发送请求并阻塞等待响应，支持自动重连
+- **协议**：行分隔 JSON（`{"method": ..., "params": ...}` → `{"result": ...}`），Unix Domain Socket
+- **零核心模块依赖**：仅 stdlib（json, socket, asyncio）
+
+### core/pending.py — PendingStore
+
+通用异步 register → wait → resolve 模式。
+
+- **PendingEntry** 数据结构：`key`（16-char hex）, `session_id`, `data`（扩展自定义 payload）, `future`, `timeout`
+- `register(session_id, data, timeout)` → 创建 entry，返回供 `await wait(key)` 使用
+- `resolve(key, value)` → 交付响应，唤醒 waiter
+- `cancel_for_session(session_id)` → 批量取消（如 session 被 stop/destroy）
+- `get_for_session(session_id)` → 获取某 session 的待处理 entry（前端用于展示 UI）
+- **使用场景**：ask_user（当前）、未来可用于 email_wait、approval_gate 等
+
+### core/mcp_base.py — MCPServerBase
+
+MCP stdio JSON-RPC 协议样板代码，扩展的 MCP server 只需继承并定义 tools + handlers。
+
+- 通过环境变量获取 session 上下文：`CLAUDE_EXT_SESSION_ID`、`CLAUDE_EXT_STATE_DIR`
+- `session_context()` 读取当前 session 的 `state.json`（获取 user_id、context 等）
+- 惰性 `bridge` 属性：仅在 `CLAUDE_EXT_BRIDGE_SOCKET` 存在时初始化 BridgeClient
+- 子类只需设置 `name`、`tools`（schema list）和 `self.handlers`（name → callable 映射）
+- 零外部依赖（纯 stdlib）
 
 ### core/extension.py — Extension 基类
 
@@ -498,6 +540,26 @@ class CronJob:
     next_run: str | None
 ```
 
+### 现有扩展：ask_user
+
+交互式提问扩展。让 Claude 在 session 执行中途向用户提问并等待回答。
+
+**数据流**：
+```
+Claude → MCP tool(ask_user) → bridge.call("ask_user") → BridgeServer handler
+  → PendingStore.register + SessionManager.deliver(is_question=True)
+  → [用户通过 Telegram/其他前端回答]
+  → PendingStore.resolve → bridge 返回 → MCP tool 返回 → Claude 继续
+```
+
+**MCP 工具**：`ask_user(question, options?)`
+- `question`：要问用户的问题（必填）
+- `options`：可选选项列表，省略则用户自由文本输入
+
+**系统提示注入**：扩展通过 `add_system_prompt()` 重定向 Claude 使用 MCP ask_user 工具而非内置 AskUserQuestion（内置工具在本环境中不可用）。
+
+**前端对接**：delivery callback 收到 `{"is_question": True, "request_id": ..., "options": [...]}` 后展示 UI（如 Telegram inline keyboard）。用户回答后调用 `engine.pending.resolve(request_id, answer)` 交付响应。
+
 ---
 
 ## 配置文件 config.yaml
@@ -543,7 +605,7 @@ extensions:                       # 每个扩展的独立配置
 
 1. **core 不 import 任何 extension。** 扩展发现完全通过 `importlib` 动态导入。如果你发现自己在 core/ 中写了 `from extensions.xxx import ...`，说明设计有问题。
 
-2. **扩展之间互不依赖。** 扩展 A 不 import 扩展 B，不调用扩展 B 的方法，不读取扩展 B 的状态。如果两个扩展需要共享数据，应该通过 core 层的共享服务（如 `engine.session_manager`）间接实现。
+2. **扩展之间互不依赖。** 扩展 A 不 import 扩展 B，不调用扩展 B 的方法，不读取扩展 B 的状态。如果两个扩展需要共享数据，应该通过 core 层的共享服务间接实现：`engine.session_manager`（会话管理）、`engine.services`（跨扩展服务注册表）、`engine.pending`（异步请求/响应）。
 
 3. **每个扩展是完全自包含的目录。** 删除一个扩展目录 + 从 `enabled` 列表移除 = 零影响。
 
