@@ -14,7 +14,7 @@ Extensible framework for [Claude Code CLI](https://docs.anthropic.com/en/docs/cl
 
 claude-ext invokes the official `claude` binary (`claude -p`) under the hood. This means it runs as a first-party Claude Code session, authenticated via your existing Claude subscription (Free, Pro, or Max plan OAuth).
 
-Other approaches — the [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview), [OpenClaw](https://github.com/anthropics/openclaw), or any third-party tool calling the API directly — must use API key authentication with pay-per-token billing.
+Other approaches — the [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview), [OpenClaw](https://github.com/openclaw/openclaw), or any third-party tool calling the API directly — must use API key authentication with pay-per-token billing.
 
 For heavy agent workloads, this is a significant cost difference. A Max plan gives you a flat monthly rate, while API usage for similar workloads can easily exceed $3,000/month depending on volume.
 

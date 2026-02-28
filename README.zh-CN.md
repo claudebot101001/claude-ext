@@ -14,7 +14,7 @@
 
 claude-ext 底层调用官方 `claude` 二进制文件（`claude -p`），以第一方 Claude Code 会话运行，使用你现有的 Claude 订阅（Free、Pro 或 Max 计划 OAuth）进行认证。
 
-其他方案——[Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)、[OpenClaw](https://github.com/anthropics/openclaw) 或任何直接调用 API 的第三方工具——必须使用 API key 认证，按 token 付费。
+其他方案——[Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview)、[OpenClaw](https://github.com/openclaw/openclaw) 或任何直接调用 API 的第三方工具——必须使用 API key 认证，按 token 付费。
 
 对于高强度的 Agent 工作负载，这意味着显著的成本差异。Max 计划按月固定收费，而同等工作量的 API 使用费用可以轻松超过每月 $3,000。
 
