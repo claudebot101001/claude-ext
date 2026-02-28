@@ -22,6 +22,7 @@ def vault_store(tmp_path):
 def extension(vault_store):
     ext = ExtensionImpl()
     ext._vault = vault_store
+    ext._internal_prefixes = []
     return ext
 
 
@@ -36,15 +37,15 @@ class TestBridgeHandler:
 
     def test_vault_store_via_bridge(self, extension):
         result = _run(extension._bridge_handler("vault_store", {
-            "key": "mykey", "value": "myval", "tags": ["test"],
-            "session_id": self._SID,
+            "key": "api/github/token", "value": "ghp_xxx",
+            "tags": ["test"], "session_id": self._SID,
         }))
         assert result == {"ok": True}
-        assert extension._vault.get("mykey") == "myval"
+        assert extension._vault.get("api/github/token") == "ghp_xxx"
 
     def test_vault_list_via_bridge(self, extension):
-        extension._vault.put("a", "1", tags=["x"])
-        extension._vault.put("b", "2")
+        extension._vault.put("a/b/c", "1", tags=["x"])
+        extension._vault.put("d/e/f", "2")
 
         result = _run(extension._bridge_handler("vault_list", {
             "session_id": self._SID,
@@ -53,40 +54,40 @@ class TestBridgeHandler:
         assert len(keys) == 2
 
     def test_vault_list_with_tag(self, extension):
-        extension._vault.put("a", "1", tags=["email"])
-        extension._vault.put("b", "2", tags=["api"])
+        extension._vault.put("email/smtp/pw", "1", tags=["email"])
+        extension._vault.put("api/gh/tok", "2", tags=["api"])
 
         result = _run(extension._bridge_handler("vault_list", {
             "tag": "email", "session_id": self._SID,
         }))
         keys = result["keys"]
         assert len(keys) == 1
-        assert keys[0]["key"] == "a"
+        assert keys[0]["key"] == "email/smtp/pw"
 
     def test_vault_retrieve_via_bridge(self, extension):
-        extension._vault.put("key", "secret-value")
+        extension._vault.put("api/test/key", "secret-value")
         result = _run(extension._bridge_handler("vault_retrieve", {
-            "key": "key", "session_id": self._SID,
+            "key": "api/test/key", "session_id": self._SID,
         }))
         assert result == {"value": "secret-value"}
 
     def test_vault_retrieve_missing(self, extension):
         result = _run(extension._bridge_handler("vault_retrieve", {
-            "key": "nope", "session_id": self._SID,
+            "key": "api/nope/key", "session_id": self._SID,
         }))
         assert result == {"value": None}
 
     def test_vault_delete_via_bridge(self, extension):
-        extension._vault.put("key", "val")
+        extension._vault.put("api/del/key", "val")
         result = _run(extension._bridge_handler("vault_delete", {
-            "key": "key", "session_id": self._SID,
+            "key": "api/del/key", "session_id": self._SID,
         }))
         assert result == {"deleted": True}
-        assert extension._vault.get("key") is None
+        assert extension._vault.get("api/del/key") is None
 
     def test_vault_delete_missing(self, extension):
         result = _run(extension._bridge_handler("vault_delete", {
-            "key": "nope", "session_id": self._SID,
+            "key": "api/nope/key", "session_id": self._SID,
         }))
         assert result == {"deleted": False}
 
@@ -99,13 +100,130 @@ class TestBridgeHandler:
     def test_vault_not_initialized(self, extension):
         extension._vault = None
         result = _run(extension._bridge_handler("vault_store", {
-            "key": "k", "value": "v", "session_id": self._SID,
+            "key": "a/b/c", "value": "v", "session_id": self._SID,
         }))
         assert "error" in result
 
     def test_missing_session_id_uses_fallback(self, extension):
         """Bridge handler gracefully handles missing session_id."""
         result = _run(extension._bridge_handler("vault_store", {
-            "key": "k", "value": "v",
+            "key": "a/b/c", "value": "v",
         }))
         assert result == {"ok": True}
+
+
+class TestKeyValidation:
+    """Test that bridge handler enforces key naming convention."""
+
+    _SID = "test-session-00000000"
+
+    def test_valid_namespaced_keys(self, extension):
+        """Keys with category/service/name format are accepted."""
+        valid_keys = [
+            "api/github/token",
+            "email/smtp/password",
+            "wallet/eth/privkey",
+            "wallet/eth/0xABC123/privkey",
+            "a/b/c",
+        ]
+        for key in valid_keys:
+            result = _run(extension._bridge_handler("vault_store", {
+                "key": key, "value": "v", "session_id": self._SID,
+            }))
+            assert result == {"ok": True}, f"Key '{key}' should be valid"
+
+    def test_reject_flat_key(self, extension):
+        """Keys without slashes are rejected."""
+        result = _run(extension._bridge_handler("vault_store", {
+            "key": "my_api_key", "value": "v", "session_id": self._SID,
+        }))
+        assert "error" in result
+        assert "category/service/name" in result["error"]
+
+    def test_reject_single_segment_key(self, extension):
+        """Keys with only one slash (two segments) should still be accepted
+        since they have category/name — the pattern requires at least two segments."""
+        result = _run(extension._bridge_handler("vault_store", {
+            "key": "api/token", "value": "v", "session_id": self._SID,
+        }))
+        assert result == {"ok": True}
+
+    def test_reject_empty_key(self, extension):
+        result = _run(extension._bridge_handler("vault_store", {
+            "key": "", "value": "v", "session_id": self._SID,
+        }))
+        assert "error" in result
+
+    def test_reject_empty_value(self, extension):
+        result = _run(extension._bridge_handler("vault_store", {
+            "key": "a/b/c", "value": "", "session_id": self._SID,
+        }))
+        assert "error" in result
+
+    def test_reject_key_with_spaces(self, extension):
+        result = _run(extension._bridge_handler("vault_store", {
+            "key": "api/my token", "value": "v", "session_id": self._SID,
+        }))
+        assert "error" in result
+
+    def test_reject_key_with_path_traversal(self, extension):
+        result = _run(extension._bridge_handler("vault_store", {
+            "key": "../etc/passwd", "value": "v", "session_id": self._SID,
+        }))
+        assert "error" in result
+
+    def test_missing_key_in_retrieve(self, extension):
+        result = _run(extension._bridge_handler("vault_retrieve", {
+            "session_id": self._SID,
+        }))
+        assert "error" in result
+
+    def test_missing_key_in_delete(self, extension):
+        result = _run(extension._bridge_handler("vault_delete", {
+            "session_id": self._SID,
+        }))
+        assert "error" in result
+
+
+class TestInternalPrefixes:
+    """Test the internal_prefixes access control mechanism."""
+
+    _SID = "test-session-00000000"
+
+    def test_no_prefixes_by_default(self, extension):
+        """With no internal prefixes, all keys are accessible."""
+        extension._vault.put("wallet/eth/privkey", "0xDEADBEEF")
+        result = _run(extension._bridge_handler("vault_retrieve", {
+            "key": "wallet/eth/privkey", "session_id": self._SID,
+        }))
+        assert result == {"value": "0xDEADBEEF"}
+
+    def test_internal_prefix_blocks_retrieve(self, extension):
+        """Keys matching internal prefixes are blocked from MCP retrieve."""
+        extension._internal_prefixes = ["wallet/"]
+        extension._vault.put("wallet/eth/privkey", "0xDEADBEEF")
+
+        result = _run(extension._bridge_handler("vault_retrieve", {
+            "key": "wallet/eth/privkey", "session_id": self._SID,
+        }))
+        assert "error" in result
+        assert "internal-only" in result["error"]
+
+    def test_internal_prefix_does_not_block_other_keys(self, extension):
+        """Non-matching keys are still accessible."""
+        extension._internal_prefixes = ["wallet/"]
+        extension._vault.put("api/github/token", "ghp_xxx")
+
+        result = _run(extension._bridge_handler("vault_retrieve", {
+            "key": "api/github/token", "session_id": self._SID,
+        }))
+        assert result == {"value": "ghp_xxx"}
+
+    def test_programmatic_access_bypasses_prefix_check(self, extension):
+        """engine.services['vault'].get() bypasses prefix restrictions.
+        This is how wallet extension will read private keys internally."""
+        extension._internal_prefixes = ["wallet/"]
+        extension._vault.put("wallet/eth/privkey", "0xDEADBEEF")
+
+        # Direct VaultStore access (as other extensions would use)
+        assert extension._vault.get("wallet/eth/privkey") == "0xDEADBEEF"

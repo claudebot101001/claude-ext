@@ -2,6 +2,8 @@
 
 import os
 import stat
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 from pathlib import Path
 
@@ -108,6 +110,25 @@ class TestVaultStoreEncryption:
 
         assert salt1 == salt2
 
+    def test_corrupted_file_raises_valueerror(self, store, vault_dir):
+        """Corrupted encrypted file should raise ValueError, not crash."""
+        store.put("key", "value")
+        enc_path = vault_dir / "secrets.json.enc"
+        # Corrupt the file
+        enc_path.write_bytes(b"this is not valid fernet data")
+        with pytest.raises(ValueError, match="decrypt|corrupted"):
+            store.get("key")
+
+    def test_truncated_file_raises_valueerror(self, store, vault_dir):
+        """Truncated encrypted file should raise ValueError."""
+        store.put("key", "value")
+        enc_path = vault_dir / "secrets.json.enc"
+        # Truncate to half
+        data = enc_path.read_bytes()
+        enc_path.write_bytes(data[:len(data) // 2])
+        with pytest.raises(ValueError, match="decrypt|corrupted"):
+            store.get("key")
+
 
 class TestVaultStoreFilePermissions:
     def test_salt_file_permissions(self, store, vault_dir):
@@ -123,11 +144,65 @@ class TestVaultStoreFilePermissions:
         mode = stat.S_IMODE(os.stat(enc_path).st_mode)
         assert mode == 0o600
 
+    def test_vault_dir_permissions(self, vault_dir):
+        """Vault directory should be 0700."""
+        VaultStore(vault_dir, passphrase="test")
+        mode = stat.S_IMODE(os.stat(vault_dir).st_mode)
+        assert mode == 0o700
+
     def test_vault_dir_created(self, vault_dir):
         """VaultStore creates the directory if it doesn't exist."""
         assert not vault_dir.exists()
         VaultStore(vault_dir, passphrase="test")
         assert vault_dir.exists()
+
+
+class TestVaultStoreConcurrency:
+    def test_concurrent_writes_no_data_loss(self, vault_dir):
+        """Multiple threads writing different keys — no data loss."""
+        store = VaultStore(vault_dir, passphrase="pw")
+
+        def write_key(i):
+            store.put(f"key-{i}", f"val-{i}")
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(write_key, range(20)))
+
+        assert len(store.list_keys()) == 20
+        # Verify all values are correct
+        for i in range(20):
+            assert store.get(f"key-{i}") == f"val-{i}"
+
+    def test_concurrent_read_write(self, vault_dir):
+        """Reads don't corrupt data during concurrent writes."""
+        store = VaultStore(vault_dir, passphrase="pw")
+        # Pre-populate
+        for i in range(5):
+            store.put(f"pre-{i}", f"val-{i}")
+
+        errors = []
+
+        def reader():
+            try:
+                keys = store.list_keys()
+                assert len(keys) >= 5  # at least the pre-populated ones
+            except Exception as e:
+                errors.append(e)
+
+        def writer(i):
+            store.put(f"new-{i}", f"new-val-{i}")
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            # Mix reads and writes
+            futures = []
+            for i in range(10):
+                futures.append(pool.submit(writer, i))
+                futures.append(pool.submit(reader))
+            for f in futures:
+                f.result()
+
+        assert not errors
+        assert len(store.list_keys()) == 15  # 5 pre + 10 new
 
 
 class TestVaultStoreEdgeCases:

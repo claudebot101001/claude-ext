@@ -2,12 +2,15 @@
 
 Key derivation: passphrase → PBKDF2-HMAC-SHA256 (600K iterations) + random salt → Fernet key.
 Storage: JSON blob encrypted with Fernet, written atomically with flock.
-File permissions: 0600 on all sensitive files.
+File permissions: 0700 on vault directory, 0600 on all files.
 
-Thread/process safety: flock on the encrypted file for concurrent access.
+Thread/process safety: unified lockfile (secrets.lock) ensures read/write mutual
+exclusion.  Read-only ops take LOCK_SH; mutations hold LOCK_EX across the full
+read-modify-write cycle to prevent lost updates.
 """
 
 import base64
+import contextlib
 import fcntl
 import json
 import logging
@@ -41,17 +44,19 @@ class VaultStore:
     Usage::
 
         store = VaultStore(Path("~/.claude-ext/vault"), passphrase="my-secret")
-        store.put("smtp_password", "hunter2", tags=["email"])
-        print(store.get("smtp_password"))  # "hunter2"
-        store.delete("smtp_password")
+        store.put("email/smtp/password", "hunter2", tags=["email"])
+        print(store.get("email/smtp/password"))  # "hunter2"
+        store.delete("email/smtp/password")
     """
 
     def __init__(self, vault_dir: Path, passphrase: str):
         self.vault_dir = vault_dir
         self.vault_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(self.vault_dir, 0o700)
 
         self._secrets_path = self.vault_dir / "secrets.json.enc"
         self._salt_path = self.vault_dir / "salt"
+        self._lock_path = self.vault_dir / "secrets.lock"
 
         # Load or generate salt
         if self._salt_path.exists():
@@ -68,24 +73,27 @@ class VaultStore:
 
     def put(self, key: str, value: str, tags: list[str] | None = None) -> None:
         """Store a secret. Overwrites if key already exists."""
-        secrets = self._read()
-        secrets[key] = {"value": value, "tags": tags or []}
-        self._write(secrets)
+        with self._exclusive_lock():
+            secrets = self._decrypt_file()
+            secrets[key] = {"value": value, "tags": tags or []}
+            self._encrypt_and_write(secrets)
         log.info("Vault: stored key '%s'", key)
 
     def get(self, key: str) -> str | None:
         """Retrieve a secret value. Returns None if not found."""
-        secrets = self._read()
+        with self._shared_lock():
+            secrets = self._decrypt_file()
         entry = secrets.get(key)
         return entry["value"] if entry else None
 
     def delete(self, key: str) -> bool:
         """Delete a secret. Returns True if it existed."""
-        secrets = self._read()
-        if key not in secrets:
-            return False
-        del secrets[key]
-        self._write(secrets)
+        with self._exclusive_lock():
+            secrets = self._decrypt_file()
+            if key not in secrets:
+                return False
+            del secrets[key]
+            self._encrypt_and_write(secrets)
         log.info("Vault: deleted key '%s'", key)
         return True
 
@@ -95,7 +103,8 @@ class VaultStore:
         Returns list of {"key": str, "tags": list[str]}.
         If tag is specified, filter to entries containing that tag.
         """
-        secrets = self._read()
+        with self._shared_lock():
+            secrets = self._decrypt_file()
         result = []
         for k, entry in secrets.items():
             entry_tags = entry.get("tags", [])
@@ -106,26 +115,43 @@ class VaultStore:
 
     def has(self, key: str) -> bool:
         """Check if a key exists without reading its value."""
-        secrets = self._read()
+        with self._shared_lock():
+            secrets = self._decrypt_file()
         return key in secrets
 
-    # -- internal I/O -------------------------------------------------------
+    # -- locking ------------------------------------------------------------
 
-    def _read(self) -> dict:
-        """Read and decrypt the secrets file. Returns empty dict if missing."""
+    @contextlib.contextmanager
+    def _shared_lock(self):
+        """LOCK_SH on the unified lockfile."""
+        f = open(self._lock_path, "a+b")
+        try:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+            f.close()
+
+    @contextlib.contextmanager
+    def _exclusive_lock(self):
+        """LOCK_EX on the unified lockfile."""
+        f = open(self._lock_path, "a+b")
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+            f.close()
+
+    # -- internal I/O (caller must hold appropriate lock) -------------------
+
+    def _decrypt_file(self) -> dict:
+        """Read and decrypt secrets file. Caller must hold lock."""
         if not self._secrets_path.exists():
             return {}
-
-        with open(self._secrets_path, "rb") as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
-            try:
-                encrypted = f.read()
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
-
+        encrypted = self._secrets_path.read_bytes()
         if not encrypted:
             return {}
-
         try:
             decrypted = self._fernet.decrypt(encrypted)
             return json.loads(decrypted.decode("utf-8"))
@@ -136,17 +162,11 @@ class VaultStore:
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             raise ValueError(f"Vault data corrupted: {e}")
 
-    def _write(self, secrets: dict) -> None:
-        """Encrypt and atomically write the secrets file."""
+    def _encrypt_and_write(self, secrets: dict) -> None:
+        """Encrypt and atomically write secrets file. Caller must hold LOCK_EX."""
         plaintext = json.dumps(secrets, indent=2).encode("utf-8")
         encrypted = self._fernet.encrypt(plaintext)
-
         tmp = self._secrets_path.with_suffix(".tmp")
-        with open(tmp, "wb") as f:
-            fcntl.flock(f, fcntl.LOCK_EX)
-            try:
-                f.write(encrypted)
-            finally:
-                fcntl.flock(f, fcntl.LOCK_UN)
+        tmp.write_bytes(encrypted)
         os.chmod(tmp, 0o600)
         tmp.rename(self._secrets_path)

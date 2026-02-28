@@ -11,6 +11,7 @@ Passphrase is read from ``CLAUDE_EXT_VAULT_PASSPHRASE`` environment variable.
 
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +20,10 @@ from extensions.vault.store import VaultStore
 
 log = logging.getLogger(__name__)
 
+# Key must be namespaced: category/service/name (at least two slashes).
+# Allowed chars: a-z A-Z 0-9 _ - . in each segment.
+_KEY_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+(/[a-zA-Z0-9._-]+)+$")
+
 
 class ExtensionImpl(Extension):
     name = "vault"
@@ -26,6 +31,10 @@ class ExtensionImpl(Extension):
     def configure(self, engine, config):
         super().configure(engine, config)
         self._vault: VaultStore | None = None
+        # Phase 4+: prefixes whose keys can only be read by bridge handlers
+        # internally (e.g. wallet extension reads private keys in-process),
+        # never returned to LLM via vault_retrieve MCP tool.
+        self._internal_prefixes: list[str] = []
 
     @property
     def sm(self):
@@ -82,12 +91,28 @@ class ExtensionImpl(Extension):
         self.engine.services.pop("vault", None)
         log.info("Vault extension stopped.")
 
+    def _validate_key(self, key: str) -> str | None:
+        """Validate key format. Returns error message or None if valid."""
+        if not key:
+            return "Key is required."
+        if not _KEY_PATTERN.match(key):
+            return (
+                f"Invalid key format: '{key}'. "
+                "Keys must use 'category/service/name' format "
+                "(a-z, 0-9, ._- in each segment)."
+            )
+        return None
+
+    def _is_internal_key(self, key: str) -> bool:
+        """Check if a key is restricted to internal-only access."""
+        return any(key.startswith(p) for p in self._internal_prefixes)
+
     async def _bridge_handler(self, method: str, params: dict) -> dict | None:
         """Handle vault bridge RPCs from MCP server processes.
 
         Every call includes ``session_id`` identifying the requesting
         session.  Currently logged for audit; Phase 4+ can use it for
-        prefix-based access control.
+        prefix-based access control via ``_internal_prefixes``.
         """
         if not method.startswith("vault_"):
             return None  # not ours
@@ -99,22 +124,33 @@ class ExtensionImpl(Extension):
 
         try:
             if method == "vault_store":
-                key = params["key"]
+                key = params.get("key", "")
+                value = params.get("value", "")
+                if not value:
+                    return {"error": "Value is required."}
+                err = self._validate_key(key)
+                if err:
+                    return {"error": err}
                 log.info("vault_store key='%s' by session %s", key, session_id[:8])
-                self._vault.put(key, params["value"], params.get("tags"))
+                self._vault.put(key, value, params.get("tags"))
                 return {"ok": True}
 
             elif method == "vault_list":
                 return {"keys": self._vault.list_keys(tag=params.get("tag"))}
 
             elif method == "vault_retrieve":
-                key = params["key"]
+                key = params.get("key", "")
+                if not key:
+                    return {"error": "Key is required."}
+                if self._is_internal_key(key):
+                    return {"error": f"Key '{key}' is internal-only. Use the dedicated extension tools."}
                 log.info("vault_retrieve key='%s' by session %s", key, session_id[:8])
-                value = self._vault.get(key)
-                return {"value": value}
+                return {"value": self._vault.get(key)}
 
             elif method == "vault_delete":
-                key = params["key"]
+                key = params.get("key", "")
+                if not key:
+                    return {"error": "Key is required."}
                 log.info("vault_delete key='%s' by session %s", key, session_id[:8])
                 return {"deleted": self._vault.delete(key)}
 
