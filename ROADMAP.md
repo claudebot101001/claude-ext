@@ -80,31 +80,22 @@ Phase 3 前的架构加固。三项改进均为轻量级 core 增强。
 
 策略可见性：各扩展通过 health_check 返回 `policies` 字段自报当前策略（如 vault 的 `_internal_prefixes`、telegram 的 `allowed_users` 白名单人数），集中**可见性**而非集中**执行**。
 
+### Phase 3: Heartbeat — 自主心跳
+
+`extensions/heartbeat/` — 双通道调度 + 三层执行的自主周期 Agent。
+
+- **store.py**: HeartbeatState（8 字段）+ HeartbeatStore — JSON + flock 状态持久化 + HEARTBEAT.md 指令文件 I/O + 原子写入 + 损坏文件回退
+- **mcp_server.py**: `heartbeat_get_instructions` / `heartbeat_set_instructions` / `heartbeat_get_status` / `heartbeat_pause` / `heartbeat_resume` 五个 MCP 工具，直接文件 I/O（同 memory 模式）
+- **extension.py**: 双通道调度器（Timer + asyncio.Queue Trigger）+ 三层执行（Tier 0 门控 → Tier 1 预检 → Tier 2 LLM 决策 → Tier 3 完整 session）+ 利用率感知成本控制 + 自适应退避 + delivery callback 自动清理 + 恢复检查
+- **与 cron 的区别**: cron 是静态 prompt + 固定时间表；heartbeat 是动态读取指令 + Agent 自主决策是否行动 + 连续无事时自动退避
+- **成本控制五道安全阀**: 日运行上限（默认 48）、利用率节流（80%: 仅 immediate 触发通过）、利用率暂停（95%: 全部暂停）、活跃时段窗口、自适应退避（1x→2x→4x→8x）
+- **静默抑制**: Tier 2 使用 `engine.ask()` 轻量子进程，"NOTHING" 完全静默无通知。仅 Tier 3 创建的 session 有 `chat_id`，前端才投递
+- **事件触发**: 其他扩展通过 `engine.services["heartbeat"].trigger(source, event_type, urgency, payload)` 提交事件。`immediate` 立即唤醒调度器；`normal` 积累到下次定时器到期。sync 方法，单事件循环内安全
+- **`notify_context` 路由**: 配置中的 `notify_context` 原样透传到 `session.context`，heartbeat 不解读内容。前端扩展各自从 context 取所需字段（如 Telegram 取 `chat_id`、Discord 取 `channel_id`）。零前端耦合
+
 ---
 
 ## 待实现
-
-### Phase 3: Heartbeat — 心跳驱动的自主模式
-
-**目标**：从"被动响应"到"主动行动"的关键转变。周期性唤醒 Agent，读取 HEARTBEAT.md 中的常驻指令，自主判断是否需要行动。
-
-**架构方向**：
-
-```
-extensions/heartbeat/
-    store.py           # HeartbeatState: 间隔/每日成本/per-user 状态持久化
-    mcp_server.py      # heartbeat_status / heartbeat_update_orders / heartbeat_set_interval
-    extension.py       # 心跳循环 + 专属 session 管理 + 成本追踪
-```
-
-**关键设计**：
-- **HEARTBEAT.md**: Agent 的"常驻指令"文件。包含监控项、每日任务、抑制条件等
-- **与 cron 的区别**: cron 是静态 prompt + 固定时间表；heartbeat 是动态读取指令 + Agent 自主决策是否行动
-- **成本控制**: 最小间隔 5 分钟，默认 30 分钟。连续 HEARTBEAT_OK 时间隔翻倍（最大 4 小时）。每日 USD 预算上限
-- 每个用户一个专属持久 session（不是每次创建新 session）
-- 依赖 Phase 1 (Vault) 和 Phase 2 (Memory)
-
----
 
 ### Phase 4: Wallet — Crypto 钱包管理
 
@@ -178,7 +169,7 @@ Phase 1: Vault  ←── 所有后续阶段的凭证基础 ✅ 已完成
     ↓
 Phase 2: Memory ←── 自主行为的前提 ✅ 已完成
     ↓
-Phase 3: Heartbeat ←── 从被动到主动的跃迁
+Phase 3: Heartbeat ←── 从被动到主动的跃迁 ✅ 已完成
     ↓ (可与 4, 5 并行)
 Phase 4: Wallet ←── 依赖 Vault（硬依赖）
 Phase 5a: Email ←── 依赖 Vault（SMTP 凭证）
