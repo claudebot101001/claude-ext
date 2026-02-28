@@ -23,7 +23,9 @@ sessions:
   max_sessions_per_user: 5       # Max concurrent sessions per user (= slot count)
 
 # Extensions to enable (must match directory names under extensions/)
+# Order matters: dependencies must come before dependents.
 enabled:
+  # - vault                        # Encrypted credential vault (required by wallet, email)
   - telegram
   # - ask_user                     # Uncomment to let Claude ask the user questions mid-session
   # - cron                         # Uncomment to enable scheduled tasks
@@ -41,6 +43,11 @@ extensions:
 
   ask_user:
     timeout: 300                   # Seconds to wait for user response before timing out
+
+  vault:
+    # Passphrase is read from CLAUDE_EXT_VAULT_PASSPHRASE environment variable.
+    # Do NOT put the passphrase in this file.
+    {}
 
   cron:
     # Static jobs (optional). Claude can also create jobs dynamically via MCP tools.
