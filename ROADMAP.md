@@ -8,9 +8,9 @@
 
 `extensions/vault/` — Fernet 对称加密的 key-value 凭证库。
 
-- **store.py**: PBKDF2-HMAC-SHA256 (600K iterations) 密钥派生 + Fernet 加解密 + flock 文件锁 + 原子写入 + 0600 权限
+- **store.py**: PBKDF2-HMAC-SHA256 (600K iterations) 密钥派生 + Fernet 加解密 + 统一 lockfile（`secrets.lock`，LOCK_SH/LOCK_EX 读写互斥） + 原子写入 + 0700 目录权限 + 0600 文件权限
 - **mcp_server.py**: `vault_store` / `vault_list` / `vault_retrieve` / `vault_delete` 四个 MCP 工具，通过 bridge RPC 调用主进程 VaultStore
-- **extension.py**: 注册 `engine.services["vault"]` 供其他扩展程序内调用 + 注册 MCP server + bridge handler + 系统提示约束（不泄露密文）
+- **extension.py**: 注册 `engine.services["vault"]` 供其他扩展程序内调用 + 注册 MCP server + bridge handler + key 命名校验（强制 `category/service/name` 格式）+ `_internal_prefixes` 访问控制机制 + 系统提示约束（不泄露密文）
 - **安全设计**: passphrase 从环境变量 `CLAUDE_EXT_VAULT_PASSPHRASE` 读取，不进配置文件。MCP server 进程不持有 passphrase，所有加解密通过 bridge RPC 在主进程完成。每次 bridge 调用携带 `session_id`，handler 记录审计日志
 - **性能基线** (实测): raw socket echo 0.06ms, vault_retrieve 0.24ms, vault_store 0.57ms。瓶颈在 Fernet crypto + 磁盘 I/O，socket 开销可忽略
 
@@ -29,21 +29,23 @@ api/openai/key              # OpenAI API key
 
 **为什么现在就定**：Phase 4 (Wallet) 需要添加 `internal_only` 前缀策略（如 `wallet/*` 前缀的 key 只能由 wallet bridge handler 内部读取，不返回给 LLM）。如果现在不按命名空间存储，到时候就需要数据迁移。按前缀匹配的访问控制不需要额外的 tag 字段，key 本身就携带了分类信息。
 
-#### 未来访问控制方向 (Phase 4+)
+#### 访问控制机制（已就位）
 
-当前 vault 是全局可读的（受信任 Agent 场景）。Phase 4 引入 wallet 后，bridge handler 层面会添加前缀策略：
+`extension.py` 维护 `_internal_prefixes: list[str]`（当前为空列表）。`vault_retrieve` 的 bridge handler 检查 key 前缀，匹配时拒绝请求：
 
 ```python
-# Phase 4 的 bridge handler 增强（方向，非最终设计）
-INTERNAL_ONLY_PREFIXES = ["wallet/"]  # 这些前缀的 key 只能由 bridge handler 内部读取
+# 当前代码（extension.py）
+self._internal_prefixes: list[str] = []  # Phase 4+: ["wallet/"]
 
-if method == "vault_retrieve":
-    key = params["key"]
-    if any(key.startswith(p) for p in INTERNAL_ONLY_PREFIXES):
-        return {"error": "This key is internal-only. Use the dedicated wallet tools."}
+def _is_internal_key(self, key: str) -> bool:
+    return any(key.startswith(p) for p in self._internal_prefixes)
+
+# vault_retrieve 分支中：
+if self._is_internal_key(key):
+    return {"error": f"Key '{key}' is internal-only. Use the dedicated extension tools."}
 ```
 
-这个改动仅涉及 vault extension.py 的 `_bridge_handler` 方法（~5 行），不影响 store.py、MCP server 或其他扩展。session_id 已在 bridge 协议中透传，需要时可进一步按 session context 做细粒度控制。
+Phase 4 Wallet 上线时只需 `self._internal_prefixes.append("wallet/")`，私钥即不可通过 MCP `vault_retrieve` 读取。其他扩展通过 `engine.services["vault"].get()` 程序内直接访问，不受前缀限制（已有测试覆盖 `TestInternalPrefixes`）。session_id 已在 bridge 协议中透传，需要时可进一步按 session context 做细粒度控制。
 
 ---
 

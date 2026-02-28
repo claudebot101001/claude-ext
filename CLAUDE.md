@@ -24,6 +24,11 @@ claude-ext/
 │   │   ├── mcp_server.py          # MCP stdio server（Claude 可调用的 cron 工具）
 │   │   ├── store.py               # Job 持久化（JSON + flock）
 │   │   └── requirements.txt       # croniter
+│   ├── vault/
+│   │   ├── extension.py           # 加密凭证库（bridge + MCP + 访问控制）
+│   │   ├── store.py               # VaultStore: Fernet 加解密 + 统一 lockfile
+│   │   ├── mcp_server.py          # MCP stdio server（vault 四工具）
+│   │   └── requirements.txt       # cryptography>=42.0
 │   └── ask_user/
 │       ├── extension.py           # 交互式提问扩展（bridge + PendingStore）
 │       └── mcp_server.py          # MCP stdio server（ask_user 工具）
@@ -291,7 +296,7 @@ await engine.session_manager.send_prompt(session.id, "fix the bug")
 response = await engine.ask(prompt="what is 1+1", cwd="/tmp")
 
 # 跨扩展服务发现
-self.engine.services["vault"] = VaultStore(vault_dir)   # vault 扩展 start() 中注册
+self.engine.services["vault"] = self._vault              # vault 扩展 start() 中注册
 vault = self.engine.services.get("vault")                # crypto 扩展中查找
 ```
 
@@ -540,6 +545,46 @@ class CronJob:
     next_run: str | None
 ```
 
+### 现有扩展：vault
+
+加密凭证存储。让 Agent 安全地存取 API key、密码、私钥等敏感信息。
+
+**架构三层**：
+
+```
+Claude session
+  └─ MCP server (vault_store/list/retrieve/delete)
+       └─ bridge RPC (Unix socket, 携带 session_id)
+            └─ 主进程 bridge handler → VaultStore (加解密)
+```
+
+MCP server 进程**不持有 passphrase**，所有加解密通过 bridge RPC 在主进程完成。passphrase 从环境变量 `CLAUDE_EXT_VAULT_PASSPHRASE` 读取，不进配置文件。
+
+**store.py — VaultStore**：
+
+- 密钥派生：PBKDF2-HMAC-SHA256（600K iterations）+ 随机 salt → Fernet key
+- 加密：Fernet（AES-128-CBC + HMAC 认证加密），JSON blob 整体加密
+- 并发控制：统一 lockfile（`secrets.lock`）。读操作 `LOCK_SH`，写操作 `LOCK_EX` 覆盖完整的 read-modify-write 周期，防止并发写入丢失更新
+- 原子写入：临时文件 + rename
+- 文件权限：0700 目录 + 0600 文件
+
+**MCP 工具**：
+
+| 工具 | 功能 |
+|------|------|
+| `vault_store` | 存入秘密（key + value + 可选 tags） |
+| `vault_list` | 列出所有 key 和 tags（不返回 value） |
+| `vault_retrieve` | 读取秘密值（进入 LLM 上下文） |
+| `vault_delete` | 删除秘密 |
+
+**Key 命名校验**：bridge handler 强制 `category/service/name` 格式（正则 `^[a-zA-Z0-9_-]+(/[a-zA-Z0-9._-]+)+$`）。不符合格式的 key 在 `vault_store` 时被拒绝。示例：`api/github/token`、`email/smtp/password`、`wallet/eth/0xABC.../privkey`。
+
+**访问控制预留**：`extension.py` 维护 `_internal_prefixes: list[str]`（当前为空列表）。`vault_retrieve` 检查 key 前缀，匹配的请求被拒绝并提示使用专用工具。Phase 4 Wallet 只需 `_internal_prefixes.append("wallet/")`，私钥即不可通过 MCP 读取。其他扩展通过 `engine.services["vault"].get()` 程序内直接访问，不受前缀限制。
+
+**系统提示约束**：注入指令要求 Claude 永远不向用户回显秘密值，取到后直接用在后续工具调用中。
+
+**审计**：每次 bridge 调用携带 `session_id`，handler 记录审计日志（`vault_store`、`vault_retrieve`、`vault_delete`）。
+
 ### 现有扩展：ask_user
 
 交互式提问扩展。让 Claude 在 session 执行中途向用户提问并等待回答。
@@ -631,7 +676,7 @@ python main.py
 - tmux 3.x+（用于多会话管理）
 - Claude Code CLI 已安装且 `claude` 命令在 PATH 中
 - 已通过 `claude auth login` 登录（订阅用户）
-- pip 依赖：`python-telegram-bot>=21.0`, `pyyaml>=6.0`, `croniter>=1.0.0`（cron 扩展）
+- pip 依赖：`python-telegram-bot>=21.0`, `pyyaml>=6.0`, `cryptography>=42.0`（vault 扩展）, `croniter>=1.0.0`（cron 扩展）
 
 ---
 
