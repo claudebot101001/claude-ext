@@ -821,9 +821,6 @@ class SessionManager:
             return None
         try:
             data = json.loads(state_file.read_text(encoding="utf-8"))
-            # Backward compat: old format has chat_id at top level
-            if not data.get("context") and "chat_id" in data:
-                data["context"] = {"chat_id": data["chat_id"]}
             data["user_id"] = str(data["user_id"])
             data["status"] = SessionStatus(data.get("status", "idle"))
             data.setdefault("slot", 0)
