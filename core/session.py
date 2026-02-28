@@ -99,6 +99,7 @@ class SessionManager:
         self._mcp_tool_meta: dict[str, list[dict]] = {}  # name -> tool metadata
         self._system_prompt_parts: list[str] = []  # fragments appended to system prompt
         self._env_unset: list[str] = []  # env vars to unset in claude sessions
+        self._disallowed_tools: list[str] = []  # built-in tools to disable
 
     def add_delivery_callback(self, cb: DeliveryCallback) -> None:
         """Register a result delivery callback.  Multiple callbacks supported.
@@ -155,6 +156,17 @@ class SessionManager:
         if var_name not in self._env_unset:
             self._env_unset.append(var_name)
             log.info("Registered env var for unset in sessions: %s", var_name)
+
+    def register_disallowed_tool(self, tool_name: str) -> None:
+        """Register a built-in tool to disable in Claude sessions.
+
+        Extensions call this when they provide an MCP replacement for a
+        built-in tool (e.g. ask_user replaces AskUserQuestion).  The tool
+        is passed to ``claude -p`` via ``--disallowedTools``.
+        """
+        if tool_name not in self._disallowed_tools:
+            self._disallowed_tools.append(tool_name)
+            log.info("Registered disallowed built-in tool: %s", tool_name)
 
     # -- directory helpers --------------------------------------------------
 
@@ -566,6 +578,14 @@ class SessionManager:
         tools = self.engine_config.get("allowed_tools")
         if tools:
             cmd_parts.extend(["--allowedTools"] + list(tools))
+
+        # Merge config-level and extension-registered disallowed tools
+        disallowed = list(self.engine_config.get("disallowed_tools") or [])
+        for t in self._disallowed_tools:
+            if t not in disallowed:
+                disallowed.append(t)
+        if disallowed:
+            cmd_parts.extend(["--disallowedTools"] + disallowed)
 
         if is_first:
             cmd_parts.extend(["--session-id", session.claude_session_id])

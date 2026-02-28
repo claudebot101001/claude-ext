@@ -72,7 +72,7 @@ class TestMemoryExtensionStart:
         prompt = ext.engine.session_manager.add_system_prompt.call_args[0][0]
         assert "memory_read" in prompt
         assert "MEMORY.md" in prompt
-        assert "SESSION START PROTOCOL" in prompt
+        assert "SESSION START" in prompt
 
     def test_start_registers_service(self, ext):
         _run(ext.start())

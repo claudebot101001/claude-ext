@@ -15,6 +15,12 @@ engine:
   # allowed_tools: ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
   allowed_tools: null
 
+  # Optional: disable specific built-in tools (merged with extension-registered ones).
+  # Extensions auto-register replacements (e.g. ask_user disables AskUserQuestion).
+  # Add here for additional user-level overrides.
+  # disallowed_tools: ["TodoWrite", "TodoRead"]
+  disallowed_tools: null
+
 # Persistent state directory for sessions (supports ~ expansion)
 state_dir: ~/.claude-ext
 

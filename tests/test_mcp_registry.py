@@ -63,3 +63,22 @@ class TestRegisterMCPServer:
         result1["x"].append({"name": "injected"})
         result2 = sm.list_mcp_tools()
         assert len(result2["x"]) == 1  # should not be affected
+
+
+class TestDisallowedTools:
+    def test_register_disallowed_tool(self, sm):
+        sm.register_disallowed_tool("AskUserQuestion")
+        assert "AskUserQuestion" in sm._disallowed_tools
+
+    def test_no_duplicates(self, sm):
+        sm.register_disallowed_tool("AskUserQuestion")
+        sm.register_disallowed_tool("AskUserQuestion")
+        assert sm._disallowed_tools.count("AskUserQuestion") == 1
+
+    def test_multiple_tools(self, sm):
+        sm.register_disallowed_tool("AskUserQuestion")
+        sm.register_disallowed_tool("TodoWrite")
+        assert len(sm._disallowed_tools) == 2
+
+    def test_empty_by_default(self, sm):
+        assert sm._disallowed_tools == []

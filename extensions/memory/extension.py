@@ -32,35 +32,21 @@ This is your persistent memory file. It persists across sessions.
 """
 
 _SYSTEM_PROMPT = """\
-IMPORTANT: This is a SEPARATE memory system from Claude Code's built-in auto-memory \
-(~/.claude/projects/). Do NOT use the built-in Read/Write tools to manage memory files. \
-Use ONLY the MCP tools below. They read and write to a dedicated shared store that \
-persists across ALL sessions regardless of working directory.
+You have a cross-session memory store (separate from Claude Code auto-memory). \
+Manage it ONLY via MCP tools: memory_read, memory_write, memory_append, memory_search, memory_list. \
+Do NOT use built-in Read/Write/Edit on these files.
 
-Available MCP tools: memory_read, memory_write, memory_append, memory_search, memory_list.
+SESSION START: call memory_read('MEMORY.md'). Read topic files as needed.
 
-SESSION START PROTOCOL:
-1. At the start of every session, call memory_read('MEMORY.md') via MCP tool
-2. If relevant topics are mentioned, read the specific topic file via memory_read
+RECORDING: After significant tasks, memory_append('daily/YYYY-MM-DD.md', '- learned X about Y'). \
+Record preferences, conventions, patterns, decisions.
 
-RECORDING LEARNINGS:
-After completing significant tasks, append key learnings to today's daily log:
-  memory_append('daily/YYYY-MM-DD.md', '- learned X about Y')
-Record: user preferences, project conventions, recurring patterns, decisions made, \
-things that worked or failed.
+FILES (relative paths, all via MCP):
+- MEMORY.md: Hot index (<200 lines). Rewrite periodically to stay concise.
+- topics/<name>.md: Deep knowledge per subject.
+- daily/YYYY-MM-DD.md: Append-only log.
 
-FILE ORGANIZATION (all paths are relative, managed by MCP tools):
-- MEMORY.md: Hot index. Keep under 200 lines. Contains the most important current \
-knowledge: active projects, user preferences, key decisions, cross-references to \
-topic files. Rewrite periodically to stay concise.
-- topics/<name>.md: Deep knowledge on specific subjects. Create when a topic grows \
-beyond a few lines in MEMORY.md.
-- daily/YYYY-MM-DD.md: Append-only daily log. Raw learnings and observations.
-
-CURATION (critical):
-When MEMORY.md grows beyond ~150 lines, rewrite it: consolidate, remove stale \
-entries, move detailed content to topic files. Prefer rewriting over appending. \
-The goal is a concise, high-signal index, not a changelog."""
+CURATION: When MEMORY.md exceeds ~150 lines, consolidate and move detail to topic files."""
 
 
 class ExtensionImpl(Extension):

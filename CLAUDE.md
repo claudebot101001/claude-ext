@@ -161,6 +161,7 @@ claude -p "$PROMPT" --output-format stream-json --verbose \
   --session-id "uuid" \           # 首次用 --session-id
   # 或 --resume "uuid"            # 后续用 --resume
   --permission-mode bypassPermissions \
+  --disallowedTools AskUserQuestion \     # 可选，扩展通过 register_disallowed_tool 注册
   --mcp-config "/path/mcp_config.json" \  # 可选
   2>"/path/stderr.log"
 ```
@@ -195,6 +196,7 @@ echo $? > /path/exitcode
 | `register_mcp_server()` | 注册 MCP server 配置（可选 `tools` 元数据）。所有后续 session 的 run.sh 自动添加 `--mcp-config` |
 | `list_mcp_tools()` | 返回所有已注册 MCP server 及其声明的工具元数据 |
 | `register_env_unset()` | 注册需要在 Claude session 中 unset 的环境变量（防敏感信息泄漏） |
+| `register_disallowed_tool()` | 注册需要禁用的 CC 内置工具（扩展提供 MCP 替代时使用，通过 `--disallowedTools` 传递） |
 
 #### 槽位机制
 
@@ -288,6 +290,17 @@ self.sm.register_env_unset("CLAUDE_EXT_VAULT_PASSPHRASE")
 ```
 
 SessionManager 在生成 `claude_cmd.sh` 时将所有已注册的变量与 `CLAUDECODE` 一起 unset。
+
+#### 内置工具禁用
+
+扩展提供 MCP 替代工具时，可通过 `register_disallowed_tool()` 禁用对应的 CC 内置工具：
+
+```python
+# ask_user 扩展 start() 中注册
+self.sm.register_disallowed_tool("AskUserQuestion")
+```
+
+SessionManager 在生成 `claude_cmd.sh` 时将所有已注册的工具名与 `engine.disallowed_tools` 配置合并，通过 `--disallowedTools` 传递给 Claude CLI。相比系统提示"Do NOT use X"，CLI 级禁用是硬性强制且节省 token。
 
 #### 多 Delivery Callback
 
@@ -677,7 +690,7 @@ MCP server 进程**不持有 passphrase**，所有加解密通过 bridge RPC 在
 | `memory_search` | 全目录正则搜索（大小写不敏感，上限 50 条） |
 | `memory_list` | 列出文件（按修改时间降序，可按子目录过滤） |
 
-**系统提示驱动**：注入 SESSION START PROTOCOL（每次 session 开始读 `MEMORY.md`）+ CURATION 规则（超 150 行时精炼，移入 topic 文件）。Agent 自主维护记忆质量。系统提示显式声明此为独立于 Claude Code 内置 auto-memory（`~/.claude/projects/`）的系统，要求 Agent 仅通过 MCP 工具操作，不混用内置 Read/Write 工具。存储位置 `~/.claude-ext/memory/` 为全局共享，不按项目隔离。
+**系统提示驱动**：注入精简系统提示，引导 Agent 仅通过 MCP 工具操作记忆文件（Session Start 读 `MEMORY.md` + Curation 规则 + 文件组织说明）。存储位置 `~/.claude-ext/memory/` 为全局共享，独立于 CC 内置 auto-memory（`~/.claude/projects/`）。注：Memory 无法通过 `--disallowedTools` 禁用内置 Read/Write（编码所需），故保留 SP 行为引导。
 
 **Seed 文件**：首次启动自动创建 `MEMORY.md` 模板（含 User Preferences / Active Projects / Key Decisions / Topic Files 四个段落），不覆盖已有内容。
 
@@ -697,7 +710,7 @@ Claude → MCP tool(ask_user) → bridge.call("ask_user") → BridgeServer handl
 - `question`：要问用户的问题（必填）
 - `options`：可选选项列表，省略则用户自由文本输入
 
-**系统提示注入**：扩展通过 `add_system_prompt()` 重定向 Claude 使用 MCP ask_user 工具而非内置 AskUserQuestion（内置工具在本环境中不可用）。
+**内置工具禁用**：扩展通过 `register_disallowed_tool("AskUserQuestion")` 禁用 CC 内置提问工具（通过 `--disallowedTools` CLI 标志强制），并注入精简系统提示引导使用 MCP ask_user 工具。
 
 **前端对接**：delivery callback 收到 `{"is_question": True, "request_id": ..., "options": [...]}` 后展示 UI（如 Telegram inline keyboard）。用户回答后调用 `engine.pending.resolve(request_id, answer)` 交付响应。
 
@@ -711,6 +724,7 @@ engine:
   max_turns: 0                    # 0 = 无限
   permission_mode: bypassPermissions  # 必须，-p 模式下不设此项则工具无法执行
   allowed_tools: null             # null = 全部允许；或指定白名单列表
+  disallowed_tools: null          # null = 无额外禁用；与扩展注册的合并
 
 state_dir: ~/.claude-ext          # session 状态持久化目录
 
