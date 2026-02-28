@@ -10,7 +10,7 @@
 
 **Do not open a public issue for security vulnerabilities.**
 
-Please report security issues by emailing [MAINTAINER_EMAIL]. Include:
+Please report security issues by emailing claudebot101001@users.noreply.github.com. Include:
 
 - Description of the vulnerability
 - Steps to reproduce

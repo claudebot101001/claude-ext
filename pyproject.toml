@@ -26,7 +26,7 @@ all = ["python-telegram-bot>=21.0", "cryptography>=42.0", "croniter>=1.0.0"]
 dev = ["pytest>=7.4", "ruff>=0.9.0"]
 
 [project.urls]
-Repository = "https://github.com/YOUR_USERNAME/claude-ext"
+Repository = "https://github.com/claudebot101001/claude-ext"
 
 [tool.setuptools.packages.find]
 include = ["core*", "extensions*"]

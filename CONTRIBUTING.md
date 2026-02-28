@@ -3,7 +3,7 @@
 ## Development Setup
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-ext.git
+git clone https://github.com/claudebot101001/claude-ext.git
 cd claude-ext
 python -m venv .venv
 source .venv/bin/activate

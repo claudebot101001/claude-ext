@@ -1,6 +1,6 @@
 # claude-ext
 
-[![CI](https://github.com/YOUR_USERNAME/claude-ext/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_USERNAME/claude-ext/actions/workflows/ci.yml)
+[![CI](https://github.com/claudebot101001/claude-ext/actions/workflows/ci.yml/badge.svg)](https://github.com/claudebot101001/claude-ext/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
@@ -41,7 +41,7 @@ Each Claude Code session runs in its own tmux session, fully decoupled from the 
 ### Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-ext.git
+git clone https://github.com/claudebot101001/claude-ext.git
 cd claude-ext
 python -m venv .venv
 source .venv/bin/activate
@@ -82,7 +82,8 @@ Then add it to the `enabled` list in `config.yaml`. No changes to core or other 
 
 ## Documentation
 
-- [Technical Reference](CLAUDE.md) — full architecture, core APIs, extension details
+- [Technical Reference](CLAUDE.md) — development guide and core APIs
+- [Architecture Deep Dive](docs/ARCHITECTURE.md) — full implementation details
 - [Roadmap](ROADMAP.md) — completed phases and planned features
 - [Contributing](CONTRIBUTING.md) — development setup, code style, PR process
 - [Security](SECURITY.md) — vulnerability reporting, security model
