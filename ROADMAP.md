@@ -60,6 +60,26 @@ Phase 4 Wallet 上线时只需 `self._internal_prefixes.append("wallet/")`，私
 - **三层存储**: `MEMORY.md`（热索引，< 200 行）/ `topics/<name>.md`（深度知识）/ `daily/YYYY-MM-DD.md`（append-only 日志）
 - **Phase 2b (延后)**: 本地嵌入模型向量语义搜索
 
+### Pre-Heartbeat Architecture Improvements
+
+Phase 3 前的架构加固。三项改进均为轻量级 core 增强。
+
+#### P1: MCP 工具注册表内省
+
+`register_mcp_server(name, config, tools=None)` 新增可选 `tools` 参数，声明 MCP server 提供的工具元数据。`list_mcp_tools()` 返回所有已注册 server 及其工具。四个 MCP 扩展（vault/memory/cron/ask_user）均已传入工具元数据。用于 `/status` 展示和调试定位。
+
+#### P2: 结构化事件日志
+
+新增 `core/events.py` — `EventLog` 类。JSONL 追加文件 `{state_dir}/events.jsonl`，每行 `{"ts", "type", "session_id", "detail"}`。Best-effort（不抛异常）、带锁（LOCK_SH/LOCK_EX）、10 MB 单代旋转。
+
+事件点：SessionManager 6 处（created/destroyed/stopped/prompt/completed/dead）+ Registry 3 处（started/stopped/load_failed）+ Vault 3 处（store/retrieve/delete）+ Cron 1 处（triggered）。
+
+#### P3: 健康检查注册表
+
+`Extension` 基类新增 `health_check() -> dict`（非抽象，默认 `{"status": "ok"}`）。`Registry.health_check_all()` 聚合所有扩展健康状态（5 秒超时）。五个扩展各自覆写返回特有状态（secret 数、文件数、job 数、策略列表等）。Telegram `/status` 命令集成展示。
+
+策略可见性：各扩展通过 health_check 返回 `policies` 字段自报当前策略（如 vault 的 `_internal_prefixes`、telegram 的 `allowed_users` 白名单人数），集中**可见性**而非集中**执行**。
+
 ---
 
 ## 待实现

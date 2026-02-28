@@ -24,3 +24,10 @@ class Extension(ABC):
     async def stop(self) -> None:
         """Gracefully stop the extension."""
         ...
+
+    async def health_check(self) -> dict:
+        """Return extension health status.  Override for custom checks.
+
+        Expected return: ``{"status": "ok"|"degraded"|"error", ...}``
+        """
+        return {"status": "ok"}

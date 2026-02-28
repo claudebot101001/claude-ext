@@ -86,7 +86,12 @@ class ExtensionImpl(Extension):
             "command": sys.executable,
             "args": [mcp_script],
             "env": {},  # No passphrase here — MCP uses bridge RPC
-        })
+        }, tools=[
+            {"name": "vault_store", "description": "Store a secret (key + value + optional tags)"},
+            {"name": "vault_list", "description": "List all keys and tags (no values)"},
+            {"name": "vault_retrieve", "description": "Retrieve a secret value by key"},
+            {"name": "vault_delete", "description": "Delete a secret by key"},
+        ])
 
         # Register bridge handler for MCP → main process calls
         self.engine.bridge.add_handler(self._bridge_handler)
@@ -113,6 +118,15 @@ class ExtensionImpl(Extension):
     async def stop(self) -> None:
         self.engine.services.pop("vault", None)
         log.info("Vault extension stopped.")
+
+    async def health_check(self) -> dict:
+        result: dict = {"status": "ok"}
+        if self._vault is None:
+            return {"status": "error", "detail": "VaultStore not initialized"}
+        result["secrets"] = len(self._vault.list_keys())
+        if self._internal_prefixes:
+            result["policies"] = {"internal_prefixes": list(self._internal_prefixes)}
+        return result
 
     def _validate_key(self, key: str) -> str | None:
         """Validate key format. Returns error message or None if valid."""
@@ -156,6 +170,8 @@ class ExtensionImpl(Extension):
                     return {"error": err}
                 log.info("vault_store key='%s' by session %s", key, session_id[:8])
                 self._vault.put(key, value, params.get("tags"))
+                if self.engine.events:
+                    self.engine.events.log("vault.store", session_id, {"key": key})
                 return {"ok": True}
 
             elif method == "vault_list":
@@ -168,6 +184,8 @@ class ExtensionImpl(Extension):
                 if self._is_internal_key(key):
                     return {"error": f"Key '{key}' is internal-only. Use the dedicated extension tools."}
                 log.info("vault_retrieve key='%s' by session %s", key, session_id[:8])
+                if self.engine.events:
+                    self.engine.events.log("vault.retrieve", session_id, {"key": key})
                 return {"value": self._vault.get(key)}
 
             elif method == "vault_delete":
@@ -175,6 +193,8 @@ class ExtensionImpl(Extension):
                 if not key:
                     return {"error": "Key is required."}
                 log.info("vault_delete key='%s' by session %s", key, session_id[:8])
+                if self.engine.events:
+                    self.engine.events.log("vault.delete", session_id, {"key": key})
                 return {"deleted": self._vault.delete(key)}
 
             else:

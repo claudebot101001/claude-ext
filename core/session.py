@@ -83,10 +83,12 @@ class SessionManager:
         base_dir: Path,
         engine_config: dict,
         max_sessions_per_user: int = 5,
+        events=None,
     ):
         self.base_dir = base_dir
         self.engine_config = engine_config
         self.max_sessions_per_user = max_sessions_per_user
+        self._events = events  # EventLog instance (optional)
         self.sessions: dict[str, Session] = {}
         self._queues: dict[str, asyncio.Queue] = {}
         self._workers: dict[str, asyncio.Task] = {}
@@ -94,6 +96,7 @@ class SessionManager:
         self._delivery_cbs: list[DeliveryCallback] = []
         self._pending_deliveries: list[tuple] = []  # queued until callback is set
         self._mcp_servers: dict[str, dict] = {}  # name -> MCP server config
+        self._mcp_tool_meta: dict[str, list[dict]] = {}  # name -> tool metadata
         self._system_prompt_parts: list[str] = []  # fragments appended to system prompt
         self._env_unset: list[str] = []  # env vars to unset in claude sessions
 
@@ -106,7 +109,8 @@ class SessionManager:
                 asyncio.create_task(cb(*args))
             self._pending_deliveries.clear()
 
-    def register_mcp_server(self, name: str, config: dict) -> None:
+    def register_mcp_server(self, name: str, config: dict,
+                            tools: list[dict] | None = None) -> None:
         """Register an MCP server that will be available to all sessions.
 
         Config follows Claude Code MCP format::
@@ -115,9 +119,23 @@ class SessionManager:
 
         Session-specific env vars (CLAUDE_EXT_SESSION_ID, CLAUDE_EXT_STATE_DIR)
         are injected automatically per session.
+
+        The optional *tools* parameter declares the tools this server provides,
+        each as ``{"name": ..., "description": ...}``.  Used for introspection
+        via :meth:`list_mcp_tools`.
         """
         self._mcp_servers[name] = config
-        log.info("Registered MCP server: %s", name)
+        if tools is not None:
+            self._mcp_tool_meta[name] = [
+                {"name": t["name"], "description": t.get("description", "")}
+                for t in tools
+            ]
+        log.info("Registered MCP server: %s (%d tools)", name, len(tools or []))
+
+    def list_mcp_tools(self) -> dict[str, list[dict]]:
+        """Return registered MCP servers and their declared tool metadata."""
+        return {name: list(self._mcp_tool_meta.get(name, []))
+                for name in self._mcp_servers}
 
     def add_system_prompt(self, text: str) -> None:
         """Append a fragment to the system prompt for all sessions.
@@ -201,6 +219,9 @@ class SessionManager:
         self.sessions[sid] = session
         self._setup_queue(sid)
         self._save_state(session)
+        if self._events:
+            self._events.log("session.created", sid,
+                             {"slot": slot, "name": session.name, "user_id": user_id})
         log.info("Created session #%d '%s' (%s)", slot, session.name, sid[:8])
         return session
 
@@ -265,6 +286,8 @@ class SessionManager:
         # Set STOPPED *before* Ctrl-C to prevent _execute_prompt race
         session.status = SessionStatus.STOPPED
         self._save_state(session)
+        if self._events:
+            self._events.log("session.stopped", session_id, {"drained": drained})
 
         # Send Ctrl-C (non-blocking)
         await self._tmux_send_ctrl_c(session.tmux_session)
@@ -301,6 +324,9 @@ class SessionManager:
         if sdir.exists():
             shutil.rmtree(sdir)
 
+        if self._events:
+            self._events.log("session.destroyed", session_id,
+                             {"slot": session.slot, "name": session.name})
         log.info("Destroyed session #%d '%s' (%s)", session.slot, session.name, session_id[:8])
 
     async def shutdown(self) -> None:
@@ -436,6 +462,10 @@ class SessionManager:
         session.status = SessionStatus.BUSY
         session.last_active_at = datetime.now(timezone.utc).isoformat()
 
+        if self._events:
+            self._events.log("session.prompt", session_id,
+                             {"prompt_count": session.prompt_count})
+
         # Generate and write run scripts (inner + outer)
         claude_cmd, run_sh = self._generate_run_scripts(session, sdir, is_first)
         (sdir / "claude_cmd.sh").write_text(claude_cmd, encoding="utf-8")
@@ -469,6 +499,12 @@ class SessionManager:
             session.claude_session_id = metadata["claude_session_id"]
         session.error = None
         self._save_state(session)
+
+        if self._events:
+            self._events.log("session.completed", session_id, {
+                "cost_usd": metadata.get("total_cost_usd"),
+                "turns": metadata.get("num_turns"),
+            })
 
         # Final delivery — include full result text as fallback in case
         # stream text events were lost (e.g. Telegram send failure during
@@ -746,6 +782,9 @@ class SessionManager:
                 session.status = SessionStatus.DEAD
                 session.error = "tmux session died unexpectedly"
                 self._save_state(session)
+                if self._events:
+                    self._events.log("session.dead", session_id,
+                                     {"error": "tmux session died unexpectedly"})
                 return "[Error] tmux session died unexpectedly.", {"is_error": True}
 
     async def _resume_monitor(self, session_id: str, sdir: Path) -> None:

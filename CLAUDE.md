@@ -8,11 +8,12 @@
 claude-ext/
 ├── core/                          # 核心层（稳定，极少修改）
 │   ├── engine.py                  # Claude Code CLI 封装 + SessionManager 入口 + services 注册表
-│   ├── extension.py               # 扩展基类（接口契约）
+│   ├── events.py                  # 结构化事件日志（JSONL 追加 + 查询 + 旋转）
+│   ├── extension.py               # 扩展基类（接口契约 + health_check）
 │   ├── bridge.py                  # Unix socket RPC 桥接（主进程 ↔ MCP 子进程）
 │   ├── mcp_base.py                # MCP stdio server 基类（JSON-RPC 样板）
 │   ├── pending.py                 # 异步请求/响应注册表（register → wait → resolve）
-│   ├── registry.py                # 扩展发现、加载、生命周期
+│   ├── registry.py                # 扩展发现、加载、生命周期、健康检查聚合
 │   ├── session.py                 # tmux-backed 多会话管理（核心模块）
 │   └── status.py                  # 状态查询（auth + usage API）
 ├── extensions/                    # 扩展层（每个子目录完全独立）
@@ -191,7 +192,8 @@ echo $? > /path/exitcode
 | `recover()` | 启动时扫描磁盘状态 + 检查 tmux 存活，恢复/重连（结果缓冲到 pending） |
 | `shutdown()` | 取消所有 worker，**不杀 tmux session**（核心设计点） |
 | `add_delivery_callback()` | 注册结果投递回调（支持多个）。首次注册时刷新 recover 期间缓冲的待投递结果 |
-| `register_mcp_server()` | 注册 MCP server 配置。所有后续 session 的 run.sh 自动添加 `--mcp-config` |
+| `register_mcp_server()` | 注册 MCP server 配置（可选 `tools` 元数据）。所有后续 session 的 run.sh 自动添加 `--mcp-config` |
+| `list_mcp_tools()` | 返回所有已注册 MCP server 及其声明的工具元数据 |
 | `register_env_unset()` | 注册需要在 Claude session 中 unset 的环境变量（防敏感信息泄漏） |
 
 #### 槽位机制
@@ -259,12 +261,19 @@ SessionManager 使用 `--output-format stream-json --verbose`，通过 `_stream_
 扩展可通过 `register_mcp_server()` 给 Claude session 提供自定义工具：
 
 ```python
-# 扩展的 start() 中注册
+# 扩展的 start() 中注册（含工具元数据用于内省）
 self.engine.session_manager.register_mcp_server("cron", {
     "command": "python",
     "args": ["/path/to/mcp_server.py"],
     "env": {"CRON_STORE_PATH": "/path/to/store.json"},
-})
+}, tools=[
+    {"name": "cron_create", "description": "Create a scheduled task"},
+    {"name": "cron_list", "description": "List all cron jobs"},
+])
+
+# 内省已注册的工具（如 /status 命令展示）
+tools = self.engine.session_manager.list_mcp_tools()
+# {"cron": [{"name": "cron_create", "description": "..."}, ...], "vault": [...]}
 ```
 
 SessionManager 自动为每个 session 生成 `mcp_config.json`，注入 session-specific 环境变量（`CLAUDE_EXT_SESSION_ID`、`CLAUDE_EXT_STATE_DIR`），并在 run.sh 中添加 `--mcp-config` 标志。MCP server 进程通过这些环境变量获取当前 session 的上下文。
@@ -294,6 +303,26 @@ SessionManager 在生成 `claude_cmd.sh` 时将所有已注册的变量与 `CLAU
 
 活跃 session 选择是扩展层的 UX 概念，不属于 core。Telegram 扩展自行管理 `active_sessions.json` 的读写和清理。其他扩展可使用不同的持久化策略或不持久化。
 
+### core/events.py — EventLog
+
+结构化事件日志，JSONL 追加文件。
+
+- 存储：`{state_dir}/events.jsonl`，每行一个 JSON 对象
+- 格式：`{"ts": "ISO8601", "type": "dotted.name", "session_id": "...", "detail": {...}}`
+- 并发安全：`events.lock` 统一 lockfile（LOCK_SH/LOCK_EX）
+- 旋转：文件超 10MB 时 rename 为 `.1`（单代旋转）
+- `log()` 是 best-effort，OSError 时 warning 不抛异常
+- `query(event_type?, session_id?, since?, limit=100)` 支持过滤，返回 newest-first
+
+**事件命名规范**：`namespace.action` 格式。
+
+| 命名空间 | 事件类型 | 触发位置 |
+|----------|----------|----------|
+| `session` | `session.created` / `session.destroyed` / `session.stopped` / `session.prompt` / `session.completed` / `session.dead` | SessionManager |
+| `ext` | `ext.started` / `ext.stopped` / `ext.load_failed` | Registry |
+| `vault` | `vault.store` / `vault.retrieve` / `vault.delete` | Vault bridge handler |
+| `cron` | `cron.triggered` | Cron `_execute_job()` |
+
 ### core/engine.py — ClaudeEngine
 
 提供两种调用模式：
@@ -314,7 +343,18 @@ response = await engine.ask(prompt="what is 1+1", cwd="/tmp")
 # 跨扩展服务发现
 self.engine.services["vault"] = self._vault              # vault 扩展 start() 中注册
 vault = self.engine.services.get("vault")                # crypto 扩展中查找
+
+# 事件日志
+if self.engine.events:
+    self.engine.events.log("vault.store", session_id, {"key": key})
+
+# 健康检查（通过 registry）
+health = await engine.registry.health_check_all()  # {"vault": {"status": "ok", ...}, ...}
 ```
+
+**`engine.events: EventLog | None`** — 结构化事件日志实例，在 `init_sessions()` 中创建。扩展通过 `self.engine.events` 访问，守护 `if self.engine.events:` 以兼容无 session manager 的场景。
+
+**`engine.registry`** — Registry 实例引用，在 `main.py` 中赋值。用于扩展健康检查聚合（`registry.health_check_all()`）。
 
 ### core/bridge.py — Bridge RPC
 
@@ -364,9 +404,15 @@ class Extension(ABC):
 
     @abstractmethod
     async def stop(self) -> None: ...   # 优雅停止
+
+    async def health_check(self) -> dict:
+        """返回扩展健康状态。非抽象，默认返回 {"status": "ok"}"""
+        return {"status": "ok"}
 ```
 
 扩展通过 `self.engine.session_manager` 管理多会话，或通过 `self.engine.ask()` 做简单调用。
+
+**health_check() 覆写约定**：返回字典至少包含 `status` 字段（`"ok"` / `"degraded"` / `"error"`）。可附加扩展特有的状态信息（如 `secrets` 数量、`jobs` 数量、`policies` 策略列表）。Registry 通过 `health_check_all()` 聚合所有扩展的健康状态，5 秒超时。
 
 ### core/registry.py — Registry
 
@@ -375,6 +421,9 @@ class Extension(ABC):
 发现机制：扫描 `extensions/` 下所有包含 `extension.py` 的子目录。
 加载机制：`importlib.import_module(f"extensions.{name}.extension")` 动态导入，获取其中的 `ExtensionImpl` 类。
 生命周期：`load()` → `start_all()` → （运行中）→ `stop_all()`（逆序停止）。
+公开接口：`extensions` property 返回已加载扩展列表的副本（按注册顺序）。
+健康检查：`health_check_all()` 通过 `asyncio.gather` 并发调用所有扩展的 `health_check()`，5 秒 per-extension 超时，返回 `dict[str, dict]`。
+事件日志：`start_all()` / `stop_all()` / `load()` 自动记录 `ext.started` / `ext.stopped` / `ext.load_failed` 事件。
 
 ### core/status.py — 状态查询
 

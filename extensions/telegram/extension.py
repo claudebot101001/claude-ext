@@ -550,7 +550,60 @@ class ExtensionImpl(Extension):
 
         auth, usage = await get_auth_info(), await get_usage()
         text = format_status(auth, usage, session_meta)
+
+        # Append extension health report
+        ext_report = await self._build_health_report()
+        if ext_report:
+            text += "\n" + ext_report
+
         await update.message.reply_text(f"<pre>{text}</pre>", parse_mode="HTML")
+
+    async def _build_health_report(self) -> str:
+        """Build extension health + tools summary via async health checks."""
+        registry = self.engine.registry
+        if not registry:
+            return ""
+
+        mcp_tools = self.sm.list_mcp_tools() if self.sm else {}
+        health = await registry.health_check_all()
+
+        lines = ["-- Extensions --"]
+        for ext in registry.extensions:
+            name = ext.name
+            hc = health.get(name, {})
+            status = hc.get("status", "ok")
+            icon = {"ok": "+", "degraded": "~", "error": "!"}.get(status, "?")
+
+            # Collect info parts
+            parts: list[str] = []
+            tool_count = len(mcp_tools.get(name, []))
+            if tool_count:
+                label = "tool" if tool_count == 1 else "tools"
+                parts.append(f"{tool_count} {label}")
+
+            # Extension-specific details from health_check
+            for key in ("secrets", "files", "jobs"):
+                if key in hc:
+                    parts.append(f"{hc[key]} {key}")
+            if hc.get("scheduler"):
+                parts.append(hc["scheduler"])
+            if hc.get("polling") is True:
+                parts.append("polling active")
+
+            line = f"  [{icon}] {name}"
+            if parts:
+                line += f"  {', '.join(parts)}"
+            lines.append(line)
+
+            # Policies sub-line
+            policies = hc.get("policies")
+            if policies:
+                policy_parts = []
+                for pk, pv in policies.items():
+                    policy_parts.append(f"{pk} ({pv})" if isinstance(pv, int) else f"{pk}: {pv}")
+                lines.append(f"      policies: {', '.join(policy_parts)}")
+
+        return "\n".join(lines)
 
     async def _cmd_stop(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -735,3 +788,19 @@ class ExtensionImpl(Extension):
             await self.app.stop()
             await self.app.shutdown()
             log.info("Telegram bot stopped.")
+
+    async def health_check(self) -> dict:
+        polling = (
+            self.app is not None
+            and self.app.updater is not None
+            and self.app.updater.running
+        )
+        result: dict = {
+            "status": "ok" if polling else "error",
+            "polling": polling,
+        }
+        if self.allowed_users:
+            result["policies"] = {
+                "allowed_users": len(self.allowed_users),
+            }
+        return result

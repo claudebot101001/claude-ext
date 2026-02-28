@@ -52,6 +52,7 @@ async def main():
         await engine.bridge.start()
 
     registry = Registry(engine, config)
+    engine.registry = registry
 
     enabled = config.get("enabled", [])
     available = registry.discover()

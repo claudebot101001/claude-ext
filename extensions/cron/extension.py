@@ -47,7 +47,12 @@ class ExtensionImpl(Extension):
             "env": {
                 "CRON_STORE_PATH": str(self.store.path),
             },
-        })
+        }, tools=[
+            {"name": "cron_create", "description": "Create a scheduled task (cron or one-time)"},
+            {"name": "cron_list", "description": "List all cron jobs for current user"},
+            {"name": "cron_delete", "description": "Delete a cron job by ID"},
+            {"name": "cron_status", "description": "Get detailed status of a cron job"},
+        ])
 
         # Register delivery callback to track job completion
         self.sm.add_delivery_callback(self._on_delivery)
@@ -69,6 +74,18 @@ class ExtensionImpl(Extension):
             except asyncio.CancelledError:
                 pass
         log.info("Cron extension stopped.")
+
+    async def health_check(self) -> dict:
+        scheduler_alive = (
+            self._scheduler_task is not None
+            and not self._scheduler_task.done()
+        )
+        jobs = self.store.list_jobs()
+        return {
+            "status": "ok" if scheduler_alive else "error",
+            "scheduler": "running" if scheduler_alive else "stopped",
+            "jobs": len(jobs),
+        }
 
     # -- static job loading -------------------------------------------------
 
@@ -131,6 +148,11 @@ class ExtensionImpl(Extension):
 
     async def _execute_job(self, job: CronJob) -> None:
         """Execute a cron job by creating/reusing a session and sending the prompt."""
+        if self.engine.events:
+            self.engine.events.log("cron.triggered", detail={
+                "job_id": job.id, "name": job.name,
+                "strategy": job.session_strategy,
+            })
 
         if job.session_strategy == "reuse":
             await self._execute_reuse(job)

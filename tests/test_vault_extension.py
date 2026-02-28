@@ -18,9 +18,14 @@ def vault_store(tmp_path):
     return VaultStore(tmp_path / "vault", passphrase="test-pw")
 
 
+class _StubEngine:
+    events = None
+
+
 @pytest.fixture
 def extension(vault_store):
     ext = ExtensionImpl()
+    ext.engine = _StubEngine()
     ext._vault = vault_store
     ext._internal_prefixes = []
     return ext

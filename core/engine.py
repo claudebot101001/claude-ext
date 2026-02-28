@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from core.bridge import BridgeServer
+from core.events import EventLog
 from core.pending import PendingStore
 from core.session import SessionManager
 
@@ -31,10 +32,13 @@ class ClaudeEngine:
         self.session_manager: SessionManager | None = None
         self.bridge: BridgeServer | None = None
         self.pending = PendingStore()
+        self.events: EventLog | None = None
+        self.registry = None  # set by main.py after Registry is created
         self.services: dict[str, Any] = {}
 
     def init_sessions(self, base_dir: Path, max_sessions_per_user: int = 5) -> None:
         """Initialize the tmux-backed session manager."""
+        self.events = EventLog(base_dir / "events.jsonl")
         self.session_manager = SessionManager(
             base_dir=base_dir,
             engine_config={
@@ -44,6 +48,7 @@ class ClaudeEngine:
                 "allowed_tools": self.allowed_tools,
             },
             max_sessions_per_user=max_sessions_per_user,
+            events=self.events,
         )
         self.bridge = BridgeServer(base_dir / "bridge.sock")
 

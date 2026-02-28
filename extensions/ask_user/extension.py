@@ -40,7 +40,9 @@ class ExtensionImpl(Extension):
             "command": sys.executable,
             "args": [mcp_script],
             "env": {"ASK_USER_TIMEOUT": str(self._timeout)},
-        })
+        }, tools=[
+            {"name": "ask_user", "description": "Ask the user a question and wait for response"},
+        ])
 
         # Register bridge handler for reverse-channel calls from MCP server
         self.engine.bridge.add_handler(self._bridge_handler)
@@ -58,6 +60,9 @@ class ExtensionImpl(Extension):
 
     async def stop(self) -> None:
         log.info("ask_user extension stopped.")
+
+    async def health_check(self) -> dict:
+        return {"status": "ok"}
 
     async def _bridge_handler(self, method: str, params: dict) -> dict | None:
         """Handle 'ask_user' bridge RPCs from the MCP server process."""
