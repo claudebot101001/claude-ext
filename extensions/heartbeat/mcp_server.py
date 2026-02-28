@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Heartbeat MCP server — manage autonomous heartbeat via Claude tool calls.
+
+Spawned by Claude Code per session.  Inherits MCPServerBase for protocol
+handling; uses direct file I/O via HEARTBEAT_DIR environment variable.
+"""
+
+import os
+import sys
+from pathlib import Path
+
+# Ensure the project root is importable (mcp_server.py lives in extensions/heartbeat/)
+_project_root = str(Path(__file__).resolve().parent.parent.parent)
+if _project_root not in sys.path:
+    sys.path.insert(0, _project_root)
+
+from core.mcp_base import MCPServerBase  # noqa: E402
+from extensions.heartbeat.store import HeartbeatStore  # noqa: E402
+
+
+class HeartbeatMCPServer(MCPServerBase):
+    name = "heartbeat"
+    tools = [
+        {
+            "name": "heartbeat_get_instructions",
+            "description": (
+                "Read the heartbeat standing instructions (HEARTBEAT.md). "
+                "This defines what the autonomous heartbeat checks periodically."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "heartbeat_set_instructions",
+            "description": (
+                "Overwrite the heartbeat standing instructions (HEARTBEAT.md). "
+                "Use this to add, modify, or remove periodic monitoring tasks."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "Full content for HEARTBEAT.md",
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+        {
+            "name": "heartbeat_get_status",
+            "description": (
+                "Get the heartbeat scheduler status: enabled state, run counts, "
+                "next scheduled run, consecutive idle count."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "heartbeat_pause",
+            "description": "Pause the autonomous heartbeat. It will not run until resumed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "heartbeat_resume",
+            "description": "Resume the autonomous heartbeat after pausing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.handlers = {
+            "heartbeat_get_instructions": self._handle_get_instructions,
+            "heartbeat_set_instructions": self._handle_set_instructions,
+            "heartbeat_get_status": self._handle_get_status,
+            "heartbeat_pause": self._handle_pause,
+            "heartbeat_resume": self._handle_resume,
+        }
+
+    def _get_store(self) -> HeartbeatStore:
+        if not hasattr(self, "_store"):
+            heartbeat_dir = os.environ.get("HEARTBEAT_DIR", "")
+            if not heartbeat_dir:
+                raise RuntimeError("HEARTBEAT_DIR not set")
+            self._store = HeartbeatStore(Path(heartbeat_dir))
+        return self._store
+
+    # -- handlers -----------------------------------------------------------
+
+    def _handle_get_instructions(self, args: dict) -> str:
+        store = self._get_store()
+        content = store.read_instructions()
+        if content is None:
+            return "No heartbeat instructions set yet. Use heartbeat_set_instructions to create them."
+        return content
+
+    def _handle_set_instructions(self, args: dict) -> str:
+        content = args.get("content")
+        if content is None:
+            return "Error: 'content' is required."
+        store = self._get_store()
+        nbytes = store.write_instructions(content)
+        return f"Heartbeat instructions updated ({nbytes} bytes)."
+
+    def _handle_get_status(self, args: dict) -> str:
+        store = self._get_store()
+        state = store.load_state()
+        lines = [
+            f"Enabled: {state.enabled}",
+            f"Last run: {state.last_run or 'never'}",
+            f"Next run: {state.next_run or 'not scheduled'}",
+            f"Total runs: {state.run_count}",
+            f"Runs today: {state.runs_today}",
+            f"Consecutive idle: {state.consecutive_noop}",
+            f"Active session: {state.active_session_id or 'none'}",
+        ]
+        return "\n".join(lines)
+
+    def _handle_pause(self, args: dict) -> str:
+        store = self._get_store()
+        store.update_state(enabled=False)
+        return "Heartbeat paused. Use heartbeat_resume to re-enable."
+
+    def _handle_resume(self, args: dict) -> str:
+        store = self._get_store()
+        store.update_state(enabled=True)
+        return "Heartbeat resumed."
+
+
+if __name__ == "__main__":
+    HeartbeatMCPServer().run()

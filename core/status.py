@@ -86,7 +86,7 @@ def format_status(auth: dict, usage: dict, session: dict | None = None) -> str:
                 bar = _progress_bar(util)
                 reset_str = ""
                 if resets_at:
-                    reset_str = f"  resets {_relative_time(resets_at)}"
+                    reset_str = f"  resets {relative_time(resets_at)}"
                 lines.append(f"  {label}: {bar} {util:.0f}%{reset_str}")
 
         # Extra usage (overage billing)
@@ -120,7 +120,7 @@ def _progress_bar(percent: float, width: int = 10) -> str:
     return "\u2593" * filled + "\u2591" * (width - filled)
 
 
-def _relative_time(iso_str: str) -> str:
+def relative_time(iso_str: str) -> str:
     try:
         reset_dt = datetime.fromisoformat(iso_str)
         now = datetime.now(timezone.utc)

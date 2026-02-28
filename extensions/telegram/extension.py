@@ -590,6 +590,19 @@ class ExtensionImpl(Extension):
             if hc.get("polling") is True:
                 parts.append("polling active")
 
+            # Heartbeat-specific details
+            if "runs_today" in hc:
+                parts.append(f"{hc['runs_today']} runs today")
+            if hc.get("consecutive_noop"):
+                parts.append(f"{hc['consecutive_noop']} idle")
+            if hc.get("next_run"):
+                from core.status import relative_time
+                next_str = relative_time(hc["next_run"])
+                if next_str:
+                    parts.append(f"next {next_str}")
+            if hc.get("interval"):
+                parts.append(f"{hc['interval']}s interval")
+
             line = f"  [{icon}] {name}"
             if parts:
                 line += f"  {', '.join(parts)}"
