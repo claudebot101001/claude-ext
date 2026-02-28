@@ -11,7 +11,8 @@
 - **store.py**: PBKDF2-HMAC-SHA256 (600K iterations) 密钥派生 + Fernet 加解密 + 统一 lockfile（`secrets.lock`，LOCK_SH/LOCK_EX 读写互斥） + 原子写入 + 0700 目录权限 + 0600 文件权限
 - **mcp_server.py**: `vault_store` / `vault_list` / `vault_retrieve` / `vault_delete` 四个 MCP 工具，通过 bridge RPC 调用主进程 VaultStore
 - **extension.py**: 注册 `engine.services["vault"]` 供其他扩展程序内调用 + 注册 MCP server + bridge handler + key 命名校验（强制 `category/service/name` 格式）+ `_internal_prefixes` 访问控制机制 + 系统提示约束（不泄露密文）
-- **安全设计**: passphrase 从环境变量 `CLAUDE_EXT_VAULT_PASSPHRASE` 读取，不进配置文件。MCP server 进程不持有 passphrase，所有加解密通过 bridge RPC 在主进程完成。每次 bridge 调用携带 `session_id`，handler 记录审计日志
+- **安全设计**: passphrase 优先级：`CLAUDE_EXT_VAULT_PASSPHRASE` 环境变量 > `{vault_dir}/.passphrase` 文件 > 自动生成（`secrets.token_urlsafe(32)`, 0600 权限）。MCP server 进程不持有 passphrase，所有加解密通过 bridge RPC 在主进程完成。通过 `register_env_unset()` 确保 passphrase 不泄漏到 Claude session 环境。每次 bridge 调用携带 `session_id`，handler 记录审计日志
+- **安全边界的诚实定位**: 加密是 defense-in-depth（防止密文文件被意外拷贝后直接可读），不是主安全边界。在 `bypassPermissions` 模式下 Claude 有完整文件系统访问权，真正的访问控制是 `_internal_prefixes`（控制 MCP 能读什么）和 OS 权限（控制谁能跑进程）
 - **性能基线** (实测): raw socket echo 0.06ms, vault_retrieve 0.24ms, vault_store 0.57ms。瓶颈在 Fernet crypto + 磁盘 I/O，socket 开销可忽略
 
 #### Vault Key 命名规范

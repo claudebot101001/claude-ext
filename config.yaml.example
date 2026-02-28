@@ -46,8 +46,9 @@ extensions:
     timeout: 300                   # Seconds to wait for user response before timing out
 
   vault:
-    # Passphrase is read from CLAUDE_EXT_VAULT_PASSPHRASE environment variable.
-    # Do NOT put the passphrase in this file.
+    # Passphrase: auto-generated and stored in {state_dir}/vault/.passphrase (0600).
+    # Override with CLAUDE_EXT_VAULT_PASSPHRASE env var if you need a specific one.
+    # The env var is automatically unset in Claude sessions to prevent leakage.
     {}
 
   memory:

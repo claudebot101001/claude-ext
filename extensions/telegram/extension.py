@@ -61,6 +61,13 @@ class ExtensionImpl(Extension):
     def sm(self):
         return self.engine.session_manager
 
+    def _resolve_dir(self, path: str) -> str:
+        """Resolve a directory path: ~ expansion, relative to working_dir."""
+        path = os.path.expanduser(path)
+        if not os.path.isabs(path):
+            path = os.path.join(self.working_dir, path)
+        return os.path.normpath(path)
+
     # -- active session persistence -----------------------------------------
 
     def _active_map_path(self):
@@ -437,13 +444,13 @@ class ExtensionImpl(Extension):
         name = None
         work_dir = self.working_dir
 
-        if len(parts) == 2 and os.path.isdir(parts[1].strip()):
+        if len(parts) == 2 and os.path.isdir(self._resolve_dir(parts[1].strip())):
             # Single arg is an existing directory — treat as dir, auto-name
-            work_dir = parts[1].strip()
+            work_dir = self._resolve_dir(parts[1].strip())
         elif len(parts) >= 2:
             name = parts[1].strip()
             if len(parts) >= 3:
-                candidate = parts[2].strip()
+                candidate = self._resolve_dir(parts[2].strip())
                 if os.path.isdir(candidate):
                     work_dir = candidate
                 else:

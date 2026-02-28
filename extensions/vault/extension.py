@@ -6,7 +6,14 @@ Provides:
 2. MCP tools (vault_store/list/retrieve/delete) for Claude to manage secrets.
 3. System prompt guidance to prevent echoing secrets to users.
 
-Passphrase is read from ``CLAUDE_EXT_VAULT_PASSPHRASE`` environment variable.
+Passphrase priority: CLAUDE_EXT_VAULT_PASSPHRASE env var > .passphrase file
+> auto-generate.  The env var is unset in Claude sessions to prevent leakage.
+
+Security note: encryption is defense-in-depth (prevents plaintext secrets in
+file copies/backups), NOT a primary security boundary.  The real access control
+is ``_internal_prefixes`` (blocks MCP retrieve for sensitive keys) and OS-level
+permissions.  In bypassPermissions mode, Claude has full filesystem access
+regardless of encryption.
 """
 
 import logging
@@ -41,18 +48,34 @@ class ExtensionImpl(Extension):
         return self.engine.session_manager
 
     async def start(self) -> None:
-        # Read passphrase from environment
-        passphrase = os.environ.get("CLAUDE_EXT_VAULT_PASSPHRASE", "")
-        if not passphrase:
-            raise RuntimeError(
-                "CLAUDE_EXT_VAULT_PASSPHRASE environment variable is required. "
-                "Set it before starting claude-ext."
-            )
-
-        # Initialize vault store
+        # Initialize vault directory
         state_dir = self.sm.base_dir if self.sm else Path("~/.claude-ext").expanduser()
         vault_dir = state_dir / "vault"
+        vault_dir.mkdir(parents=True, exist_ok=True)
+
+        # Passphrase: env var > .passphrase file > auto-generate
+        passphrase = os.environ.get("CLAUDE_EXT_VAULT_PASSPHRASE", "")
+        passphrase_file = vault_dir / ".passphrase"
+
+        if passphrase:
+            log.info("Vault: using passphrase from environment variable")
+        else:
+            if passphrase_file.exists():
+                passphrase = passphrase_file.read_text(encoding="utf-8").strip()
+            if not passphrase:
+                # File missing or empty — generate a new one
+                import secrets as _secrets
+                passphrase = _secrets.token_urlsafe(32)
+                passphrase_file.write_text(passphrase, encoding="utf-8")
+                os.chmod(passphrase_file, 0o600)
+                log.info("Vault: generated new passphrase at %s", passphrase_file)
+            else:
+                log.info("Vault: loaded passphrase from %s", passphrase_file)
+
         self._vault = VaultStore(vault_dir, passphrase)
+
+        # Prevent passphrase env var from leaking into Claude sessions
+        self.sm.register_env_unset("CLAUDE_EXT_VAULT_PASSPHRASE")
 
         # Register as shared service for other extensions
         self.engine.services["vault"] = self._vault

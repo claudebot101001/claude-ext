@@ -192,6 +192,7 @@ echo $? > /path/exitcode
 | `shutdown()` | 取消所有 worker，**不杀 tmux session**（核心设计点） |
 | `add_delivery_callback()` | 注册结果投递回调（支持多个）。首次注册时刷新 recover 期间缓冲的待投递结果 |
 | `register_mcp_server()` | 注册 MCP server 配置。所有后续 session 的 run.sh 自动添加 `--mcp-config` |
+| `register_env_unset()` | 注册需要在 Claude session 中 unset 的环境变量（防敏感信息泄漏） |
 
 #### 槽位机制
 
@@ -267,6 +268,17 @@ self.engine.session_manager.register_mcp_server("cron", {
 ```
 
 SessionManager 自动为每个 session 生成 `mcp_config.json`，注入 session-specific 环境变量（`CLAUDE_EXT_SESSION_ID`、`CLAUDE_EXT_STATE_DIR`），并在 run.sh 中添加 `--mcp-config` 标志。MCP server 进程通过这些环境变量获取当前 session 的上下文。
+
+#### 环境变量隔离
+
+扩展可通过 `register_env_unset()` 注册需要在 Claude session 中清除的环境变量，防止敏感信息泄漏到 LLM 可访问的进程环境中：
+
+```python
+# vault 扩展 start() 中注册
+self.sm.register_env_unset("CLAUDE_EXT_VAULT_PASSPHRASE")
+```
+
+SessionManager 在生成 `claude_cmd.sh` 时将所有已注册的变量与 `CLAUDECODE` 一起 unset。
 
 #### 多 Delivery Callback
 
@@ -438,7 +450,7 @@ Telegram Bot 桥接，基于 tmux 多会话管理。
 | 命令 | 功能 |
 |------|------|
 | `/start` | 欢迎信息 |
-| `/new [name] [dir]` | 创建新 session（可选名称和工作目录）。单参数为目录时自动识别 |
+| `/new [name] [dir]` | 创建新 session（可选名称和工作目录）。单参数为目录时自动识别。目录支持 `~` 展开和相对于 `working_dir` 的解析 |
 | `/sessions` | 列出所有 session，`*` 标记当前活跃 |
 | `/switch <slot\|name>` | 切换活跃 session（按槽位号或名称） |
 | `/status` | Auth + Usage + 当前 session 信息 |
@@ -562,7 +574,9 @@ Claude session
             └─ 主进程 bridge handler → VaultStore (加解密)
 ```
 
-MCP server 进程**不持有 passphrase**，所有加解密通过 bridge RPC 在主进程完成。passphrase 从环境变量 `CLAUDE_EXT_VAULT_PASSPHRASE` 读取，不进配置文件。
+MCP server 进程**不持有 passphrase**，所有加解密通过 bridge RPC 在主进程完成。Passphrase 优先级：`CLAUDE_EXT_VAULT_PASSPHRASE` 环境变量 > `{vault_dir}/.passphrase` 文件 > 自动生成（`secrets.token_urlsafe(32)`, 0600 权限）。零配置即可启用。通过 `register_env_unset()` 确保环境变量不泄漏到 Claude session。
+
+**安全边界**：加密是 defense-in-depth（防止密文文件被意外拷贝后直接可读），不是主安全边界。在 `bypassPermissions` 模式下 Claude 有完整文件系统访问权，真正的访问控制是 `_internal_prefixes`（控制 MCP 能读什么）和 OS 权限（控制谁能跑进程）。
 
 **store.py — VaultStore**：
 
@@ -655,14 +669,21 @@ sessions:
   max_sessions_per_user: 5        # 每用户最大并发 session 数（= 槽位数）
 
 enabled:                          # 启用的扩展名（对应 extensions/ 下的目录名）
+  - vault                         # 加密凭证库（零配置，passphrase 自动生成）
+  - memory                        # 跨 session 记忆（零配置）
   - telegram
+  # - ask_user                    # 交互式提问
   # - cron                        # 定时任务调度器
 
 extensions:                       # 每个扩展的独立配置
+  vault:
+    {}                            # passphrase 自动生成并存储在 {state_dir}/vault/.passphrase
+  memory:
+    {}                            # 文件存储在 {state_dir}/memory/
   telegram:
     token: "BOT_TOKEN"
     allowed_users: [123456789]    # Telegram user ID 白名单
-    working_dir: null             # 默认工作目录，null = 当前目录；可通过 /new 覆盖
+    working_dir: null             # 默认工作目录，null = 当前目录；/new 支持相对路径和 ~ 展开
   cron:
     jobs:                         # 静态 job 列表（可选，Claude 也可动态创建）
       - name: daily-review

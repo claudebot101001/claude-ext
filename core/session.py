@@ -95,6 +95,7 @@ class SessionManager:
         self._pending_deliveries: list[tuple] = []  # queued until callback is set
         self._mcp_servers: dict[str, dict] = {}  # name -> MCP server config
         self._system_prompt_parts: list[str] = []  # fragments appended to system prompt
+        self._env_unset: list[str] = []  # env vars to unset in claude sessions
 
     def add_delivery_callback(self, cb: DeliveryCallback) -> None:
         """Register a result delivery callback.  Multiple callbacks supported.
@@ -126,6 +127,16 @@ class SessionManager:
         """
         self._system_prompt_parts.append(text)
         log.info("Added system prompt fragment (%d chars)", len(text))
+
+    def register_env_unset(self, var_name: str) -> None:
+        """Register an environment variable to unset in Claude sessions.
+
+        Extensions call this to prevent sensitive env vars (e.g. passphrases)
+        from leaking into the Claude process environment.
+        """
+        if var_name not in self._env_unset:
+            self._env_unset.append(var_name)
+            log.info("Registered env var for unset in sessions: %s", var_name)
 
     # -- directory helpers --------------------------------------------------
 
@@ -549,9 +560,10 @@ class SessionManager:
             sys_prompt_line = f'SYS_PROMPT=$(cat {sys_prompt_file})\n'
             cmd_str += ' --append-system-prompt "$SYS_PROMPT"'
 
+        unset_vars = " ".join(["CLAUDECODE"] + self._env_unset)
         claude_cmd = (
             "#!/bin/bash\n"
-            "unset CLAUDECODE\n"
+            f"unset {unset_vars}\n"
             f"PROMPT=$(cat {prompt_file})\n"
             f"{sys_prompt_line}"
             f"cd {work_dir}\n"
