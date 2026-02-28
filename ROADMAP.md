@@ -47,39 +47,20 @@ if self._is_internal_key(key):
 
 Phase 4 Wallet 上线时只需 `self._internal_prefixes.append("wallet/")`，私钥即不可通过 MCP `vault_retrieve` 读取。其他扩展通过 `engine.services["vault"].get()` 程序内直接访问，不受前缀限制（已有测试覆盖 `TestInternalPrefixes`）。session_id 已在 bridge 协议中透传，需要时可进一步按 session context 做细粒度控制。
 
+### Phase 2: Memory — 跨 session 记忆系统
+
+`extensions/memory/` — Markdown-on-disk 持久记忆，Agent 自主维护。
+
+- **store.py**: MemoryStore — 路径安全（拒绝绝对路径、`..` 遍历、非 `.md` 文件、symlink 逃逸）+ 统一 lockfile（`memory.lock`，LOCK_SH/LOCK_EX）+ 原子写入（write 用 temp+rename，append 在 LOCK_EX 下直接追加）+ 512 KB 读取上限 + 搜索结果上限 50 条
+- **mcp_server.py**: `memory_read` / `memory_write` / `memory_append` / `memory_search` / `memory_list` 五个 MCP 工具，MCP 进程惰性初始化 MemoryStore 直接读写
+- **extension.py**: 注册 `engine.services["memory"]` + 注册 MCP server（注入 `MEMORY_DIR` 环境变量）+ 系统提示注入（SESSION START PROTOCOL + CURATION 规则）+ 首次启动 seed `MEMORY.md` 模板
+- **设计决策**: 直接文件 I/O，不走 bridge RPC。Memory 是明文 Markdown，无加密/访问控制需求。MCP server 进程持有自己的 MemoryStore 实例，省去 socket round-trip。审计需求可通过 MemoryStore 方法内 `log.info` 满足
+- **三层存储**: `MEMORY.md`（热索引，< 200 行）/ `topics/<name>.md`（深度知识）/ `daily/YYYY-MM-DD.md`（append-only 日志）
+- **Phase 2b (延后)**: 本地嵌入模型向量语义搜索
+
 ---
 
 ## 待实现
-
-### Phase 2: Memory — 跨 session 记忆系统
-
-**目标**：让 Agent 拥有跨 session 的持久记忆，区别于 `CLAUDE.md`（项目指令）和 `--resume`（单 session 连续上下文）。
-
-**架构方向**：
-
-```
-extensions/memory/
-    store.py           # MemoryStore: 文件 I/O + 每日日志轮转 + 关键词搜索
-    mcp_server.py      # memory_read / memory_write / memory_append / memory_search / memory_list
-    extension.py       # 注册 MCP server + 系统提示注入
-```
-
-**关键设计**：
-- **磁盘布局**: `~/.claude-ext/memory/` 下 `MEMORY.md`（核心记忆）+ `daily/YYYY-MM-DD.md`（每日日志）+ `topics/`（主题文件）
-- 参考 OpenClaw 的 Markdown-on-disk 模式，Agent 自己维护和精炼记忆
-- **Phase 2a**: grep 关键词搜索作为 MVP
-- **Phase 2b (延后)**: 本地嵌入模型向量语义搜索
-- 系统提示引导 Agent 在 session 开始时读取 MEMORY.md，任务完成后追加每日日志
-
-**实现要点**：
-- `memory_read(path)`: 读取指定记忆文件
-- `memory_write(path, content)`: 覆写文件（用于 MEMORY.md 精炼）
-- `memory_append(path, content)`: 追加内容（用于每日日志，自动加时间戳）
-- `memory_search(query)`: 全目录 grep 搜索
-- `memory_list()`: 列出所有记忆文件
-- 路径限制在 memory 目录内，防止路径遍历
-
----
 
 ### Phase 3: Heartbeat — 心跳驱动的自主模式
 
@@ -173,7 +154,7 @@ extensions/browser/
 ```
 Phase 1: Vault  ←── 所有后续阶段的凭证基础 ✅ 已完成
     ↓
-Phase 2: Memory ←── 自主行为的前提
+Phase 2: Memory ←── 自主行为的前提 ✅ 已完成
     ↓
 Phase 3: Heartbeat ←── 从被动到主动的跃迁
     ↓ (可与 4, 5 并行)

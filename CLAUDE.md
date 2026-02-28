@@ -29,6 +29,10 @@ claude-ext/
 │   │   ├── store.py               # VaultStore: Fernet 加解密 + 统一 lockfile
 │   │   ├── mcp_server.py          # MCP stdio server（vault 四工具）
 │   │   └── requirements.txt       # cryptography>=42.0
+│   ├── memory/
+│   │   ├── extension.py           # 跨 session 记忆（MCP 注册 + 系统提示 + seed）
+│   │   ├── store.py               # MemoryStore: Markdown I/O + 路径安全 + flock
+│   │   └── mcp_server.py          # MCP stdio server（memory 五工具）
 │   └── ask_user/
 │       ├── extension.py           # 交互式提问扩展（bridge + PendingStore）
 │       └── mcp_server.py          # MCP stdio server（ask_user 工具）
@@ -584,6 +588,35 @@ MCP server 进程**不持有 passphrase**，所有加解密通过 bridge RPC 在
 **系统提示约束**：注入指令要求 Claude 永远不向用户回显秘密值，取到后直接用在后续工具调用中。
 
 **审计**：每次 bridge 调用携带 `session_id`，handler 记录审计日志（`vault_store`、`vault_retrieve`、`vault_delete`）。
+
+### 现有扩展：memory
+
+跨 session 持久记忆系统。让 Agent 在多次对话间积累知识、记住用户偏好和项目上下文。
+
+**设计决策：直接文件 I/O，不走 bridge RPC。** Memory 是明文 Markdown，无加密/访问控制需求，不存在"不能进入 LLM 上下文"的安全约束。MCP server 进程持有自己的 MemoryStore 实例直接读写磁盘，省去 socket round-trip。如需审计，在 MemoryStore 方法中加 `log.info` 即可。
+
+**store.py — MemoryStore**：
+
+- 存储格式：纯 Markdown 文件，人类可读，grep 友好
+- 三层结构：`MEMORY.md`（热索引）/ `topics/<name>.md`（深度知识）/ `daily/YYYY-MM-DD.md`（日志）
+- 路径安全：拒绝绝对路径、`..` 遍历、非 `.md` 文件、symlink 逃逸（`resolve()` + `is_relative_to`）
+- 并发控制：统一 lockfile（`memory.lock`）。读操作 `LOCK_SH`，写操作 `LOCK_EX`
+- 原子写入：`write()` 用 temp+rename；`append()` 在 `LOCK_EX` 下直接追加（避免大文件拷贝）
+- 读取上限：512 KB 截断，防止大文件爆上下文
+
+**MCP 工具**：
+
+| 工具 | 功能 |
+|------|------|
+| `memory_read` | 读取记忆文件 |
+| `memory_write` | 覆写/创建文件（自动创建父目录） |
+| `memory_append` | 追加内容（自动 UTC 时间戳，适合 daily log） |
+| `memory_search` | 全目录正则搜索（大小写不敏感，上限 50 条） |
+| `memory_list` | 列出文件（按修改时间降序，可按子目录过滤） |
+
+**系统提示驱动**：注入 SESSION START PROTOCOL（每次 session 开始读 `MEMORY.md`）+ CURATION 规则（超 150 行时精炼，移入 topic 文件）。Agent 自主维护记忆质量。
+
+**Seed 文件**：首次启动自动创建 `MEMORY.md` 模板（含 User Preferences / Active Projects / Key Decisions / Topic Files 四个段落），不覆盖已有内容。
 
 ### 现有扩展：ask_user
 
