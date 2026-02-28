@@ -508,6 +508,118 @@ class TestDeliveryCallback:
         asyncio.run(_run_test())
 
 
+# -- Bridge handler ---------------------------------------------------------
+
+class TestBridgeHandler:
+    def test_bridge_handler_trigger_immediate(self, ext):
+        """Bridge call with immediate urgency → event enters _trigger_queue."""
+        async def _run_test():
+            await ext.start()
+            result = await ext._handle_bridge_request(
+                "heartbeat_trigger",
+                {"source": "session:abc12345", "event_type": "deploy_done", "urgency": "immediate"},
+            )
+            assert result == {"ok": True, "urgency": "immediate"}
+            assert ext._trigger_queue.qsize() == 1
+            event = ext._trigger_queue.get_nowait()
+            assert event.source == "session:abc12345"
+            assert event.event_type == "deploy_done"
+            assert event.urgency == "immediate"
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_handler_trigger_normal(self, ext):
+        """Bridge call with normal urgency → event enters _pending_events."""
+        async def _run_test():
+            await ext.start()
+            result = await ext._handle_bridge_request(
+                "heartbeat_trigger",
+                {"source": "session:xyz", "event_type": "data_ready", "urgency": "normal"},
+            )
+            assert result == {"ok": True, "urgency": "normal"}
+            assert ext._trigger_queue.qsize() == 0
+            assert len(ext._pending_events) == 1
+            assert ext._pending_events[0].event_type == "data_ready"
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_handler_missing_event_type(self, ext):
+        """Bridge call without event_type → error."""
+        async def _run_test():
+            await ext.start()
+            result = await ext._handle_bridge_request(
+                "heartbeat_trigger",
+                {"source": "session:abc", "urgency": "immediate"},
+            )
+            assert "error" in result
+            assert ext._trigger_queue.qsize() == 0
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_handler_unknown_method(self, ext):
+        """Non-heartbeat_trigger method → returns None (pass to next handler)."""
+        async def _run_test():
+            await ext.start()
+            result = await ext._handle_bridge_request("vault_store", {"key": "x"})
+            assert result is None
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_handler_with_payload(self, ext):
+        """Bridge call with payload → payload forwarded to trigger event."""
+        async def _run_test():
+            await ext.start()
+            payload = {"asset": "BTC", "price": 95000}
+            result = await ext._handle_bridge_request(
+                "heartbeat_trigger",
+                {"source": "session:abc", "event_type": "price_alert", "urgency": "immediate", "payload": payload},
+            )
+            assert result["ok"] is True
+            event = ext._trigger_queue.get_nowait()
+            assert event.payload == payload
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_registered_on_start(self, ext):
+        """start() registers bridge handler when engine.bridge exists."""
+        ext.engine.bridge = MagicMock()
+
+        async def _run_test():
+            await ext.start()
+            ext.engine.bridge.add_handler.assert_called_once_with(ext._handle_bridge_request)
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_not_registered_without_bridge(self, ext):
+        """start() does not crash when engine.bridge is None."""
+        ext.engine.bridge = None
+
+        async def _run_test():
+            await ext.start()
+            # Should start without error
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_mcp_tools_metadata_includes_trigger(self, ext):
+        """MCP server registration includes heartbeat_trigger in tools metadata."""
+        _run(ext.start())
+        call_args = ext.engine.session_manager.register_mcp_server.call_args
+        tools = call_args[1]["tools"] if "tools" in call_args[1] else call_args[0][2] if len(call_args[0]) > 2 else None
+        # Find from kwargs
+        if tools is None:
+            tools = call_args.kwargs.get("tools", [])
+        tool_names = [t["name"] for t in tools]
+        assert "heartbeat_trigger" in tool_names
+        ext._scheduler_task.cancel()
+
+
 class TestDailyLimit:
     def test_trigger_respects_daily_limit(self, ext):
         """Trigger channel should also be subject to daily limit."""

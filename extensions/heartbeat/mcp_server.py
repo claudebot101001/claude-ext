@@ -76,6 +76,32 @@ class HeartbeatMCPServer(MCPServerBase):
                 "properties": {},
             },
         },
+        {
+            "name": "heartbeat_trigger",
+            "description": (
+                "Submit an event to trigger a heartbeat check. "
+                "Use 'immediate' urgency to wake the scheduler now."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "event_type": {
+                        "type": "string",
+                        "description": "Event category (e.g. 'deployment_done', 'price_alert')",
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["immediate", "normal"],
+                        "description": "immediate: wake scheduler now. normal: process on next timer cycle.",
+                    },
+                    "payload": {
+                        "type": "object",
+                        "description": "Optional event data",
+                    },
+                },
+                "required": ["event_type"],
+            },
+        },
     ]
 
     def __init__(self):
@@ -86,6 +112,7 @@ class HeartbeatMCPServer(MCPServerBase):
             "heartbeat_get_status": self._handle_get_status,
             "heartbeat_pause": self._handle_pause,
             "heartbeat_resume": self._handle_resume,
+            "heartbeat_trigger": self._handle_trigger,
         }
 
     def _get_store(self) -> HeartbeatStore:
@@ -136,6 +163,31 @@ class HeartbeatMCPServer(MCPServerBase):
         store = self._get_store()
         store.update_state(enabled=True)
         return "Heartbeat resumed."
+
+    def _handle_trigger(self, args: dict) -> str:
+        if not self.bridge:
+            return "Error: bridge not available"
+
+        event_type = args.get("event_type", "")
+        urgency = args.get("urgency", "immediate")
+        payload = args.get("payload")
+
+        ctx = self.session_context()
+        source = f"session:{ctx.get('id', 'unknown')[:8]}" if ctx else "session"
+
+        try:
+            result = self.bridge.call("heartbeat_trigger", {
+                "source": source,
+                "event_type": event_type,
+                "urgency": urgency,
+                "payload": payload,
+            }, timeout=5)
+        except Exception as e:
+            return f"Error: {e}"
+
+        if "error" in result:
+            return f"Error: {result['error']}"
+        return f"Triggered heartbeat ({urgency}): {event_type}"
 
 
 if __name__ == "__main__":

@@ -51,6 +51,7 @@ This file defines what the autonomous heartbeat agent checks periodically.
 _SYSTEM_PROMPT = """\
 You have an autonomous heartbeat that periodically checks standing tasks. \
 Manage via MCP: heartbeat_get/set_instructions, heartbeat_get_status, heartbeat_pause/resume. \
+Use heartbeat_trigger to submit events that wake the heartbeat immediately. \
 When asked to monitor something periodically, consider adding to heartbeat instructions."""
 
 _TIER2_PROMPT_TEMPLATE = """\
@@ -183,23 +184,28 @@ class ExtensionImpl(Extension):
             {"name": "heartbeat_get_status", "description": "Get heartbeat scheduler status"},
             {"name": "heartbeat_pause", "description": "Pause autonomous heartbeat"},
             {"name": "heartbeat_resume", "description": "Resume autonomous heartbeat"},
+            {"name": "heartbeat_trigger", "description": "Submit event to trigger heartbeat check"},
         ])
 
-        # 5. System prompt
+        # 5. Bridge handler (MCP → trigger)
+        if self.engine.bridge:
+            self.engine.bridge.add_handler(self._handle_bridge_request)
+
+        # 6. System prompt
         self.sm.add_system_prompt(_SYSTEM_PROMPT)
 
-        # 6. Delivery callback
+        # 7. Delivery callback
         self.sm.add_delivery_callback(self._on_delivery)
 
-        # 7. Seed HEARTBEAT.md
+        # 8. Seed HEARTBEAT.md
         if not (heartbeat_dir / "HEARTBEAT.md").exists():
             self._store.write_instructions(_SEED_INSTRUCTIONS)
             log.info("Created seed HEARTBEAT.md")
 
-        # 8. Schedule first run
+        # 9. Schedule first run
         self._schedule_next()
 
-        # 9. Start scheduler
+        # 10. Start scheduler
         self._scheduler_task = asyncio.create_task(
             self._scheduler_loop(), name="heartbeat-scheduler"
         )
@@ -236,6 +242,25 @@ class ExtensionImpl(Extension):
             "interval": self._interval,
         }
         return result
+
+    # -- bridge handler ------------------------------------------------------
+
+    async def _handle_bridge_request(self, method: str, params: dict) -> dict | None:
+        """Handle heartbeat_trigger bridge RPCs from MCP server processes."""
+        if method != "heartbeat_trigger":
+            return None  # not ours
+
+        source = params.get("source", "session")
+        event_type = params.get("event_type", "")
+        urgency = params.get("urgency", "immediate")
+        payload = params.get("payload")
+
+        if not event_type:
+            return {"error": "event_type is required"}
+
+        self.trigger(source, event_type, urgency, payload)
+
+        return {"ok": True, "urgency": urgency}
 
     # -- scheduler -----------------------------------------------------------
 
