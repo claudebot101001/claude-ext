@@ -32,12 +32,16 @@ This is your persistent memory file. It persists across sessions.
 """
 
 _SYSTEM_PROMPT = """\
-You have a persistent memory system via MCP tools (memory_read, memory_write, \
-memory_append, memory_search, memory_list). This memory persists across sessions.
+IMPORTANT: This is a SEPARATE memory system from Claude Code's built-in auto-memory \
+(~/.claude/projects/). Do NOT use the built-in Read/Write tools to manage memory files. \
+Use ONLY the MCP tools below. They read and write to a dedicated shared store that \
+persists across ALL sessions regardless of working directory.
+
+Available MCP tools: memory_read, memory_write, memory_append, memory_search, memory_list.
 
 SESSION START PROTOCOL:
-1. At the start of every session, read MEMORY.md with memory_read('MEMORY.md')
-2. If relevant topics are mentioned, read the specific topic file
+1. At the start of every session, call memory_read('MEMORY.md') via MCP tool
+2. If relevant topics are mentioned, read the specific topic file via memory_read
 
 RECORDING LEARNINGS:
 After completing significant tasks, append key learnings to today's daily log:
@@ -45,7 +49,7 @@ After completing significant tasks, append key learnings to today's daily log:
 Record: user preferences, project conventions, recurring patterns, decisions made, \
 things that worked or failed.
 
-FILE ORGANIZATION:
+FILE ORGANIZATION (all paths are relative, managed by MCP tools):
 - MEMORY.md: Hot index. Keep under 200 lines. Contains the most important current \
 knowledge: active projects, user preferences, key decisions, cross-references to \
 topic files. Rewrite periodically to stay concise.

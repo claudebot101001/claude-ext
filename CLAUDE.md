@@ -628,7 +628,7 @@ MCP server 进程**不持有 passphrase**，所有加解密通过 bridge RPC 在
 | `memory_search` | 全目录正则搜索（大小写不敏感，上限 50 条） |
 | `memory_list` | 列出文件（按修改时间降序，可按子目录过滤） |
 
-**系统提示驱动**：注入 SESSION START PROTOCOL（每次 session 开始读 `MEMORY.md`）+ CURATION 规则（超 150 行时精炼，移入 topic 文件）。Agent 自主维护记忆质量。
+**系统提示驱动**：注入 SESSION START PROTOCOL（每次 session 开始读 `MEMORY.md`）+ CURATION 规则（超 150 行时精炼，移入 topic 文件）。Agent 自主维护记忆质量。系统提示显式声明此为独立于 Claude Code 内置 auto-memory（`~/.claude/projects/`）的系统，要求 Agent 仅通过 MCP 工具操作，不混用内置 Read/Write 工具。存储位置 `~/.claude-ext/memory/` 为全局共享，不按项目隔离。
 
 **Seed 文件**：首次启动自动创建 `MEMORY.md` 模板（含 User Preferences / Active Projects / Key Decisions / Topic Files 四个段落），不覆盖已有内容。
 

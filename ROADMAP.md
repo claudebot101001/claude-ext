@@ -56,6 +56,7 @@ Phase 4 Wallet 上线时只需 `self._internal_prefixes.append("wallet/")`，私
 - **mcp_server.py**: `memory_read` / `memory_write` / `memory_append` / `memory_search` / `memory_list` 五个 MCP 工具，MCP 进程惰性初始化 MemoryStore 直接读写
 - **extension.py**: 注册 `engine.services["memory"]` + 注册 MCP server（注入 `MEMORY_DIR` 环境变量）+ 系统提示注入（SESSION START PROTOCOL + CURATION 规则）+ 首次启动 seed `MEMORY.md` 模板
 - **设计决策**: 直接文件 I/O，不走 bridge RPC。Memory 是明文 Markdown，无加密/访问控制需求。MCP server 进程持有自己的 MemoryStore 实例，省去 socket round-trip。审计需求可通过 MemoryStore 方法内 `log.info` 满足
+- **与 Claude Code auto-memory 的区分**: CC 内置 auto-memory 存储在 `~/.claude/projects/<project>/memory/`（按项目隔离）。本扩展存储在 `~/.claude-ext/memory/`（全局共享）。系统提示显式声明两者独立，要求 Agent 仅通过 MCP 工具操作本扩展的记忆，不混用内置 Read/Write 工具
 - **三层存储**: `MEMORY.md`（热索引，< 200 行）/ `topics/<name>.md`（深度知识）/ `daily/YYYY-MM-DD.md`（append-only 日志）
 - **Phase 2b (延后)**: 本地嵌入模型向量语义搜索
 

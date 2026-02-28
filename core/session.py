@@ -496,9 +496,9 @@ class SessionManager:
             env = dict(entry.get("env", {}))
             env["CLAUDE_EXT_SESSION_ID"] = session.id
             env["CLAUDE_EXT_STATE_DIR"] = str(sdir)
-            bridge_socket = self.base_dir / "bridge.sock"
-            if bridge_socket.exists():
-                env["CLAUDE_EXT_BRIDGE_SOCKET"] = str(bridge_socket)
+            # Always set bridge socket path — MCP servers connect on demand,
+            # not at startup.  The socket will exist by the time they call it.
+            env["CLAUDE_EXT_BRIDGE_SOCKET"] = str(self.base_dir / "bridge.sock")
             entry["env"] = env
             servers[name] = entry
         return {"mcpServers": servers}
