@@ -1,10 +1,9 @@
 """Tests for per-session customization hooks."""
 
-import json
 
 import pytest
 
-from core.session import Session, SessionManager, SessionOverrides, SessionStatus
+from core.session import Session, SessionManager, SessionOverrides
 
 
 @pytest.fixture
