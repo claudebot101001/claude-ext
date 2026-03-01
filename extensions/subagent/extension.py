@@ -57,7 +57,7 @@ _SYSTEM_PROMPT = """\
 You have sub-agent orchestration tools available. Use them to delegate tasks \
 to independent worker sessions that run in parallel.
 
-Tools: subagent_spawn, subagent_wait, subagent_list, subagent_status, \
+Tools: subagent_spawn, subagent_wait, subagent_status, \
 subagent_send, subagent_stop, subagent_diff, subagent_merge.
 
 Workflow: spawn workers → wait for completion → review diffs → merge → commit.
@@ -173,7 +173,7 @@ class ExtensionImpl(Extension):
                 },
                 {
                     "name": "subagent_status",
-                    "description": "Get sub-agent status and optional result",
+                    "description": "Get sub-agent status, or list all if no agent_id",
                 },
                 {
                     "name": "subagent_send",
@@ -182,10 +182,6 @@ class ExtensionImpl(Extension):
                 {
                     "name": "subagent_stop",
                     "description": "Stop a running sub-agent",
-                },
-                {
-                    "name": "subagent_list",
-                    "description": "List all sub-agents for current session",
                 },
                 {
                     "name": "subagent_diff",

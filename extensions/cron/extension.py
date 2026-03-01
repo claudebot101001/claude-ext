@@ -55,9 +55,8 @@ class ExtensionImpl(Extension):
                     "name": "cron_create",
                     "description": "Create a scheduled task (cron or one-time)",
                 },
-                {"name": "cron_list", "description": "List all cron jobs for current user"},
                 {"name": "cron_delete", "description": "Delete a cron job by ID"},
-                {"name": "cron_status", "description": "Get detailed status of a cron job"},
+                {"name": "cron_status", "description": "Get job status or list all jobs"},
             ],
         )
 

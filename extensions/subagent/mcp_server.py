@@ -81,23 +81,22 @@ class SubAgentMCPServer(MCPServerBase):
         {
             "name": "subagent_status",
             "description": (
-                "Get sub-agent status, diff summary, and cost. "
-                "Set include_result=true to also get the full result text."
+                "Get sub-agent status. With agent_id: detailed info, diff summary, and cost "
+                "(set include_result=true for full result). Without agent_id: list all sub-agents."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "agent_id": {
                         "type": "string",
-                        "description": "Agent ID to query",
+                        "description": "Agent ID to query. Omit to list all sub-agents.",
                     },
                     "include_result": {
                         "type": "boolean",
-                        "description": "Include full result text",
+                        "description": "Include full result text (only with agent_id).",
                         "default": False,
                     },
                 },
-                "required": ["agent_id"],
             },
         },
         {
@@ -134,14 +133,6 @@ class SubAgentMCPServer(MCPServerBase):
                     },
                 },
                 "required": ["agent_id"],
-            },
-        },
-        {
-            "name": "subagent_list",
-            "description": "List all sub-agents spawned by the current session.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
             },
         },
         {
@@ -189,7 +180,6 @@ class SubAgentMCPServer(MCPServerBase):
             "subagent_status": self._handle_status,
             "subagent_send": self._handle_send,
             "subagent_stop": self._handle_stop,
-            "subagent_list": self._handle_list,
             "subagent_diff": self._handle_diff,
             "subagent_merge": self._handle_merge,
         }
@@ -277,10 +267,13 @@ class SubAgentMCPServer(MCPServerBase):
         return "\n".join(lines)
 
     def _handle_status(self, args: dict) -> str:
+        agent_id = args.get("agent_id")
+        if not agent_id:
+            return self._handle_list(args)
         result = self._bridge_call(
             "subagent_status",
             {
-                "agent_id": args.get("agent_id", ""),
+                "agent_id": agent_id,
                 "include_result": args.get("include_result", False),
             },
         )

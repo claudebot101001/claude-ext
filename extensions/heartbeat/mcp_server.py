@@ -24,65 +24,45 @@ class HeartbeatMCPServer(MCPServerBase):
     name = "heartbeat"
     tools = [
         {
-            "name": "heartbeat_get_instructions",
+            "name": "heartbeat_instructions",
             "description": (
-                "Read the heartbeat standing instructions (HEARTBEAT.md). "
-                "This defines what the autonomous heartbeat checks periodically."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-        {
-            "name": "heartbeat_set_instructions",
-            "description": (
-                "Overwrite the heartbeat standing instructions (HEARTBEAT.md). "
-                "Use this to add, modify, or remove periodic monitoring tasks."
+                "Read or update the heartbeat standing instructions (HEARTBEAT.md). "
+                "Omit 'content' to read current instructions. "
+                "Provide 'content' to overwrite."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "content": {
                         "type": "string",
-                        "description": "Full content for HEARTBEAT.md",
+                        "description": "New instructions content. Omit to read current.",
                     },
                 },
-                "required": ["content"],
             },
         },
         {
-            "name": "heartbeat_get_status",
+            "name": "heartbeat_status",
             "description": (
-                "Get the heartbeat scheduler status: enabled state, run counts, "
-                "next scheduled run, consecutive idle count."
+                "Get heartbeat scheduler status. "
+                "Optionally set enabled=false to pause or enabled=true to resume."
             ),
             "inputSchema": {
                 "type": "object",
-                "properties": {},
-            },
-        },
-        {
-            "name": "heartbeat_pause",
-            "description": "Pause the autonomous heartbeat. It will not run until resumed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-        {
-            "name": "heartbeat_resume",
-            "description": "Resume the autonomous heartbeat after pausing.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set to false to pause, true to resume. Omit to just query.",
+                    },
+                },
             },
         },
         {
             "name": "heartbeat_trigger",
             "description": (
-                "Submit an event to trigger a heartbeat check. "
-                "Use 'immediate' urgency to wake the scheduler now."
+                "Trigger a heartbeat check from within this Claude session (in-process MCP call). "
+                "Only works while you are actively executing. "
+                "To wake the heartbeat from background shell commands or external scripts, "
+                "use heartbeat_get_trigger_command instead."
             ),
             "inputSchema": {
                 "type": "object",
@@ -107,17 +87,19 @@ class HeartbeatMCPServer(MCPServerBase):
         {
             "name": "heartbeat_get_trigger_command",
             "description": (
-                "Get a shell command that triggers the heartbeat from any external process. "
-                "Use this to set up post-completion hooks or monitoring scripts that wake "
-                "the heartbeat when a condition is met, even after the current session ends. "
-                "Example: chain with 'rsync ... && <returned_command>' and run in background."
+                "Get a standalone shell command that triggers the heartbeat from any external process. "
+                "Unlike heartbeat_trigger (which requires an active MCP session), this command can be "
+                "run from background jobs, cron scripts, or monitoring loops — even after your session "
+                "ends. Use case: 'nohup bash -c \"rsync ... && <command>\" &' to be woken the instant "
+                "a long-running transfer finishes, or embed in a price-monitoring script to wake "
+                "the heartbeat when a target price is hit."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "event_type": {
                         "type": "string",
-                        "description": "Event category (e.g. 'transfer_done', 'cpi_released')",
+                        "description": "Event category (e.g. 'transfer_done', 'price_alert')",
                     },
                     "urgency": {
                         "type": "string",
@@ -137,11 +119,8 @@ class HeartbeatMCPServer(MCPServerBase):
     def __init__(self):
         super().__init__()
         self.handlers = {
-            "heartbeat_get_instructions": self._handle_get_instructions,
-            "heartbeat_set_instructions": self._handle_set_instructions,
-            "heartbeat_get_status": self._handle_get_status,
-            "heartbeat_pause": self._handle_pause,
-            "heartbeat_resume": self._handle_resume,
+            "heartbeat_instructions": self._handle_instructions,
+            "heartbeat_status": self._handle_status,
             "heartbeat_trigger": self._handle_trigger,
             "heartbeat_get_trigger_command": self._handle_get_trigger_command,
         }
@@ -156,25 +135,23 @@ class HeartbeatMCPServer(MCPServerBase):
 
     # -- handlers -----------------------------------------------------------
 
-    def _handle_get_instructions(self, args: dict) -> str:
-        store = self._get_store()
-        content = store.read_instructions()
-        if content is None:
-            return (
-                "No heartbeat instructions set yet. Use heartbeat_set_instructions to create them."
-            )
-        return content
-
-    def _handle_set_instructions(self, args: dict) -> str:
+    def _handle_instructions(self, args: dict) -> str:
         content = args.get("content")
-        if content is None:
-            return "Error: 'content' is required."
+        if content is not None:
+            store = self._get_store()
+            nbytes = store.write_instructions(content)
+            return f"Heartbeat instructions updated ({nbytes} bytes)."
         store = self._get_store()
-        nbytes = store.write_instructions(content)
-        return f"Heartbeat instructions updated ({nbytes} bytes)."
+        result = store.read_instructions()
+        if result is None:
+            return "No heartbeat instructions set yet. Provide 'content' to create them."
+        return result
 
-    def _handle_get_status(self, args: dict) -> str:
+    def _handle_status(self, args: dict) -> str:
         store = self._get_store()
+        enabled = args.get("enabled")
+        if enabled is not None:
+            store.update_state(enabled=bool(enabled))
         state = store.load_state()
         lines = [
             f"Enabled: {state.enabled}",
@@ -185,17 +162,14 @@ class HeartbeatMCPServer(MCPServerBase):
             f"Consecutive idle: {state.consecutive_noop}",
             f"Active session: {state.active_session_id or 'none'}",
         ]
+        if enabled is not None:
+            action = "resumed" if enabled else "paused"
+            hint = "enabled=false" if enabled else "enabled=true"
+            lines.append(
+                f"\nHeartbeat {action}. "
+                f"Use heartbeat_status({hint}) to {'pause' if enabled else 'resume'}."
+            )
         return "\n".join(lines)
-
-    def _handle_pause(self, args: dict) -> str:
-        store = self._get_store()
-        store.update_state(enabled=False)
-        return "Heartbeat paused. Use heartbeat_resume to re-enable."
-
-    def _handle_resume(self, args: dict) -> str:
-        store = self._get_store()
-        store.update_state(enabled=True)
-        return "Heartbeat resumed."
 
     def _handle_trigger(self, args: dict) -> str:
         if not self.bridge:

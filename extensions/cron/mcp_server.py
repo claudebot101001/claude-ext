@@ -60,14 +60,6 @@ class CronMCPServer(MCPServerBase):
             },
         },
         {
-            "name": "cron_list",
-            "description": "List all scheduled cron jobs for the current user.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {},
-            },
-        },
-        {
             "name": "cron_delete",
             "description": "Delete a scheduled cron job by its ID.",
             "inputSchema": {
@@ -83,16 +75,19 @@ class CronMCPServer(MCPServerBase):
         },
         {
             "name": "cron_status",
-            "description": "Get detailed status of a specific cron job.",
+            "description": (
+                "Get cron job status. "
+                "With job_id: detailed info for one job. "
+                "Without: list all jobs."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "job_id": {
                         "type": "string",
-                        "description": "The job ID to query",
+                        "description": "The job ID to query. Omit to list all jobs.",
                     },
                 },
-                "required": ["job_id"],
             },
         },
     ]
@@ -101,7 +96,6 @@ class CronMCPServer(MCPServerBase):
         super().__init__()
         self.handlers = {
             "cron_create": self._handle_create,
-            "cron_list": self._handle_list,
             "cron_delete": self._handle_delete,
             "cron_status": self._handle_status,
         }
@@ -205,7 +199,9 @@ class CronMCPServer(MCPServerBase):
         return f"Deleted job '{match[0].name}' ({match[0].id[:8]})."
 
     def _handle_status(self, args: dict) -> str:
-        job_id = args["job_id"]
+        job_id = args.get("job_id")
+        if not job_id:
+            return self._handle_list(args)
         store = self._get_store()
 
         jobs = store.list_jobs()

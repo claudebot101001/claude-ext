@@ -50,10 +50,13 @@ This file defines what the autonomous heartbeat agent checks periodically.
 
 _SYSTEM_PROMPT = """\
 You have an autonomous heartbeat that periodically checks standing tasks. \
-Manage via MCP: heartbeat_get/set_instructions, heartbeat_get_status, heartbeat_pause/resume. \
-Use heartbeat_trigger to submit events that wake the heartbeat from within a session. \
-Use heartbeat_get_trigger_command to get a shell command for triggering from external scripts \
-(e.g., chain with a long-running command: 'rsync ... && <trigger_command>'). \
+Manage via MCP: heartbeat_instructions (read/write HEARTBEAT.md), \
+heartbeat_status (view scheduler state; set enabled=false to pause, true to resume). \
+Two ways to trigger the heartbeat on-demand: \
+heartbeat_trigger (in-session MCP call — works only while you are running), \
+heartbeat_get_trigger_command (returns a standalone shell command for external/background processes \
+where MCP tools are unavailable — e.g., 'nohup bash -c "rsync ... && <trigger_cmd>" &' \
+to be woken the instant a background task completes). \
 When asked to monitor something periodically, consider adding to heartbeat instructions."""
 
 _TIER2_PROMPT_TEMPLATE = """\
@@ -195,23 +198,20 @@ class ExtensionImpl(Extension):
             },
             tools=[
                 {
-                    "name": "heartbeat_get_instructions",
-                    "description": "Read heartbeat standing instructions",
+                    "name": "heartbeat_instructions",
+                    "description": "Read or update heartbeat standing instructions",
                 },
                 {
-                    "name": "heartbeat_set_instructions",
-                    "description": "Update heartbeat standing instructions",
+                    "name": "heartbeat_status",
+                    "description": "Get heartbeat status; optionally pause/resume",
                 },
-                {"name": "heartbeat_get_status", "description": "Get heartbeat scheduler status"},
-                {"name": "heartbeat_pause", "description": "Pause autonomous heartbeat"},
-                {"name": "heartbeat_resume", "description": "Resume autonomous heartbeat"},
                 {
                     "name": "heartbeat_trigger",
-                    "description": "Submit event to trigger heartbeat check",
+                    "description": "Trigger heartbeat from within this session (in-process call)",
                 },
                 {
                     "name": "heartbeat_get_trigger_command",
-                    "description": "Get shell command for external heartbeat trigger",
+                    "description": "Get standalone shell command to trigger heartbeat from external/background processes",
                 },
             ],
         )

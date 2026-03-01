@@ -133,10 +133,10 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 |-----------|-----------|---------------|
 | **vault** | `vault_store`, `vault_list`, `vault_retrieve`, `vault_delete` | Bridge RPC (passphrase never in MCP process) |
 | **memory** | `memory_read`, `memory_write`, `memory_append`, `memory_search`, `memory_list` | Direct file I/O (no bridge needed) |
-| **heartbeat** | `heartbeat_get_instructions`, `heartbeat_set_instructions`, `heartbeat_get_status`, `heartbeat_pause`, `heartbeat_resume`, `heartbeat_trigger`, `heartbeat_get_trigger_command` | Mixed (file I/O + bridge for trigger) |
-| **cron** | `cron_create`, `cron_list`, `cron_delete`, `cron_status` | Bridge RPC |
+| **heartbeat** | `heartbeat_instructions`, `heartbeat_status`, `heartbeat_trigger`, `heartbeat_get_trigger_command` | Mixed (file I/O + bridge for trigger) |
+| **cron** | `cron_create`, `cron_delete`, `cron_status` | Bridge RPC |
 | **ask_user** | `ask_user` | Bridge RPC → PendingStore |
-| **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_list`, `subagent_diff`, `subagent_merge` | Bridge RPC → PendingStore + SessionManager |
+| **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_diff`, `subagent_merge` | Bridge RPC → PendingStore + SessionManager |
 | **telegram** | (none — frontend only) | Delivery callbacks |
 
 ## Adding a New Extension

@@ -661,7 +661,9 @@ class TestBridgeHandler:
         tool_names = [t["name"] for t in tools]
         assert "heartbeat_trigger" in tool_names
         assert "heartbeat_get_trigger_command" in tool_names
-        assert len(tool_names) == 7
+        assert "heartbeat_instructions" in tool_names
+        assert "heartbeat_status" in tool_names
+        assert len(tool_names) == 4
         ext._scheduler_task.cancel()
 
 

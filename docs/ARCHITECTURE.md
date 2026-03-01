@@ -37,14 +37,14 @@ claude-ext/
 │   ├── heartbeat/
 │   │   ├── extension.py           # Autonomous heartbeat (dual-channel scheduler + three-tier execution + usage-aware)
 │   │   ├── store.py               # HeartbeatStore: state + instruction file I/O + flock
-│   │   ├── mcp_server.py          # MCP stdio server (heartbeat seven tools)
+│   │   ├── mcp_server.py          # MCP stdio server (four heartbeat tools)
 │   │   └── trigger_cli.py         # Standalone CLI: external processes trigger heartbeat via bridge.sock
 │   ├── ask_user/
 │   │   ├── extension.py           # Interactive question extension (bridge + PendingStore)
 │   │   └── mcp_server.py          # MCP stdio server (ask_user tool)
 │   └── subagent/
 │       ├── extension.py           # Multi-agent orchestration (PM → worker sessions)
-│       ├── mcp_server.py          # MCP stdio server (8 subagent tools)
+│       ├── mcp_server.py          # MCP stdio server (7 subagent tools)
 │       ├── store.py               # SubAgentStore: agent records + flock + prefix ID matching
 │       └── worktree.py            # Git worktree utilities (create/diff/merge/cleanup)
 ├── config.yaml                    # Global config (engine params + extension toggles + extension config) (.gitignore)
@@ -316,7 +316,7 @@ self.engine.session_manager.register_mcp_server("cron", {
     "env": {"CRON_STORE_PATH": "/path/to/store.json"},
 }, tools=[
     {"name": "cron_create", "description": "Create a scheduled task"},
-    {"name": "cron_list", "description": "List all cron jobs"},
+    {"name": "cron_status", "description": "Get job status or list all jobs"},
 ])
 
 # Introspect registered tools (e.g. for /status command display)
@@ -614,9 +614,8 @@ Claude automatically gets these tools in sessions (injected via `--mcp-config`):
 | Tool | Function |
 |------|----------|
 | `cron_create` | Create scheduled task. `cron_expr` for periodic, `run_at` for one-shot delay (e.g. `+20m`) |
-| `cron_list` | List all jobs for the current user |
 | `cron_delete` | Delete job (supports ID prefix matching) |
-| `cron_status` | Query job details |
+| `cron_status` | Query job details (with `job_id`) or list all jobs (without) |
 
 The MCP server obtains current session context via env vars `CLAUDE_EXT_SESSION_ID` and `CLAUDE_EXT_STATE_DIR`, automatically inheriting `user_id`, `context` (including `chat_id`), and `working_dir`.
 
@@ -805,15 +804,12 @@ Utilization is obtained via `core/status.py: get_usage()`, cached for 60 seconds
 | 7-9 | 4x | 2 hours |
 | 10+ | 8x | 4 hours |
 
-**MCP Tools** (accessible from all sessions; five direct file I/O + `heartbeat_trigger` via bridge RPC + `heartbeat_get_trigger_command` returns command text):
+**MCP Tools** (accessible from all sessions; `heartbeat_instructions` and `heartbeat_status` use direct file I/O, `heartbeat_trigger` uses bridge RPC, `heartbeat_get_trigger_command` returns command text):
 
 | Tool | Function |
 |------|----------|
-| `heartbeat_get_instructions` | Read HEARTBEAT.md |
-| `heartbeat_set_instructions` | Overwrite HEARTBEAT.md |
-| `heartbeat_get_status` | Scheduler status text |
-| `heartbeat_pause` | Pause heartbeat (`enabled=False`) |
-| `heartbeat_resume` | Resume heartbeat (`enabled=True`) |
+| `heartbeat_instructions` | Read HEARTBEAT.md (omit `content`) or overwrite it (provide `content`) |
+| `heartbeat_status` | Scheduler status text; optionally set `enabled=false` to pause or `enabled=true` to resume |
 | `heartbeat_trigger` | Submit event to trigger heartbeat check (`immediate` wakes immediately, `normal` accumulates until next timer) |
 | `heartbeat_get_trigger_command` | Return a shell command usable in external scripts (includes trigger_cli.py path and bridge.sock path, all arguments safely quoted via `shlex.quote()`) |
 
@@ -872,13 +868,12 @@ PM Claude → MCP tool(subagent_*) → bridge.call("subagent_*") → BridgeServe
   → Delivery callback → SubAgentStore.update + PendingStore.resolve → PM unblocks
 ```
 
-**MCP Tools** (8):
+**MCP Tools** (7):
 - `subagent_spawn(task, name?, worktree?, paradigm?)` — Create worker, returns agent_id
 - `subagent_wait(agent_ids, timeout?)` — **Blocking**: wait until all specified agents complete
 - `subagent_status(agent_id, include_result?)` — Status + cost + optional result text
 - `subagent_send(agent_id, prompt)` — Follow-up prompt (re-activates completed agents)
 - `subagent_stop(agent_id)` — Interrupt running worker
-- `subagent_list()` — List all sub-agents for current session
 - `subagent_diff(agent_id)` — Full git diff for worktree agent
 - `subagent_merge(agent_id)` — Squash-merge worktree into parent branch (staged, not committed)
 
