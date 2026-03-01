@@ -230,14 +230,18 @@ class SubAgentMCPServer(MCPServerBase):
         if "error" in result:
             return f"Error: {result['error']}"
 
+        agent_id = result.get("agent_id", "")
         lines = [
-            f"Spawned sub-agent '{result.get('name', '')}' (ID: {result.get('agent_id', '')[:8]})",
+            f"Spawned sub-agent '{result.get('name', '')}'",
+            f"agent_id: {agent_id}",
             f"Paradigm: {result.get('paradigm', '')}",
             f"Status: {result.get('status', '')}",
         ]
         branch = result.get("worktree_branch")
         if branch:
             lines.append(f"Worktree branch: {branch}")
+        lines.append("")
+        lines.append("Use this agent_id for subagent_wait, subagent_status, etc.")
         return "\n".join(lines)
 
     def _handle_wait(self, args: dict) -> str:
@@ -265,7 +269,7 @@ class SubAgentMCPServer(MCPServerBase):
             summary = r.get("result", "")
             if summary and len(summary) > 200:
                 summary = summary[:200] + "..."
-            lines.append(f"\n[{aid[:8]}] {status}{cost_str}")
+            lines.append(f"\n[{aid}] {status}{cost_str}")
             if summary:
                 lines.append(f"  {summary}")
             if r.get("error"):
@@ -284,7 +288,7 @@ class SubAgentMCPServer(MCPServerBase):
             return f"Error: {result['error']}"
 
         lines = [
-            f"Agent: {result.get('name', '')} ({result.get('agent_id', '')[:8]})",
+            f"Agent: {result.get('name', '')} (agent_id: {result.get('agent_id', '')})",
             f"Status: {result.get('status', '')}",
             f"Paradigm: {result.get('paradigm', '')}",
             f"Created: {result.get('created_at', '')}",
@@ -343,7 +347,7 @@ class SubAgentMCPServer(MCPServerBase):
             branch = a.get("worktree_branch")
             branch_str = f" [{branch}]" if branch else ""
             lines.append(
-                f"- {a.get('name', '')} ({a.get('agent_id', '')[:8]}) "
+                f"- {a.get('name', '')} (agent_id: {a.get('agent_id', '')}) "
                 f"[{a.get('status', '')}] {a.get('paradigm', '')}"
                 f"{branch_str}{cost_str}"
             )

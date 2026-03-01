@@ -185,6 +185,66 @@ class TestDataIntegrity:
 # -- Defaults ----------------------------------------------------------------
 
 
+# -- Prefix matching ---------------------------------------------------------
+
+
+class TestPrefixMatching:
+    def test_exact_match_priority(self, store):
+        """Exact match should always be preferred over prefix match."""
+        store.add_agent(_make_agent(id="abc12345-full-uuid"))
+        agent = store.get_agent("abc12345-full-uuid")
+        assert agent is not None
+        assert agent.id == "abc12345-full-uuid"
+
+    def test_prefix_match_unique(self, store):
+        """Unique prefix >= 6 chars should resolve."""
+        store.add_agent(_make_agent(id="abc12345-full-uuid"))
+        agent = store.get_agent("abc123")
+        assert agent is not None
+        assert agent.id == "abc12345-full-uuid"
+
+    def test_prefix_match_8_chars(self, store):
+        """8-char prefix (typical truncation) should resolve."""
+        store.add_agent(_make_agent(id="abc12345-full-uuid"))
+        agent = store.get_agent("abc12345")
+        assert agent is not None
+        assert agent.id == "abc12345-full-uuid"
+
+    def test_prefix_ambiguous(self, store):
+        """Ambiguous prefix should return None."""
+        store.add_agent(_make_agent(id="abc12345-first"))
+        store.add_agent(_make_agent(id="abc12345-second", name="w2"))
+        agent = store.get_agent("abc123")
+        assert agent is None
+
+    def test_prefix_too_short(self, store):
+        """Prefix < 6 chars should not match."""
+        store.add_agent(_make_agent(id="abc12345-full-uuid"))
+        agent = store.get_agent("abc1")
+        assert agent is None
+
+    def test_resolve_agent_id_exact(self, store):
+        store.add_agent(_make_agent(id="abc12345-full-uuid"))
+        full = store.resolve_agent_id("abc12345-full-uuid")
+        assert full == "abc12345-full-uuid"
+
+    def test_resolve_agent_id_prefix(self, store):
+        store.add_agent(_make_agent(id="abc12345-full-uuid"))
+        full = store.resolve_agent_id("abc12345")
+        assert full == "abc12345-full-uuid"
+
+    def test_resolve_agent_id_ambiguous(self, store):
+        store.add_agent(_make_agent(id="abc12345-first"))
+        store.add_agent(_make_agent(id="abc12345-second", name="w2"))
+        assert store.resolve_agent_id("abc123") is None
+
+    def test_resolve_agent_id_not_found(self, store):
+        assert store.resolve_agent_id("zzz99999") is None
+
+
+# -- Defaults ----------------------------------------------------------------
+
+
 class TestSubAgentDefaults:
     def test_default_values(self):
         agent = SubAgent(

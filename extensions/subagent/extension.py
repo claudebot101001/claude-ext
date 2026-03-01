@@ -35,7 +35,23 @@ from extensions.subagent.worktree import (
 log = logging.getLogger(__name__)
 
 # Default cleanup delay (seconds) after worker completion before session destroy.
-_CLEANUP_DELAY = 10.0
+_CLEANUP_DELAY = 120.0
+
+
+def _check_all_completed(results: dict) -> bool:
+    """Check if all agents in results dict are successfully completed.
+
+    Returns False if there are no results, any errors, or any non-completed status.
+    Avoids vacuous truth (all() on empty iterable returns True).
+    """
+    if not results:
+        return False
+    success_statuses = ("completed", "merged")
+    has_errors = any("error" in r for r in results.values())
+    if has_errors:
+        return False
+    return all(r.get("status") in success_statuses for r in results.values())
+
 
 _SYSTEM_PROMPT = """\
 You have sub-agent orchestration tools available. Use them to delegate tasks \
@@ -263,6 +279,21 @@ class ExtensionImpl(Extension):
         task = session.context.get("subagent_task", "")
 
         worker_prompt_parts = [paradigm.system_prompt]
+
+        # Explicitly tell the worker its working directory and git branch
+        worker_prompt_parts.append(
+            f"\n## Working Directory\n"
+            f"Your working directory is: {session.working_dir}\n"
+            f"ALL file operations (Read, Write, Edit, Bash) MUST use this directory.\n"
+            f"Do NOT navigate to or modify files outside this directory."
+        )
+        wt_branch = session.context.get("subagent_worktree_branch")
+        if wt_branch:
+            worker_prompt_parts.append(
+                f"You are on git branch: {wt_branch}\n"
+                f"Commit your changes to THIS branch. Do NOT switch branches."
+            )
+
         if task:
             worker_prompt_parts.append(f"\n## Assigned Task\n{task}")
 
@@ -477,6 +508,7 @@ class ExtensionImpl(Extension):
                 "subagent_parent_id": parent_session_id,
                 "subagent_task": task[:500],
                 "subagent_paradigm": paradigm_name,
+                "subagent_worktree_branch": worktree_branch,  # None if no worktree
                 "subagent_auto_cleanup": params.get(
                     "auto_cleanup",
                     self._get_paradigm(paradigm_name).auto_cleanup,
@@ -569,11 +601,7 @@ class ExtensionImpl(Extension):
         if not pending_ids:
             return {
                 "results": results,
-                "all_completed": all(
-                    r.get("status") in ("completed", "merged")
-                    for r in results.values()
-                    if "error" not in r
-                ),
+                "all_completed": _check_all_completed(results),
             }
 
         # Register pending entries for agents still running
@@ -614,11 +642,7 @@ class ExtensionImpl(Extension):
 
         return {
             "results": results,
-            "all_completed": all(
-                r.get("status") in ("completed", "merged")
-                for r in results.values()
-                if "error" not in r
-            ),
+            "all_completed": _check_all_completed(results),
         }
 
     # -- status --------------------------------------------------------------
@@ -657,7 +681,8 @@ class ExtensionImpl(Extension):
 
         if include_result:
             result["result"] = agent.result_summary
-            result["error"] = agent.error
+            if agent.error:
+                result["error"] = agent.error
 
         return result
 
@@ -767,11 +792,24 @@ class ExtensionImpl(Extension):
         if not agent.parent_branch:
             return {"error": "No parent branch recorded"}
 
-        # Find the main repo dir (parent session's working_dir)
+        # Find the main repo dir.  Prefer live parent session; fall back to
+        # the worktree's parent repo (git worktree metadata points back).
         parent_session = self.sm.sessions.get(agent.parent_session_id)
-        if not parent_session:
-            return {"error": "Parent session no longer exists"}
-        repo_dir = parent_session.working_dir
+        if parent_session:
+            repo_dir = parent_session.working_dir
+        else:
+            # Parent session gone — infer repo from worktree commondir
+            from extensions.subagent.worktree import _run as _git_run
+
+            rc, repo_path, _ = await _git_run(
+                ["git", "rev-parse", "--git-common-dir"],
+                cwd=agent.worktree_path,
+            )
+            if rc == 0 and repo_path:
+                # --git-common-dir returns e.g. /path/to/repo/.git
+                repo_dir = str(Path(repo_path).parent)
+            else:
+                return {"error": "Parent session gone and cannot determine repo path"}
 
         # Squash merge (validates branch + clean state internally)
         result = await squash_merge(repo_dir, agent.worktree_branch, agent.parent_branch)

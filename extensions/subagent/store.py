@@ -85,10 +85,32 @@ class SubAgentStore:
         return agents
 
     def get_agent(self, agent_id: str) -> SubAgent | None:
-        """Get a single agent by ID."""
-        for d in self._read_locked():
+        """Get a single agent by ID (exact match or unique prefix)."""
+        agents = self._read_locked()
+        # Exact match first
+        for d in agents:
             if d.get("id") == agent_id:
                 return self._from_dict(d)
+        # Prefix match (for truncated IDs from MCP display)
+        if len(agent_id) >= 6:
+            matches = [d for d in agents if d.get("id", "").startswith(agent_id)]
+            if len(matches) == 1:
+                return self._from_dict(matches[0])
+        return None
+
+    def resolve_agent_id(self, partial_id: str) -> str | None:
+        """Resolve a partial/truncated agent ID to the full ID.
+
+        Returns full ID if exactly one agent matches the prefix, else None.
+        """
+        agents = self._read_locked()
+        for d in agents:
+            if d.get("id") == partial_id:
+                return partial_id  # exact
+        if len(partial_id) >= 6:
+            matches = [d.get("id") for d in agents if d.get("id", "").startswith(partial_id)]
+            if len(matches) == 1:
+                return matches[0]
         return None
 
     def add_agent(self, agent: SubAgent) -> None:

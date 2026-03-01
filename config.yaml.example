@@ -92,7 +92,7 @@ extensions:
   subagent:
     max_subagents_per_session: 5     # Max active sub-agents per PM session
     default_paradigm: coder          # Default worker paradigm
-    cleanup_delay: 10.0              # Seconds before auto-destroying completed worker sessions
+    cleanup_delay: 120.0             # Seconds before auto-destroying completed worker sessions
     # Custom paradigms (merged with built-in: coder, reviewer, researcher):
     # paradigms:
     #   tester:

@@ -196,7 +196,7 @@ extensions:
   subagent:
     max_subagents_per_session: 5
     default_paradigm: coder
-    cleanup_delay: 10.0
+    cleanup_delay: 120.0
 ```
 
 **`config.yaml` is gitignored** (contains secrets). Use `config.yaml.example` as template.

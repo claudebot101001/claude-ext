@@ -39,9 +39,14 @@ claude-ext/
 │   │   ├── store.py               # HeartbeatStore: state + instruction file I/O + flock
 │   │   ├── mcp_server.py          # MCP stdio server (heartbeat seven tools)
 │   │   └── trigger_cli.py         # Standalone CLI: external processes trigger heartbeat via bridge.sock
-│   └── ask_user/
-│       ├── extension.py           # Interactive question extension (bridge + PendingStore)
-│       └── mcp_server.py          # MCP stdio server (ask_user tool)
+│   ├── ask_user/
+│   │   ├── extension.py           # Interactive question extension (bridge + PendingStore)
+│   │   └── mcp_server.py          # MCP stdio server (ask_user tool)
+│   └── subagent/
+│       ├── extension.py           # Multi-agent orchestration (PM → worker sessions)
+│       ├── mcp_server.py          # MCP stdio server (8 subagent tools)
+│       ├── store.py               # SubAgentStore: agent records + flock + prefix ID matching
+│       └── worktree.py            # Git worktree utilities (create/diff/merge/cleanup)
 ├── config.yaml                    # Global config (engine params + extension toggles + extension config) (.gitignore)
 ├── config.yaml.example            # Config template (tracked)
 ├── main.py                        # Entry point (load config → build engine → init sessions → register extensions → run)
@@ -848,6 +853,39 @@ Claude → MCP tool(ask_user) → bridge.call("ask_user") → BridgeServer handl
 **Built-in tool disabling**: Extension disables the CC built-in question tool via `register_disallowed_tool("AskUserQuestion")` (enforced via `--disallowedTools` CLI flag), and injects a concise system prompt guiding use of the MCP ask_user tool.
 
 **Frontend integration**: When the delivery callback receives `{"is_question": True, "request_id": ..., "options": [...]}`, it displays UI (e.g. Telegram inline keyboard). After the user answers, call `engine.pending.resolve(request_id, answer)` to deliver the response.
+
+### Existing Extension: subagent
+
+Multi-agent orchestration. A PM session spawns independent worker sessions (each in its own tmux + optional git worktree), waits for completion, reviews diffs, and merges results back.
+
+**Data flow**:
+```
+PM Claude → MCP tool(subagent_*) → bridge.call("subagent_*") → BridgeServer handler
+  → SessionManager.create_session (worker in isolated tmux)
+  → Worker executes independently (parallel with other workers)
+  → Delivery callback → SubAgentStore.update + PendingStore.resolve → PM unblocks
+```
+
+**MCP Tools** (8):
+- `subagent_spawn(task, name?, worktree?, paradigm?)` — Create worker, returns agent_id
+- `subagent_wait(agent_ids, timeout?)` — **Blocking**: wait until all specified agents complete
+- `subagent_status(agent_id, include_result?)` — Status + cost + optional result text
+- `subagent_send(agent_id, prompt)` — Follow-up prompt (re-activates completed agents)
+- `subagent_stop(agent_id)` — Interrupt running worker
+- `subagent_list()` — List all sub-agents for current session
+- `subagent_diff(agent_id)` — Full git diff for worktree agent
+- `subagent_merge(agent_id)` — Squash-merge worktree into parent branch (staged, not committed)
+
+**Paradigms**: `coder` (full access, auto-cleanup), `reviewer` (read-only, persistent), `researcher` (read-only, persistent). Custom paradigms via config.
+
+**Key mechanisms**:
+- **PendingStore integration**: `subagent_wait` registers pending entries per agent; delivery callback resolves them when workers complete. PM blocks on `asyncio.wait` without polling.
+- **Session customizer**: Workers get `exclude_mcp_servers={"subagent"}` (prevents recursive spawning) + role-specific system prompt with explicit working directory and git branch.
+- **Prefix ID matching**: `SubAgentStore.get_agent()` supports unique prefix matching (≥6 chars) so truncated IDs from MCP display still resolve correctly.
+- **Git worktree isolation**: Workers operate in `{state_dir}/worktrees/{repo}/{branch}/` with branch `subagent/{name}-{hex8}`. Merge uses `git merge --squash` (no checkout).
+- **Auto-cleanup**: Completed workers are destroyed after `cleanup_delay` (default 120s). Store records persist for status queries after session destruction.
+
+**Storage**: `{state_dir}/subagent/agents.json` (flock-based, same pattern as HeartbeatStore/JobStore).
 
 ---
 

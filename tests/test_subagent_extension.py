@@ -7,7 +7,7 @@ import pytest
 
 from core.pending import PendingStore
 from core.session import SessionOverrides, SessionStatus
-from extensions.subagent.extension import ExtensionImpl
+from extensions.subagent.extension import ExtensionImpl, _check_all_completed
 from extensions.subagent.store import SubAgent
 
 
@@ -392,6 +392,56 @@ class TestStatus:
             result = await ext._handle_status({"agent_id": "w1"})
             assert result["status"] == "completed"
             assert result["cost_usd"] == 0.05
+
+        asyncio.run(_test())
+
+    def test_status_include_result_no_false_error(self, ext):
+        """include_result=True should NOT inject 'error' key when agent.error is None."""
+
+        async def _test():
+            await ext.start()
+            ext._store.add_agent(
+                SubAgent(
+                    id="w1",
+                    parent_session_id="p1",
+                    name="w",
+                    task="t",
+                    paradigm="coder",
+                    user_id="u",
+                    working_dir="/tmp",
+                    status="completed",
+                    result_summary="All good",
+                    cost_usd=0.05,
+                    error=None,
+                )
+            )
+            result = await ext._handle_status({"agent_id": "w1", "include_result": True})
+            assert "error" not in result
+            assert result["result"] == "All good"
+            assert result["status"] == "completed"
+
+        asyncio.run(_test())
+
+    def test_status_include_result_with_error(self, ext):
+        """include_result=True should include 'error' when agent has one."""
+
+        async def _test():
+            await ext.start()
+            ext._store.add_agent(
+                SubAgent(
+                    id="w1",
+                    parent_session_id="p1",
+                    name="w",
+                    task="t",
+                    paradigm="coder",
+                    user_id="u",
+                    working_dir="/tmp",
+                    status="failed",
+                    error="Something broke",
+                )
+            )
+            result = await ext._handle_status({"agent_id": "w1", "include_result": True})
+            assert result["error"] == "Something broke"
 
         asyncio.run(_test())
 
@@ -822,6 +872,8 @@ class TestWait:
                 }
             )
             assert result["results"]["nonexistent"]["error"] == "not found"
+            # all_completed should be False when all are "not found"
+            assert result["all_completed"] is False
 
         asyncio.run(_test())
 
@@ -1132,7 +1184,9 @@ class TestMerge:
 
         asyncio.run(_test())
 
-    def test_merge_parent_session_gone(self, ext):
+    def test_merge_parent_session_gone_no_git(self, ext):
+        """When parent gone and git commondir also fails, return error."""
+
         async def _test():
             await ext.start()
             ext._store.add_agent(
@@ -1146,13 +1200,16 @@ class TestMerge:
                     working_dir="/tmp",
                     status="completed",
                     worktree_enabled=True,
+                    worktree_path="/tmp/gone-wt",
                     worktree_branch="subagent/w-1234",
                     parent_branch="main",
                 )
             )
-            result = await ext._handle_merge({"agent_id": "w1"})
+            with patch("extensions.subagent.worktree._run") as mock_git:
+                mock_git.return_value = (128, "", "not a git repo")
+                result = await ext._handle_merge({"agent_id": "w1"})
             assert "error" in result
-            assert "parent" in result["error"].lower()
+            assert "cannot determine" in result["error"].lower()
 
         asyncio.run(_test())
 
@@ -1270,5 +1327,142 @@ class TestDeliveryPendingCleanup:
 
             # Key should be removed from _wait_pendings
             assert "w1" not in ext._wait_pendings
+
+        asyncio.run(_test())
+
+
+# -- _check_all_completed helper -------------------------------------------
+
+
+class TestCheckAllCompleted:
+    def test_empty_results(self):
+        assert _check_all_completed({}) is False
+
+    def test_all_completed(self):
+        results = {
+            "a": {"status": "completed"},
+            "b": {"status": "merged"},
+        }
+        assert _check_all_completed(results) is True
+
+    def test_all_errors(self):
+        """Vacuous truth: when all entries have errors, should return False."""
+        results = {
+            "a": {"error": "not found"},
+            "b": {"error": "not found"},
+        }
+        assert _check_all_completed(results) is False
+
+    def test_mixed_errors_and_completed(self):
+        results = {
+            "a": {"status": "completed"},
+            "b": {"error": "not found"},
+        }
+        assert _check_all_completed(results) is False
+
+    def test_some_timeout(self):
+        results = {
+            "a": {"status": "completed"},
+            "b": {"status": "timeout"},
+        }
+        assert _check_all_completed(results) is False
+
+    def test_all_running(self):
+        results = {
+            "a": {"status": "running"},
+        }
+        assert _check_all_completed(results) is False
+
+
+# -- Worker system prompt includes working_dir ----------------------------
+
+
+class TestWorkerPromptWorkingDir:
+    def test_worker_prompt_includes_working_dir(self, ext):
+        _run(ext.start())
+        session = _mock_session(
+            working_dir="/home/user/worktree/branch-abc",
+            context={
+                "subagent_worker": True,
+                "subagent_paradigm": "coder",
+                "subagent_task": "Fix bug",
+            },
+        )
+        result = ext._customize_session(session)
+        prompt_text = "\n".join(result.extra_system_prompt)
+        assert "/home/user/worktree/branch-abc" in prompt_text
+        assert "MUST use this directory" in prompt_text
+
+    def test_worker_prompt_includes_branch(self, ext):
+        _run(ext.start())
+        session = _mock_session(
+            working_dir="/home/user/worktree/branch-abc",
+            context={
+                "subagent_worker": True,
+                "subagent_paradigm": "coder",
+                "subagent_task": "Fix bug",
+                "subagent_worktree_branch": "subagent/fix-bug-abc12345",
+            },
+        )
+        result = ext._customize_session(session)
+        prompt_text = "\n".join(result.extra_system_prompt)
+        assert "subagent/fix-bug-abc12345" in prompt_text
+        assert "Do NOT switch branches" in prompt_text
+
+    def test_worker_prompt_no_branch_when_no_worktree(self, ext):
+        _run(ext.start())
+        session = _mock_session(
+            working_dir="/home/user/project",
+            context={
+                "subagent_worker": True,
+                "subagent_paradigm": "coder",
+                "subagent_task": "Fix bug",
+            },
+        )
+        result = ext._customize_session(session)
+        prompt_text = "\n".join(result.extra_system_prompt)
+        assert "/home/user/project" in prompt_text
+        assert "Do NOT switch branches" not in prompt_text
+
+
+# -- Merge: parent session gone fallback -----------------------------------
+
+
+class TestMergeParentGoneFallback:
+    @patch("extensions.subagent.extension.cleanup_worktree")
+    @patch("extensions.subagent.extension.squash_merge")
+    def test_merge_parent_gone_uses_git_commondir(self, mock_merge, mock_cleanup, ext):
+        """When parent session is destroyed, merge infers repo from git."""
+
+        async def _test():
+            await ext.start()
+            mock_merge.return_value = {"staged_files": ["f.py"]}
+            mock_cleanup.return_value = {"removed": True}
+
+            ext._store.add_agent(
+                SubAgent(
+                    id="w1",
+                    parent_session_id="p-gone",
+                    name="w",
+                    task="t",
+                    paradigm="coder",
+                    user_id="u",
+                    working_dir="/tmp/wt",
+                    status="completed",
+                    worktree_enabled=True,
+                    worktree_path="/tmp/wt",
+                    worktree_branch="subagent/w-1234",
+                    parent_branch="main",
+                )
+            )
+            # No parent session in sm.sessions
+
+            with patch("extensions.subagent.worktree._run") as mock_git:
+                mock_git.return_value = (0, "/tmp/repo/.git", "")
+                result = await ext._handle_merge({"agent_id": "w1"})
+
+            assert "error" not in result
+            assert result["merged"] is True
+            mock_merge.assert_called_once_with("/tmp/repo", "subagent/w-1234", "main")
 
         asyncio.run(_test())
