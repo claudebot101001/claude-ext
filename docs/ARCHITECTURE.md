@@ -202,6 +202,42 @@ Key changes (compared to the old single-file run.sh):
 | `list_mcp_tools()` | Return all registered MCP servers and their declared tool metadata |
 | `register_env_unset()` | Register env vars to unset in Claude sessions (prevents sensitive info leakage) |
 | `register_disallowed_tool()` | Register built-in CC tools to disable (used when extensions provide MCP replacements, passed via `--disallowedTools`) |
+| `add_session_customizer()` | Register per-session customization callback. Called before every prompt execution. Returns `SessionOverrides` |
+
+#### Per-Session Customization
+
+Extensions can register **session customizers** via `add_session_customizer()` to customize per-session configuration without modifying `create_session` callers. Customizers are synchronous callbacks called before every prompt execution (in `_generate_run_scripts`), receiving the `Session` object and returning `SessionOverrides` (or `None` to skip).
+
+```python
+@dataclass
+class SessionOverrides:
+    extra_system_prompt: list[str] | None = None       # Appended to global system prompt
+    exclude_mcp_servers: set[str] | None = None        # Removed from global MCP registry
+    extra_mcp_servers: dict[str, dict] | None = None   # Added (last-wins on key conflict)
+    extra_disallowed_tools: list[str] | None = None    # Appended to disallowed list
+    extra_env_unset: list[str] | None = None           # Appended to unset list
+```
+
+**Semantic rules**:
+- **R1**: `exclude_mcp_servers` only removes from the global `_mcp_servers` registry, never from another customizer's `extra_mcp_servers`. Execution order: copy global → apply exclude → merge extras.
+- **R2**: When multiple customizers return the same `extra_mcp_servers` key, last-wins by registration order (`dict.update` semantics).
+- **R3**: Customizers are called per-prompt, not per-session. They must be fast, synchronous, and side-effect-free (no I/O, no blocking).
+
+**Example** (future roles extension):
+```python
+def role_customizer(session):
+    role = session.context.get("role")
+    if role == "analyst":
+        return SessionOverrides(
+            extra_system_prompt=["You are a data analyst."],
+            exclude_mcp_servers={"vault"},  # analysts don't need vault
+        )
+    return None
+
+self.engine.session_manager.add_session_customizer(role_customizer)
+```
+
+When no customizers are registered, `_collect_overrides` returns all-None defaults, maintaining backward compatibility.
 
 #### Slot Mechanism
 
@@ -283,7 +319,7 @@ tools = self.engine.session_manager.list_mcp_tools()
 # {"cron": [{"name": "cron_create", "description": "..."}, ...], "vault": [...]}
 ```
 
-SessionManager automatically generates `mcp_config.json` for each session, injecting session-specific env vars (`CLAUDE_EXT_SESSION_ID`, `CLAUDE_EXT_STATE_DIR`), and adds the `--mcp-config` flag to run.sh. MCP server processes use these env vars to obtain the current session's context.
+SessionManager automatically generates `mcp_config.json` for each session, injecting session-specific env vars (`CLAUDE_EXT_SESSION_ID`, `CLAUDE_EXT_STATE_DIR`, `CLAUDE_EXT_USER_ID`), and adds the `--mcp-config` flag to run.sh. MCP server processes use these env vars to obtain the current session's context. `MCPServerBase` exposes `session_user_id` property for per-user logic (e.g. per-user memory paths).
 
 #### Environment Variable Isolation
 
@@ -399,7 +435,8 @@ Generic async register → wait → resolve pattern.
 
 MCP stdio JSON-RPC protocol boilerplate. Extension MCP servers just inherit and define tools + handlers.
 
-- Obtains session context via env vars: `CLAUDE_EXT_SESSION_ID`, `CLAUDE_EXT_STATE_DIR`
+- Obtains session context via env vars: `CLAUDE_EXT_SESSION_ID`, `CLAUDE_EXT_STATE_DIR`, `CLAUDE_EXT_USER_ID`
+- `session_user_id` property returns the session's owning user ID (from `CLAUDE_EXT_USER_ID` env var)
 - `session_context()` reads the current session's `state.json` (to get user_id, context, etc.)
 - Lazy `bridge` property: only initializes BridgeClient when `CLAUDE_EXT_BRIDGE_SOCKET` is set
 - Subclasses only need to set `name`, `tools` (schema list), and `self.handlers` (name → callable mapping)

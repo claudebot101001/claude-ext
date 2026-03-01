@@ -40,6 +40,20 @@ class SessionStatus(StrEnum):
 
 
 @dataclass
+class SessionOverrides:
+    """Per-session customizations returned by session customizer callbacks.
+
+    All fields are additive overlays on global registries. None = no opinion.
+    """
+
+    extra_system_prompt: list[str] | None = None
+    exclude_mcp_servers: set[str] | None = None
+    extra_mcp_servers: dict[str, dict] | None = None
+    extra_disallowed_tools: list[str] | None = None
+    extra_env_unset: list[str] | None = None
+
+
+@dataclass
 class Session:
     id: str
     name: str
@@ -69,6 +83,9 @@ class Session:
 
 # Callback type: (session_id, result_text, metadata)
 DeliveryCallback = Callable[[str, str, dict], Awaitable[None]]
+
+# Per-session customizer: receives Session, returns overrides (or None to skip)
+SessionCustomizer = Callable[[Session], SessionOverrides | None]
 
 
 # ---------------------------------------------------------------------------
@@ -102,6 +119,7 @@ class SessionManager:
         self._system_prompt_parts: list[str] = []  # fragments appended to system prompt
         self._env_unset: list[str] = []  # env vars to unset in claude sessions
         self._disallowed_tools: list[str] = []  # built-in tools to disable
+        self._session_customizers: list[SessionCustomizer] = []
 
     def add_delivery_callback(self, cb: DeliveryCallback) -> None:
         """Register a result delivery callback.  Multiple callbacks supported.
@@ -166,6 +184,58 @@ class SessionManager:
         if tool_name not in self._disallowed_tools:
             self._disallowed_tools.append(tool_name)
             log.info("Registered disallowed built-in tool: %s", tool_name)
+
+    def add_session_customizer(self, customizer: SessionCustomizer) -> None:
+        """Register a callback to customize per-session configuration.
+
+        Customizers are called in registration order during run script
+        generation — i.e. before EVERY prompt execution, not just at
+        session creation.  Callbacks must be fast, synchronous, and
+        side-effect-free (no I/O, no blocking).
+
+        Each receives the Session object and returns SessionOverrides
+        (or None to skip).  Results are merged across all customizers.
+        Call during extension start().
+        """
+        self._session_customizers.append(customizer)
+
+    def _collect_overrides(self, session: Session) -> SessionOverrides:
+        """Merge overrides from all registered session customizers."""
+        merged = SessionOverrides()
+        for customizer in self._session_customizers:
+            try:
+                result = customizer(session)
+            except Exception:
+                log.exception("Session customizer %r failed, skipping", customizer)
+                continue
+            if result is None:
+                continue
+            # extra_system_prompt
+            if result.extra_system_prompt is not None:
+                if merged.extra_system_prompt is None:
+                    merged.extra_system_prompt = []
+                merged.extra_system_prompt.extend(result.extra_system_prompt)
+            # exclude_mcp_servers
+            if result.exclude_mcp_servers is not None:
+                if merged.exclude_mcp_servers is None:
+                    merged.exclude_mcp_servers = set()
+                merged.exclude_mcp_servers |= result.exclude_mcp_servers
+            # extra_mcp_servers
+            if result.extra_mcp_servers is not None:
+                if merged.extra_mcp_servers is None:
+                    merged.extra_mcp_servers = {}
+                merged.extra_mcp_servers.update(result.extra_mcp_servers)
+            # extra_disallowed_tools
+            if result.extra_disallowed_tools is not None:
+                if merged.extra_disallowed_tools is None:
+                    merged.extra_disallowed_tools = []
+                merged.extra_disallowed_tools.extend(result.extra_disallowed_tools)
+            # extra_env_unset
+            if result.extra_env_unset is not None:
+                if merged.extra_env_unset is None:
+                    merged.extra_env_unset = []
+                merged.extra_env_unset.extend(result.extra_env_unset)
+        return merged
 
     # -- directory helpers --------------------------------------------------
 
@@ -543,16 +613,38 @@ class SessionManager:
             except Exception:
                 log.exception("Delivery callback error")
 
-    def _generate_mcp_config(self, session: Session, sdir: Path) -> dict | None:
-        """Build per-session MCP config with session-specific env vars."""
-        if not self._mcp_servers:
+    def _generate_mcp_config(
+        self, session: Session, sdir: Path, *, overrides: SessionOverrides | None = None,
+    ) -> dict | None:
+        """Build per-session MCP config with session-specific env vars.
+
+        Applies *overrides* (if any) following rule R1:
+        1. Copy global ``_mcp_servers``
+        2. Remove ``exclude_mcp_servers`` entries
+        3. Merge ``extra_mcp_servers`` (last-wins)
+        """
+        # 1. Copy global servers
+        servers_to_use = dict(self._mcp_servers)
+
+        # 2. Exclude
+        if overrides and overrides.exclude_mcp_servers:
+            for name in overrides.exclude_mcp_servers:
+                servers_to_use.pop(name, None)
+
+        # 3. Merge extras
+        if overrides and overrides.extra_mcp_servers:
+            servers_to_use.update(overrides.extra_mcp_servers)
+
+        if not servers_to_use:
             return None
+
         servers = {}
-        for name, cfg in self._mcp_servers.items():
+        for name, cfg in servers_to_use.items():
             entry = dict(cfg)
             env = dict(entry.get("env", {}))
             env["CLAUDE_EXT_SESSION_ID"] = session.id
             env["CLAUDE_EXT_STATE_DIR"] = str(sdir)
+            env["CLAUDE_EXT_USER_ID"] = session.user_id
             # Always set bridge socket path — MCP servers connect on demand,
             # not at startup.  The socket will exist by the time they call it.
             env["CLAUDE_EXT_BRIDGE_SOCKET"] = str(self.base_dir / "bridge.sock")
@@ -567,6 +659,8 @@ class SessionManager:
 
         Returns (claude_cmd_content, run_sh_content).
         """
+        overrides = self._collect_overrides(session)
+
         prompt_file = shlex.quote(str(sdir / "prompt.txt"))
         stderr_file = shlex.quote(str(sdir / "stderr.log"))
         stream_file = shlex.quote(str(sdir / "stream.jsonl"))
@@ -594,6 +688,11 @@ class SessionManager:
         for t in self._disallowed_tools:
             if t not in disallowed:
                 disallowed.append(t)
+        # Append per-session overrides
+        if overrides.extra_disallowed_tools:
+            for t in overrides.extra_disallowed_tools:
+                if t not in disallowed:
+                    disallowed.append(t)
         if disallowed:
             cmd_parts.extend(["--disallowedTools", *disallowed])
 
@@ -602,19 +701,23 @@ class SessionManager:
         else:
             cmd_parts.extend(["--resume", session.claude_session_id])
 
-        # MCP config (per-session, includes session-specific env vars)
-        mcp_config = self._generate_mcp_config(session, sdir)
+        # MCP config (per-session, includes session-specific env vars + overrides)
+        mcp_config = self._generate_mcp_config(session, sdir, overrides=overrides)
         if mcp_config:
             mcp_path = sdir / "mcp_config.json"
             mcp_path.write_text(json.dumps(mcp_config, indent=2), encoding="utf-8")
             cmd_parts.extend(["--mcp-config", shlex.quote(str(mcp_path))])
 
-        # System prompt fragments (registered by extensions)
+        # System prompt fragments (global + per-session overrides)
+        all_prompt_parts = list(self._system_prompt_parts)
+        if overrides.extra_system_prompt:
+            all_prompt_parts.extend(overrides.extra_system_prompt)
+
         sys_prompt_file = ""
-        if self._system_prompt_parts:
+        if all_prompt_parts:
             sys_prompt_path = sdir / "system_prompt.txt"
             sys_prompt_path.write_text(
-                "\n\n".join(self._system_prompt_parts),
+                "\n\n".join(all_prompt_parts),
                 encoding="utf-8",
             )
             sys_prompt_file = shlex.quote(str(sys_prompt_path))
@@ -627,7 +730,12 @@ class SessionManager:
             sys_prompt_line = f"SYS_PROMPT=$(cat {sys_prompt_file})\n"
             cmd_str += ' --append-system-prompt "$SYS_PROMPT"'
 
-        unset_vars = " ".join(["CLAUDECODE", *self._env_unset])
+        # Env unset (global + per-session overrides)
+        env_unset_list = ["CLAUDECODE", *self._env_unset]
+        if overrides.extra_env_unset:
+            env_unset_list.extend(overrides.extra_env_unset)
+        unset_vars = " ".join(env_unset_list)
+
         claude_cmd = (
             "#!/bin/bash\n"
             f"unset {unset_vars}\n"

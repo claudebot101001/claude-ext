@@ -88,8 +88,25 @@ Shared services:
 | `register_mcp_server(name, config, tools)` | Add MCP server to all future sessions |
 | `register_env_unset(var)` | Unset env var in Claude sessions |
 | `register_disallowed_tool(name)` | Disable built-in CC tool via `--disallowedTools` |
+| `add_session_customizer(cb)` | Register per-session customization callback (called per-prompt) |
 
 Session status: `IDLE → BUSY → IDLE` / `→ STOPPED` / `→ DEAD`. `context: dict` carries extension-defined routing data (e.g. `{"chat_id": ...}`).
+
+### Per-Session Customization
+
+Extensions can register **session customizers** — synchronous callbacks that receive a `Session` and return `SessionOverrides` (or `None`). Customizers are called before every prompt execution (not just session creation), so they must be fast, synchronous, and side-effect-free.
+
+```python
+@dataclass
+class SessionOverrides:
+    extra_system_prompt: list[str] | None = None       # Appended to global system prompt
+    exclude_mcp_servers: set[str] | None = None        # Removed from global MCP registry
+    extra_mcp_servers: dict[str, dict] | None = None   # Added (last-wins on key conflict)
+    extra_disallowed_tools: list[str] | None = None    # Appended to disallowed list
+    extra_env_unset: list[str] | None = None           # Appended to unset list
+```
+
+Semantic rules: `exclude` only removes from the global registry, never from another customizer's `extra_mcp_servers`. Multiple customizers' results are merged in registration order.
 
 ### Delivery Metadata
 
@@ -107,7 +124,7 @@ MCP child processes call main process via Unix socket. Line-delimited JSON. `Bri
 
 ### MCP Server Base
 
-Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context via env vars (`CLAUDE_EXT_SESSION_ID`, `CLAUDE_EXT_STATE_DIR`). Lazy `bridge` property for RPC calls.
+Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context via env vars (`CLAUDE_EXT_SESSION_ID`, `CLAUDE_EXT_STATE_DIR`, `CLAUDE_EXT_USER_ID`). Lazy `bridge` property for RPC calls. `session_user_id` property for per-user logic.
 
 ## Extensions Summary
 

@@ -39,6 +39,10 @@ class MCPServerBase:
     def state_dir(self) -> str:
         return os.environ.get("CLAUDE_EXT_STATE_DIR", "")
 
+    @property
+    def session_user_id(self) -> str:
+        return os.environ.get("CLAUDE_EXT_USER_ID", "")
+
     def session_context(self) -> dict:
         """Read the current session's state.json."""
         if not self.state_dir:
