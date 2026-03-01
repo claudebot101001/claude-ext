@@ -24,7 +24,7 @@ _LOCK_FILE = "subagent.lock"
 _AGENTS_FILE = "agents.json"
 
 # Truncation limit for result summaries stored in the JSON file.
-MAX_RESULT_LENGTH = 2000
+MAX_RESULT_LENGTH = 10000
 
 
 @dataclass
