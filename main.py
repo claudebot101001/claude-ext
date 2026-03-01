@@ -24,6 +24,8 @@ def setup_logging():
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Suppress httpx INFO logs — they leak Telegram bot tokens in URLs
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 async def main():
