@@ -67,7 +67,7 @@ Review the above and decide:
 - If nothing needs attention, reply with: NOTHING
 - If action is needed, reply with a brief task description (1-2 sentences). Do NOT execute the task, just describe it.
 
-Reply with "NOTHING" or a task description only."""
+Your ENTIRE response must be the single word NOTHING, or a 1-2 sentence task description. No preamble, no analysis, no explanation."""
 
 _TIER3_PROMPT_TEMPLATE = """\
 [HEARTBEAT #{run_count} — {timestamp}]
@@ -530,7 +530,10 @@ class ExtensionImpl(Extension):
 
         decision = response.strip()
 
-        if decision.upper().startswith("NOTHING"):
+        # Detect NOOP: response contains "NOTHING" and is short enough to be
+        # a noop reply (not a real task description that coincidentally has the word).
+        _NOOP_MAX_LEN = 200
+        if "NOTHING" in decision.upper() and len(decision) <= _NOOP_MAX_LEN:
             state = self._store.load_state()
             self._store.update_state(consecutive_noop=state.consecutive_noop + 1)
             if self.engine.events:

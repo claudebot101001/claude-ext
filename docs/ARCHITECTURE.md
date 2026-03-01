@@ -716,11 +716,11 @@ Trigger Channel (asyncio.Queue, external extension real-time events)
 
 Tier 0: Scheduler gate (Python, zero cost) → enabled? utilization? concurrent? active hours?
 Tier 1: Pre-check (Python) → HEARTBEAT.md non-empty? pending events?
-Tier 2: LLM decision (engine.ask(), ~500 tokens) → "NOTHING" or task description
+Tier 2: LLM decision (engine.ask(), ~500 tokens) → contains "NOTHING" (≤200 chars) = noop, else task description
 Tier 3: Execution (full session, only when Tier 2 decides action needed) → Telegram streaming delivery
 ```
 
-**Silent suppression**: Tier 2 uses `engine.ask()` (lightweight subprocess), does not create a tmux session. "NOTHING" is completely silent. Only Tier 3 sessions have `chat_id`, so Telegram only delivers for those.
+**Silent suppression**: Tier 2 uses `engine.ask()` (lightweight subprocess), does not create a tmux session. NOOP detection: response contains "NOTHING" and is ≤200 characters (guards against false positives from task descriptions). Only Tier 3 sessions have `chat_id`, so Telegram only delivers for those.
 
 **Storage**:
 - State: `{state_dir}/heartbeat/state.json` (JSON + flock)
