@@ -614,7 +614,11 @@ class SessionManager:
                 log.exception("Delivery callback error")
 
     def _generate_mcp_config(
-        self, session: Session, sdir: Path, *, overrides: SessionOverrides | None = None,
+        self,
+        session: Session,
+        sdir: Path,
+        *,
+        overrides: SessionOverrides | None = None,
     ) -> dict | None:
         """Build per-session MCP config with session-specific env vars.
 

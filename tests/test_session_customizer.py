@@ -1,6 +1,5 @@
 """Tests for per-session customization hooks."""
 
-
 import pytest
 
 from core.session import Session, SessionManager, SessionOverrides
@@ -169,9 +168,7 @@ class TestMCPConfigOverrides:
             return SessionOverrides(exclude_mcp_servers={"global_a", "extra_b"})
 
         def c2(session):
-            return SessionOverrides(
-                extra_mcp_servers={"extra_b": {"command": "node"}}
-            )
+            return SessionOverrides(extra_mcp_servers={"extra_b": {"command": "node"}})
 
         sm.add_session_customizer(c1)
         sm.add_session_customizer(c2)
