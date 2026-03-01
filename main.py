@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import os
 import signal
 import sys
 from pathlib import Path
@@ -50,6 +51,11 @@ async def main():
         max_sessions_per_user=session_cfg.get("max_sessions_per_user", 5),
     )
     await engine.session_manager.recover()
+
+    # Write PID file for external restart (e.g. kill $(cat pidfile))
+    pid_file = state_dir / "claude-ext.pid"
+    pid_file.write_text(str(os.getpid()))
+    log.info("PID %d written to %s", os.getpid(), pid_file)
     if engine.bridge:
         await engine.bridge.start()
 
@@ -85,6 +91,7 @@ async def main():
     if engine.bridge:
         await engine.bridge.stop()
     await engine.session_manager.shutdown()
+    pid_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

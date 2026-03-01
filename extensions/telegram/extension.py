@@ -552,20 +552,24 @@ class ExtensionImpl(Extension):
             return
         await update.message.chat.send_action("typing")
 
-        active_id = ctx.user_data.get("active_session_id")
-        session_meta = None
-        if active_id and active_id in self.sm.sessions:
-            session_meta = self.sm.sessions[active_id].last_result_metadata or None
+        try:
+            active_id = ctx.user_data.get("active_session_id")
+            session_meta = None
+            if active_id and active_id in self.sm.sessions:
+                session_meta = self.sm.sessions[active_id].last_result_metadata or None
 
-        auth, usage = await get_auth_info(), await get_usage()
-        text = format_status(auth, usage, session_meta)
+            auth, usage = await get_auth_info(), await get_usage()
+            text = format_status(auth, usage, session_meta)
 
-        # Append extension health report
-        ext_report = await self._build_health_report()
-        if ext_report:
-            text += "\n" + ext_report
+            # Append extension health report
+            ext_report = await self._build_health_report()
+            if ext_report:
+                text += "\n" + ext_report
 
-        await update.message.reply_text(f"<pre>{text}</pre>", parse_mode="HTML")
+            await update.message.reply_text(f"<pre>{text}</pre>", parse_mode="HTML")
+        except Exception:
+            log.exception("/status failed")
+            await update.message.reply_text("Failed to fetch status. Check logs.")
 
     async def _build_health_report(self) -> str:
         """Build extension health + tools summary via async health checks."""

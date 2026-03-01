@@ -98,9 +98,9 @@ def format_status(auth: dict, usage: dict, session: dict | None = None) -> str:
         # Extra usage (overage billing)
         extra = usage.get("extra_usage") or {}
         if extra.get("is_enabled"):
-            used = extra.get("used_credits", 0)
-            limit = extra.get("monthly_limit", 0)
-            util = extra.get("utilization", 0)
+            used = extra.get("used_credits") or 0
+            limit = extra.get("monthly_limit") or 0
+            util = extra.get("utilization") or 0
             lines.append(f"  Overage:  ${used:.0f}/${limit} ({util:.1f}%)")
 
     # --- Session ---
