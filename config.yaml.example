@@ -27,6 +27,7 @@ state_dir: ~/.claude-ext
 # Session management
 sessions:
   max_sessions_per_user: 5       # Max concurrent sessions per user (= slot count)
+                                 # Tip: increase to 8-10 when using subagent extension
 
 # Extensions to enable (must match directory names under extensions/)
 # Order matters: dependencies must come before dependents.
@@ -37,6 +38,7 @@ enabled:
   # - ask_user                     # Uncomment to let Claude ask the user questions mid-session
   # - heartbeat                     # Autonomous periodic task agent
   # - cron                         # Uncomment to enable scheduled tasks
+  # - subagent                     # Multi-agent orchestration (PM spawns workers)
 
 # Per-extension configuration
 extensions:
@@ -86,3 +88,14 @@ extensions:
     #     session_strategy: new           # "new" or "reuse"
     #     notify_context:                 # Routing info for result delivery
     #       chat_id: 123456789            # Telegram chat ID to send results to
+
+  subagent:
+    max_subagents_per_session: 5     # Max active sub-agents per PM session
+    default_paradigm: coder          # Default worker paradigm
+    cleanup_delay: 10.0              # Seconds before auto-destroying completed worker sessions
+    # Custom paradigms (merged with built-in: coder, reviewer, researcher):
+    # paradigms:
+    #   tester:
+    #     system_prompt: "You are a testing specialist. Write comprehensive tests."
+    #     disallowed_tools: []
+    #     auto_cleanup: true

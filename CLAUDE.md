@@ -24,6 +24,7 @@ claude-ext/
 │   ├── heartbeat/           # Autonomous periodic agent (dual-channel + 3-tier)
 │   ├── cron/                # Scheduled tasks (croniter + MCP)
 │   ├── ask_user/            # Interactive questions (bridge + PendingStore)
+│   ├── subagent/            # Multi-agent orchestration (PM → worker sessions)
 │   └── telegram/            # Telegram bot bridge (multi-session + streaming)
 ├── config.yaml              # Runtime config (.gitignored)
 ├── config.yaml.example      # Config template
@@ -135,6 +136,7 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 | **heartbeat** | `heartbeat_get_instructions`, `heartbeat_set_instructions`, `heartbeat_get_status`, `heartbeat_pause`, `heartbeat_resume`, `heartbeat_trigger`, `heartbeat_get_trigger_command` | Mixed (file I/O + bridge for trigger) |
 | **cron** | `cron_create`, `cron_list`, `cron_delete`, `cron_status` | Bridge RPC |
 | **ask_user** | `ask_user` | Bridge RPC → PendingStore |
+| **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_list`, `subagent_diff`, `subagent_merge` | Bridge RPC → PendingStore + SessionManager |
 | **telegram** | (none — frontend only) | Delivery callbacks |
 
 ## Adding a New Extension
@@ -173,6 +175,7 @@ enabled:
   # - heartbeat # Autonomous periodic agent
   # - ask_user  # Interactive questions
   # - cron      # Scheduled tasks
+  # - subagent  # Multi-agent orchestration
 
 extensions:
   vault: {}           # Zero-config (passphrase auto-generated)
@@ -190,6 +193,10 @@ extensions:
     notify_context: { chat_id: 123456789 }
   cron:
     jobs: []          # Static jobs; Claude also creates dynamically via MCP
+  subagent:
+    max_subagents_per_session: 5
+    default_paradigm: coder
+    cleanup_delay: 10.0
 ```
 
 **`config.yaml` is gitignored** (contains secrets). Use `config.yaml.example` as template.
