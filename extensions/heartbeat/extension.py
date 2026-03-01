@@ -259,6 +259,7 @@ class ExtensionImpl(Extension):
             return {"status": "error", "detail": "HeartbeatStore not initialized"}
         state = self._store.load_state()
         scheduler_alive = self._scheduler_task is not None and not self._scheduler_task.done()
+        multiplier = self._get_backoff_multiplier()
         result = {
             "status": "ok"
             if scheduler_alive and state.enabled
@@ -271,6 +272,8 @@ class ExtensionImpl(Extension):
             "consecutive_noop": state.consecutive_noop,
             "next_run": state.next_run,
             "interval": self._interval,
+            "effective_interval": self._interval * multiplier,
+            "backoff_multiplier": multiplier,
         }
         return result
 

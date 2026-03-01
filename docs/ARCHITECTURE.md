@@ -568,6 +568,12 @@ Telegram Bot bridge, based on tmux multi-session management.
 | `/stop` | Stop running task on current session + drain queue |
 | `/delete <slot\|name> [force]` | Delete session (kill tmux + clean files). BUSY sessions require `force` |
 
+**Supported message types:**
+- **Text** — sent as prompt directly
+- **Photo** (PNG/JPG) — downloaded to `{working_dir}/.claude-ext-uploads/`, prompt includes file path so Claude Code can read the image with its Read tool
+- **Document** (any file) — same download flow; Claude reads PDFs, code, etc. via Read tool
+- **Other** (voice, video, sticker, etc.) — replied with "Unsupported message type"
+
 **Message processing flow:**
 1. User sends message → check for active session; if none, auto-create `session-1` (slot #1). Auto-selection priority: IDLE > STOPPED > BUSY, skips DEAD
 2. Active session busy → message queued, reply "Queued (position N)"

@@ -210,6 +210,20 @@ class TestHeartbeatHealth:
             assert result["enabled"] is True
             assert "runs_today" in result
             assert "interval" in result
+            assert result["effective_interval"] == result["interval"]
+            assert result["backoff_multiplier"] == 1
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_check())
+
+    def test_health_effective_interval_with_backoff(self, ext):
+        async def _check():
+            await ext.start()
+            ext._store.update_state(consecutive_noop=5)
+            result = await ext.health_check()
+            assert result["interval"] == 1800
+            assert result["backoff_multiplier"] == 2
+            assert result["effective_interval"] == 3600
             ext._scheduler_task.cancel()
 
         asyncio.run(_check())

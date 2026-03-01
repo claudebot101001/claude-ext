@@ -5,6 +5,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -601,7 +602,7 @@ class ExtensionImpl(Extension):
             # Heartbeat-specific details
             if "runs_today" in hc:
                 parts.append(f"{hc['runs_today']} runs today")
-            if hc.get("consecutive_noop"):
+            if "consecutive_noop" in hc:
                 parts.append(f"{hc['consecutive_noop']} idle")
             if hc.get("next_run"):
                 from core.status import relative_time
@@ -609,8 +610,12 @@ class ExtensionImpl(Extension):
                 next_str = relative_time(hc["next_run"])
                 if next_str:
                     parts.append(f"next {next_str}")
-            if hc.get("interval"):
-                parts.append(f"{hc['interval']}s interval")
+            eff = hc.get("effective_interval", hc.get("interval"))
+            if eff:
+                parts.append(f"{eff}s interval")
+                mult = hc.get("backoff_multiplier", 1)
+                if mult > 1:
+                    parts.append(f"{mult}x backoff")
 
             line = f"  [{icon}] {name}"
             if parts:
@@ -765,6 +770,91 @@ class ExtensionImpl(Extension):
                 f"Use /new to start a parallel session."
             )
 
+    # -- media handler ------------------------------------------------------
+
+    async def _handle_media(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle photo and document messages by downloading and prompting Claude."""
+        if not self._authorized(update):
+            return
+
+        session, auto_selected = await self._ensure_active_session(update, ctx)
+
+        if session.status == SessionStatus.DEAD:
+            await update.message.reply_text(
+                f"#{session.slot} '{session.name}' is dead. "
+                f"Use /delete {session.slot} and /new to start fresh."
+            )
+            return
+
+        session.context["chat_id"] = update.effective_chat.id
+
+        msg = update.message
+
+        # Determine file_id and build filename
+        if msg.photo:
+            # photo is a list of PhotoSize; take the largest
+            photo = msg.photo[-1]
+            file_id = photo.file_id
+            file_unique_id = photo.file_unique_id
+            original_name = "photo.jpg"
+            media_type = "image"
+        elif msg.document:
+            file_id = msg.document.file_id
+            file_unique_id = msg.document.file_unique_id
+            original_name = msg.document.file_name or "file"
+            media_type = "file"
+        else:
+            return
+
+        # Safe filename: {stem}_{unique_id}{ext}
+        p = Path(original_name)
+        safe_name = f"{p.stem}_{file_unique_id}{p.suffix}"
+
+        # Download to uploads dir inside session working_dir
+        uploads_dir = Path(session.working_dir) / ".claude-ext-uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        dest = uploads_dir / safe_name
+
+        try:
+            tg_file = await self.app.bot.get_file(file_id)
+            await tg_file.download_to_drive(str(dest))
+        except Exception:
+            log.exception("Failed to download media file")
+            await update.message.reply_text("Failed to download the file. Please try again.")
+            return
+
+        caption = msg.caption or ""
+
+        if media_type == "image":
+            body = caption if caption else "Please analyze this image."
+            prompt = f"[The user sent an image: {dest}]\n{body}"
+        else:
+            body = caption if caption else "Please analyze this file."
+            prompt = f"[The user sent a file: {dest}]\n{body}"
+
+        try:
+            position = await self.sm.send_prompt(session.id, prompt)
+        except RuntimeError as e:
+            await update.message.reply_text(str(e))
+            return
+
+        tag = f"[#{session.slot} {session.name}]"
+        auto_note = " (auto-activated)" if auto_selected else ""
+        kind = "Image" if media_type == "image" else "File"
+
+        if position == 0:
+            await update.message.reply_text(f"{tag}{auto_note} {kind} received, processing...")
+        else:
+            await update.message.reply_text(
+                f"{tag}{auto_note} {kind} queued (position {position})."
+            )
+
+    async def _handle_unsupported(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        """Reply to unsupported message types."""
+        if not self._authorized(update):
+            return
+        await update.message.reply_text("Unsupported message type. Send text, images, or files.")
+
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
@@ -780,6 +870,18 @@ class ExtensionImpl(Extension):
         self.app.add_handler(CommandHandler("delete", self._cmd_delete))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
+        self.app.add_handler(
+            MessageHandler(
+                (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
+                self._handle_media,
+            )
+        )
+        self.app.add_handler(
+            MessageHandler(
+                ~filters.TEXT & ~filters.COMMAND & ~filters.PHOTO & ~filters.Document.ALL,
+                self._handle_unsupported,
+            )
+        )
 
         await self.app.initialize()
         await self.app.bot.set_my_commands(
