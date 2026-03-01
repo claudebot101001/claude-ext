@@ -722,7 +722,8 @@ class SessionManager:
         # Filter out tagged prompts whose MCP server is excluded for this session
         excluded = overrides.exclude_mcp_servers or set()
         all_prompt_parts = [
-            text for text, server in self._system_prompt_parts
+            text
+            for text, server in self._system_prompt_parts
             if server is None or server not in excluded
         ]
         if overrides.extra_system_prompt:
