@@ -115,7 +115,8 @@ class ExtensionImpl(Extension):
             "When you retrieve a secret, use it directly in subsequent tool "
             "calls (e.g. as an API key in a curl command, as a password in "
             "a config file). If the user asks to see a secret value, remind "
-            "them to check the vault directly for security reasons."
+            "them to check the vault directly for security reasons.",
+            mcp_server="vault",
         )
 
         log.info(

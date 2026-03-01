@@ -116,7 +116,7 @@ class SessionManager:
         self._pending_deliveries: list[tuple] = []  # queued until callback is set
         self._mcp_servers: dict[str, dict] = {}  # name -> MCP server config
         self._mcp_tool_meta: dict[str, list[dict]] = {}  # name -> tool metadata
-        self._system_prompt_parts: list[str] = []  # fragments appended to system prompt
+        self._system_prompt_parts: list[tuple[str, str | None]] = []  # (text, mcp_server_name)
         self._env_unset: list[str] = []  # env vars to unset in claude sessions
         self._disallowed_tools: list[str] = []  # built-in tools to disable
         self._session_customizers: list[SessionCustomizer] = []
@@ -155,14 +155,20 @@ class SessionManager:
         """Return registered MCP servers and their declared tool metadata."""
         return {name: list(self._mcp_tool_meta.get(name, [])) for name in self._mcp_servers}
 
-    def add_system_prompt(self, text: str) -> None:
+    def add_system_prompt(self, text: str, mcp_server: str | None = None) -> None:
         """Append a fragment to the system prompt for all sessions.
 
         Fragments are joined with blank lines and passed to claude via
         ``--append-system-prompt``.  Call during extension ``start()``.
+
+        If *mcp_server* is provided, the fragment is tagged and will be
+        excluded from sessions that exclude that MCP server (via
+        ``SessionOverrides.exclude_mcp_servers``).  Untagged fragments
+        (mcp_server=None) are always included.
         """
-        self._system_prompt_parts.append(text)
-        log.info("Added system prompt fragment (%d chars)", len(text))
+        self._system_prompt_parts.append((text, mcp_server))
+        tag = f" [tagged: {mcp_server}]" if mcp_server else ""
+        log.info("Added system prompt fragment (%d chars)%s", len(text), tag)
 
     def register_env_unset(self, var_name: str) -> None:
         """Register an environment variable to unset in Claude sessions.
@@ -713,7 +719,12 @@ class SessionManager:
             cmd_parts.extend(["--mcp-config", shlex.quote(str(mcp_path))])
 
         # System prompt fragments (global + per-session overrides)
-        all_prompt_parts = list(self._system_prompt_parts)
+        # Filter out tagged prompts whose MCP server is excluded for this session
+        excluded = overrides.exclude_mcp_servers or set()
+        all_prompt_parts = [
+            text for text, server in self._system_prompt_parts
+            if server is None or server not in excluded
+        ]
         if overrides.extra_system_prompt:
             all_prompt_parts.extend(overrides.extra_system_prompt)
 

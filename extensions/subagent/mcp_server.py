@@ -257,8 +257,6 @@ class SubAgentMCPServer(MCPServerBase):
             cost = r.get("cost_usd")
             cost_str = f" (${cost:.4f})" if cost else ""
             summary = r.get("result", "")
-            if summary and len(summary) > 200:
-                summary = summary[:200] + "..."
             lines.append(f"\n[{aid}] {status}{cost_str}")
             if summary:
                 lines.append(f"  {summary}")

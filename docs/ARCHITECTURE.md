@@ -205,6 +205,7 @@ Key changes (compared to the old single-file run.sh):
 | `add_delivery_callback()` | Register result delivery callback (supports multiple). On first registration, flushes results buffered during recover() |
 | `register_mcp_server()` | Register MCP server config (optional `tools` metadata). All subsequent sessions' run.sh auto-includes `--mcp-config` |
 | `list_mcp_tools()` | Return all registered MCP servers and their declared tool metadata |
+| `add_system_prompt(text, mcp_server=None)` | Append system prompt fragment. Optional `mcp_server` tag enables per-session filtering via `exclude_mcp_servers` |
 | `register_env_unset()` | Register env vars to unset in Claude sessions (prevents sensitive info leakage) |
 | `register_disallowed_tool()` | Register built-in CC tools to disable (used when extensions provide MCP replacements, passed via `--disallowedTools`) |
 | `add_session_customizer()` | Register per-session customization callback. Called before every prompt execution. Returns `SessionOverrides` |
@@ -224,7 +225,7 @@ class SessionOverrides:
 ```
 
 **Semantic rules**:
-- **R1**: `exclude_mcp_servers` only removes from the global `_mcp_servers` registry, never from another customizer's `extra_mcp_servers`. Execution order: copy global → apply exclude → merge extras.
+- **R1**: `exclude_mcp_servers` removes from the global `_mcp_servers` registry and filters tagged system prompts. Never removes from another customizer's `extra_mcp_servers`. Execution order: copy global → apply exclude → merge extras.
 - **R2**: When multiple customizers return the same `extra_mcp_servers` key, last-wins by registration order (`dict.update` semantics).
 - **R3**: Customizers are called per-prompt, not per-session. They must be fast, synchronous, and side-effect-free (no I/O, no blocking).
 
@@ -877,11 +878,11 @@ PM Claude → MCP tool(subagent_*) → bridge.call("subagent_*") → BridgeServe
 - `subagent_diff(agent_id)` — Full git diff for worktree agent
 - `subagent_merge(agent_id)` — Squash-merge worktree into parent branch (staged, not committed)
 
-**Paradigms**: `coder` (full access, auto-cleanup), `reviewer` (read-only, persistent), `researcher` (read-only, persistent). Custom paradigms via config.
+**Paradigms**: `coder` (full access, auto-cleanup), `reviewer` (read-only, persistent, excludes vault/heartbeat/cron/ask_user), `researcher` (read-only, persistent, excludes vault/heartbeat/cron/ask_user). Custom paradigms via config with optional `exclude_mcp_servers`.
 
 **Key mechanisms**:
 - **PendingStore integration**: `subagent_wait` registers pending entries per agent; delivery callback resolves them when workers complete. PM blocks on `asyncio.wait` without polling.
-- **Session customizer**: Workers get `exclude_mcp_servers={"subagent"}` (prevents recursive spawning) + role-specific system prompt with explicit working directory and git branch.
+- **Session customizer**: Workers get `exclude_mcp_servers={"subagent"} | paradigm.exclude_mcp_servers` + role-specific system prompt. Tagged system prompts from excluded MCP servers are also filtered out.
 - **Prefix ID matching**: `SubAgentStore.get_agent()` supports unique prefix matching (≥6 chars) so truncated IDs from MCP display still resolve correctly.
 - **Git worktree isolation**: Workers operate in `{state_dir}/worktrees/{repo}/{branch}/` with branch `subagent/{name}-{hex8}`. Merge uses `git merge --squash` (no checkout).
 - **Auto-cleanup**: Completed workers are destroyed after `cleanup_delay` (default 120s). Store records persist for status queries after session destruction.

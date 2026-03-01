@@ -221,7 +221,7 @@ class ExtensionImpl(Extension):
             self.engine.bridge.add_handler(self._handle_bridge_request)
 
         # 6. System prompt
-        self.sm.add_system_prompt(_SYSTEM_PROMPT)
+        self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="heartbeat")
 
         # 7. Delivery callback
         self.sm.add_delivery_callback(self._on_delivery)

@@ -75,6 +75,7 @@ class Paradigm:
     system_prompt: str
     disallowed_tools: list[str] = field(default_factory=list)
     auto_cleanup: bool = True
+    exclude_mcp_servers: set[str] = field(default_factory=set)
 
 
 # Built-in paradigms
@@ -100,6 +101,7 @@ _BUILTIN_PARADIGMS = {
         ),
         disallowed_tools=["Write", "Edit", "NotebookEdit"],
         auto_cleanup=False,
+        exclude_mcp_servers={"vault", "heartbeat", "cron", "ask_user"},
     ),
     "researcher": Paradigm(
         name="researcher",
@@ -111,6 +113,7 @@ _BUILTIN_PARADIGMS = {
         ),
         disallowed_tools=["Write", "Edit", "NotebookEdit"],
         auto_cleanup=False,
+        exclude_mcp_servers={"vault", "heartbeat", "cron", "ask_user"},
     ),
 }
 
@@ -199,7 +202,7 @@ class ExtensionImpl(Extension):
             self.engine.bridge.add_handler(self._bridge_handler)
 
         # 7. System prompt
-        self.sm.add_system_prompt(_SYSTEM_PROMPT)
+        self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="subagent")
 
         # 8. Delivery callback
         self.sm.add_delivery_callback(self._on_delivery)
@@ -256,6 +259,7 @@ class ExtensionImpl(Extension):
                 system_prompt=pdef.get("system_prompt", ""),
                 disallowed_tools=pdef.get("disallowed_tools", []),
                 auto_cleanup=pdef.get("auto_cleanup", True),
+                exclude_mcp_servers=set(pdef.get("exclude_mcp_servers", [])),
             )
 
     def _get_paradigm(self, name: str) -> Paradigm:
@@ -293,8 +297,11 @@ class ExtensionImpl(Extension):
         if task:
             worker_prompt_parts.append(f"\n## Assigned Task\n{task}")
 
+        exclude = {"subagent"}  # workers cannot spawn sub-agents
+        exclude |= paradigm.exclude_mcp_servers  # paradigm-specific exclusions
+
         overrides = SessionOverrides(
-            exclude_mcp_servers={"subagent"},  # workers cannot spawn sub-agents
+            exclude_mcp_servers=exclude,
             extra_system_prompt=worker_prompt_parts,
         )
         if paradigm.disallowed_tools:

@@ -60,7 +60,8 @@ class ExtensionImpl(Extension):
         # Minimal guidance — tool routing is enforced by --disallowedTools
         self.sm.add_system_prompt(
             "When you need to ask the user a question or present choices, "
-            "use the ask_user MCP tool."
+            "use the ask_user MCP tool.",
+            mcp_server="ask_user",
         )
 
         log.info("ask_user extension started (timeout=%ss)", self._timeout)

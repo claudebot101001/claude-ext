@@ -87,6 +87,7 @@ Shared services:
 | `destroy_session(session_id)` | Kill tmux + delete state |
 | `add_delivery_callback(cb)` | Register `async (session_id, text, metadata)` callback |
 | `register_mcp_server(name, config, tools)` | Add MCP server to all future sessions |
+| `add_system_prompt(text, mcp_server=None)` | Append system prompt; optional tag for per-session filtering |
 | `register_env_unset(var)` | Unset env var in Claude sessions |
 | `register_disallowed_tool(name)` | Disable built-in CC tool via `--disallowedTools` |
 | `add_session_customizer(cb)` | Register per-session customization callback (called per-prompt) |

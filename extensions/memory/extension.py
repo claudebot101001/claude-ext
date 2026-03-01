@@ -89,7 +89,7 @@ class ExtensionImpl(Extension):
         )
 
         # 4. System prompt injection
-        self.sm.add_system_prompt(_SYSTEM_PROMPT)
+        self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="memory")
 
         # 5. Seed MEMORY.md on first run
         if not (memory_dir / "MEMORY.md").exists():
