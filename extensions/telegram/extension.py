@@ -767,9 +767,7 @@ class ExtensionImpl(Extension):
         if len(parts) >= 2:
             level = parts[1].strip().lower()
             if level not in STREAM_LEVELS:
-                await update.message.reply_text(
-                    f"Unknown level '{level}'. Use: all, mcp, none"
-                )
+                await update.message.reply_text(f"Unknown level '{level}'. Use: all, mcp, none")
                 return
         else:
             # Cycle to next level

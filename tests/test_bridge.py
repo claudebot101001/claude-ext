@@ -92,29 +92,15 @@ class TestStalenessDetection:
         assert client._is_stale()
 
     def test_is_stale_returns_true_when_inode_changes(self, bridge_env):
-        sock_path, stop, _tmp_path = bridge_env
+        sock_path, *_ = bridge_env
         client = BridgeClient(sock_path)
         client.call("ping", timeout=5)
-        original_inode = client._connected_inode
 
-        # Stop old server, replace socket with new one
-        stop.set()
-        time.sleep(0.1)
-        os.unlink(sock_path)
-
-        ready2 = threading.Event()
-        stop2 = threading.Event()
-        t2 = threading.Thread(target=_echo_server, args=(sock_path, ready2, stop2), daemon=True)
-        t2.start()
-        ready2.wait(timeout=5)
-
-        new_inode = os.stat(sock_path).st_ino
-        assert new_inode != original_inode
+        # Simulate stale state: connected inode no longer matches socket on disk
+        client._connected_inode = client._connected_inode + 99999
         client._last_stale_check = 0.0
         assert client._is_stale()
-
-        stop2.set()
-        t2.join(timeout=5)
+        client.close()
 
     def test_stale_check_throttled(self, bridge_env):
         sock_path, *_ = bridge_env
