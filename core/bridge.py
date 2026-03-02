@@ -32,6 +32,7 @@ class BridgeServer:
         self.socket_path = Path(socket_path)
         self._handlers: list[BridgeHandler] = []
         self._server: asyncio.AbstractServer | None = None
+        self._socket_inode: int | None = None  # track our inode to avoid race
 
     def add_handler(self, handler: BridgeHandler) -> None:
         self._handlers.append(handler)
@@ -43,6 +44,11 @@ class BridgeServer:
             self._handle_client,
             path=str(self.socket_path),
         )
+        # Record inode so stop() only removes our own socket file
+        try:
+            self._socket_inode = self.socket_path.stat().st_ino
+        except OSError:
+            self._socket_inode = None
         log.info("Bridge server listening on %s", self.socket_path)
 
     async def stop(self) -> None:
@@ -50,7 +56,22 @@ class BridgeServer:
             self._server.close()
             await self._server.wait_closed()
             self._server = None
-        self.socket_path.unlink(missing_ok=True)
+        # Only unlink if the file is still ours (same inode).
+        # A newer process may have replaced it; deleting theirs causes
+        # bridge failures for all their MCP children.
+        try:
+            current_inode = self.socket_path.stat().st_ino
+            if self._socket_inode is not None and current_inode != self._socket_inode:
+                log.warning(
+                    "bridge.sock inode changed (%d → %d), skipping unlink (another process owns it)",
+                    self._socket_inode,
+                    current_inode,
+                )
+            else:
+                self.socket_path.unlink(missing_ok=True)
+        except OSError:
+            # File already gone — nothing to clean up
+            pass
         log.info("Bridge server stopped.")
 
     async def _handle_client(
