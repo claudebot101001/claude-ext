@@ -174,7 +174,7 @@ class SessionAskMCPServer(MCPServerBase):
         for s in sessions:
             self_marker = " (YOU)" if s.get("is_self") else ""
             lines.append(
-                f"- #{s.get('slot', '?')} \"{s.get('name', '')}\" "
+                f'- #{s.get("slot", "?")} "{s.get("name", "")}" '
                 f"[{s.get('status', 'unknown')}] "
                 f"session_id: {s.get('session_id', '')}"
                 f"{self_marker}"

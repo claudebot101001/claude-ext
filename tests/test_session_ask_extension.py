@@ -128,9 +128,7 @@ class TestHandleAsk:
         assert "Cannot ask yourself" in result["error"]
 
     def test_ask_target_not_found(self, ext, engine):
-        engine.session_manager.sessions = {
-            "sess-A": _mock_session("sess-A", "user-1", "session-A")
-        }
+        engine.session_manager.sessions = {"sess-A": _mock_session("sess-A", "user-1", "session-A")}
         result = _run(
             ext._handle_ask(
                 {
@@ -436,9 +434,7 @@ class TestOnDelivery:
             )
             ext._active_asks[entry.key] = "sess-A"
 
-            await ext._on_delivery(
-                "sess-C", "stopped", {"is_final": True, "is_stopped": True}
-            )
+            await ext._on_delivery("sess-C", "stopped", {"is_final": True, "is_stopped": True})
             assert entry.key in ext._active_asks
             assert not entry.future.done()
 
@@ -474,7 +470,5 @@ class TestBridgeHandler:
 
     def test_dispatches_session_list(self, ext, engine):
         engine.session_manager.sessions = {}
-        result = _run(
-            ext._bridge_handler("session_list", {"session_id": "nonexistent"})
-        )
+        result = _run(ext._bridge_handler("session_list", {"session_id": "nonexistent"}))
         assert "error" in result  # session not found, but method was dispatched
