@@ -114,6 +114,27 @@ class HeartbeatMCPServer(MCPServerBase):
                 "required": ["event_type"],
             },
         },
+        {
+            "name": "heartbeat_dry_run",
+            "description": (
+                "Simulate a Tier 2 heartbeat decision without side effects. "
+                "Builds the full prompt, calls the LLM, and returns the decision — "
+                "but does NOT modify state counters or execute Tier 3. "
+                "Useful for testing and refining HEARTBEAT.md instructions."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "instructions": {
+                        "type": "string",
+                        "description": (
+                            "Custom instructions to simulate with. "
+                            "Omit to use current HEARTBEAT.md."
+                        ),
+                    },
+                },
+            },
+        },
     ]
 
     def __init__(self):
@@ -123,6 +144,7 @@ class HeartbeatMCPServer(MCPServerBase):
             "heartbeat_status": self._handle_status,
             "heartbeat_trigger": self._handle_trigger,
             "heartbeat_get_trigger_command": self._handle_get_trigger_command,
+            "heartbeat_dry_run": self._handle_dry_run,
         }
 
     def _get_store(self) -> HeartbeatStore:
@@ -240,6 +262,33 @@ class HeartbeatMCPServer(MCPServerBase):
             f"    sleep 10\n"
             f"  done"
         )
+
+    def _handle_dry_run(self, args: dict) -> str:
+        if not self.bridge:
+            return "Error: bridge not available"
+
+        params = {}
+        instructions = args.get("instructions")
+        if instructions is not None:
+            params["instructions"] = instructions
+
+        try:
+            result = self.bridge.call("heartbeat_dry_run", params, timeout=130)
+        except Exception as e:
+            return f"Error: {e}"
+
+        if "error" in result:
+            return f"Error: {result['error']}"
+
+        lines = [
+            f"Decision: {result.get('decision', '')}",
+            f"Would execute Tier 3: {result.get('would_execute', False)}",
+            f"Noop: {result.get('noop', True)}",
+        ]
+        prompt = result.get("prompt", "")
+        if prompt:
+            lines.append(f"\n--- Tier 2 Prompt Used ---\n{prompt}")
+        return "\n".join(lines)
 
 
 if __name__ == "__main__":

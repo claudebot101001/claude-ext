@@ -85,6 +85,8 @@ _TIER3_PROMPT_TEMPLATE = """\
 Execute this task now. Use all available tools. Summarize results when done."""
 
 # Usage cache TTL
+_NOOP_MAX_LEN = 200
+
 _USAGE_CACHE_TTL = 60.0
 
 # Cleanup delay after Tier 3 completion
@@ -213,6 +215,10 @@ class ExtensionImpl(Extension):
                     "name": "heartbeat_get_trigger_command",
                     "description": "Get standalone shell command to trigger heartbeat from external/background processes",
                 },
+                {
+                    "name": "heartbeat_dry_run",
+                    "description": "Simulate a Tier 2 decision without side effects (for testing instructions)",
+                },
             ],
         )
 
@@ -280,7 +286,9 @@ class ExtensionImpl(Extension):
     # -- bridge handler ------------------------------------------------------
 
     async def _handle_bridge_request(self, method: str, params: dict) -> dict | None:
-        """Handle heartbeat_trigger bridge RPCs from MCP server processes."""
+        """Handle heartbeat bridge RPCs from MCP server processes."""
+        if method == "heartbeat_dry_run":
+            return await self._handle_bridge_dry_run(params)
         if method != "heartbeat_trigger":
             return None  # not ours
 
@@ -295,6 +303,11 @@ class ExtensionImpl(Extension):
         self.trigger(source, event_type, urgency, payload)
 
         return {"ok": True, "urgency": urgency}
+
+    async def _handle_bridge_dry_run(self, params: dict) -> dict:
+        """Handle heartbeat_dry_run bridge RPC."""
+        custom_instructions = params.get("instructions")
+        return await self.dry_run_tier2(custom_instructions)
 
     # -- scheduler -----------------------------------------------------------
 
@@ -433,14 +446,13 @@ class ExtensionImpl(Extension):
 
     # -- Tier 2: LLM decision -----------------------------------------------
 
-    async def _tier2_decision(
+    def _build_tier2_prompt(
         self,
         instructions: str,
         pending_events: list[TriggerEvent] | None = None,
         trigger: TriggerEvent | None = None,
-    ) -> None:
-        """Ask Claude whether action is needed. Low-cost engine.ask() call."""
-        # Build context section
+    ) -> str:
+        """Build the Tier 2 prompt from instructions and context. No side effects."""
         context_parts = []
 
         # Memory summary
@@ -492,10 +504,58 @@ class ExtensionImpl(Extension):
 
         context_section = "\n\n".join(context_parts) if context_parts else ""
 
-        prompt = _TIER2_PROMPT_TEMPLATE.format(
+        return _TIER2_PROMPT_TEMPLATE.format(
             instructions=instructions,
             context_section=context_section,
         )
+
+    async def dry_run_tier2(self, custom_instructions: str | None = None) -> dict:
+        """Simulate a Tier 2 decision without side effects.
+
+        Builds the full Tier 2 prompt, calls engine.ask(), and returns the
+        decision without modifying state or executing Tier 3.
+
+        Returns dict with: decision, would_execute, noop, prompt.
+        """
+        if self._store is None:
+            return {"error": "HeartbeatStore not initialized"}
+
+        instructions = custom_instructions or self._store.read_instructions() or ""
+        if not instructions.strip():
+            return {"error": "No instructions available (HEARTBEAT.md empty or missing)"}
+
+        prompt = self._build_tier2_prompt(instructions)
+
+        try:
+            response = await self.engine.ask(
+                prompt=prompt,
+                cwd=self._working_dir,
+                timeout=120,
+            )
+        except Exception as e:
+            return {"error": f"engine.ask failed: {e}", "prompt": prompt}
+
+        if response.startswith("[Error]"):
+            return {"error": response, "prompt": prompt}
+
+        decision = response.strip()
+        noop = "NOTHING" in decision.upper() and len(decision) <= _NOOP_MAX_LEN
+
+        return {
+            "decision": decision,
+            "would_execute": not noop,
+            "noop": noop,
+            "prompt": prompt,
+        }
+
+    async def _tier2_decision(
+        self,
+        instructions: str,
+        pending_events: list[TriggerEvent] | None = None,
+        trigger: TriggerEvent | None = None,
+    ) -> None:
+        """Ask Claude whether action is needed. Low-cost engine.ask() call."""
+        prompt = self._build_tier2_prompt(instructions, pending_events, trigger)
 
         # Update counters
         now_iso = datetime.now(UTC).isoformat()
@@ -541,9 +601,6 @@ class ExtensionImpl(Extension):
 
         decision = response.strip()
 
-        # Detect NOOP: response contains "NOTHING" and is short enough to be
-        # a noop reply (not a real task description that coincidentally has the word).
-        _NOOP_MAX_LEN = 200
         if "NOTHING" in decision.upper() and len(decision) <= _NOOP_MAX_LEN:
             state = self._store.load_state()
             self._store.update_state(consecutive_noop=state.consecutive_noop + 1)

@@ -663,7 +663,8 @@ class TestBridgeHandler:
         assert "heartbeat_get_trigger_command" in tool_names
         assert "heartbeat_instructions" in tool_names
         assert "heartbeat_status" in tool_names
-        assert len(tool_names) == 4
+        assert "heartbeat_dry_run" in tool_names
+        assert len(tool_names) == 5
         ext._scheduler_task.cancel()
 
 
@@ -692,3 +693,133 @@ class TestDailyLimit:
             ext._scheduler_task.cancel()
 
         asyncio.run(_run_test())
+
+
+# -- Dry-run ---------------------------------------------------------------
+
+
+class TestDryRun:
+    def test_dry_run_returns_nothing_decision(self, ext):
+        """dry_run_tier2 with NOTHING response → noop=True, would_execute=False."""
+        ext.engine.ask = AsyncMock(return_value="NOTHING")
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Check stuff")
+            initial_state = ext._store.load_state()
+            initial_run_count = initial_state.run_count
+
+            result = await ext.dry_run_tier2()
+
+            assert result["noop"] is True
+            assert result["would_execute"] is False
+            assert result["decision"] == "NOTHING"
+            assert "prompt" in result
+
+            # State should NOT be modified
+            state = ext._store.load_state()
+            assert state.run_count == initial_run_count
+            assert state.consecutive_noop == initial_state.consecutive_noop
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_dry_run_returns_action_decision(self, ext):
+        """dry_run_tier2 with action response → noop=False, would_execute=True."""
+        ext.engine.ask = AsyncMock(return_value="Deploy hotfix to production")
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Monitor deploys")
+            initial_state = ext._store.load_state()
+
+            result = await ext.dry_run_tier2()
+
+            assert result["noop"] is False
+            assert result["would_execute"] is True
+            assert result["decision"] == "Deploy hotfix to production"
+
+            # No session should be created (no Tier 3)
+            ext.engine.session_manager.create_session.assert_not_called()
+
+            # State unchanged
+            state = ext._store.load_state()
+            assert state.run_count == initial_state.run_count
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_dry_run_with_custom_instructions(self, ext):
+        """dry_run_tier2 with custom instructions uses them instead of HEARTBEAT.md."""
+        ext.engine.ask = AsyncMock(return_value="NOTHING")
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Original instructions")
+
+            result = await ext.dry_run_tier2(custom_instructions="# Custom check\nDo X")
+
+            assert result["noop"] is True
+            assert "Custom check" in result["prompt"]
+            assert "Original instructions" not in result["prompt"]
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_dry_run_no_instructions_returns_error(self, ext):
+        """dry_run_tier2 with empty instructions → error."""
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("")
+
+            result = await ext.dry_run_tier2()
+
+            assert "error" in result
+            assert "No instructions" in result["error"]
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_dry_run_engine_error(self, ext):
+        """dry_run_tier2 when engine.ask raises → error with prompt."""
+        ext.engine.ask = AsyncMock(side_effect=TimeoutError("timeout"))
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Check stuff")
+
+            result = await ext.dry_run_tier2()
+
+            assert "error" in result
+            assert "prompt" in result
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_dry_run_bridge_handler(self, ext):
+        """Bridge handler routes heartbeat_dry_run correctly."""
+        ext.engine.ask = AsyncMock(return_value="NOTHING")
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Check stuff")
+
+            result = await ext._handle_bridge_request("heartbeat_dry_run", {})
+
+            assert result is not None
+            assert result["noop"] is True
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_dry_run_not_initialized(self, ext):
+        """dry_run_tier2 before start → error."""
+        result = _run(ext.dry_run_tier2())
+        assert "error" in result
