@@ -726,6 +726,19 @@ class ExtensionImpl(Extension):
                     "trigger_source": trigger.source if trigger else None,
                 },
             )
+
+        # Gate: skip Tier 3 if other sessions are busy (avoid git conflicts)
+        busy_others = [
+            s for s in self.sm.sessions.values()
+            if s.status == SessionStatus.BUSY
+            and not s.context.get("heartbeat_run")
+        ]
+        if busy_others:
+            names = ", ".join(s.name or s.id[:8] for s in busy_others)
+            log.info("Heartbeat Tier 3 deferred: other sessions busy (%s)", names)
+            self._log_skipped("busy_sessions", names)
+            return
+
         await self._tier3_execute(decision, instructions, trigger)
 
     # -- Tier 3: full session execution --------------------------------------
