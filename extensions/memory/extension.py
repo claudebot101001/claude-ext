@@ -11,6 +11,7 @@ key via bridge RPC; all other memory ops use direct file I/O.
 """
 
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -127,7 +128,10 @@ class ExtensionImpl(Extension):
             ],
         )
 
-        # 7. System prompt (tagged so it can be excluded per-session)
+        # 7. Disable CC built-in auto-memory (claude-ext manages its own)
+        os.environ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
+
+        # 8. System prompt (tagged so it can be excluded per-session)
         self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="memory")
 
         # 8. Session customizers — inject constitution + user profile per-session
