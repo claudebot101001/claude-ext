@@ -454,6 +454,14 @@ class ExtensionImpl(Extension):
             except Exception:
                 pass
 
+            # Self-improvement backlog
+            try:
+                backlog = memory_store.read("topics/backlog.md")
+                if backlog:
+                    context_parts.append("## Self-Improvement Backlog\n" + backlog)
+            except Exception:
+                pass
+
         # Recent events
         if self.engine.events:
             try:

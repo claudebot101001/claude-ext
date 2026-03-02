@@ -212,6 +212,21 @@ python main.py
 
 Requirements: Python 3.12+, tmux 3.x+, Claude Code CLI (`claude auth login`).
 
+## Self-Improvement Backlog
+
+Sessions working on claude-ext should record improvement ideas to `topics/backlog.md` (via MCP memory tools). This backlog is processed by the heartbeat during idle time.
+
+**Recording an item:**
+1. Before appending, read the current backlog (`memory_read('topics/backlog.md')`) to check for duplicates
+2. Assess difficulty level:
+   - `L1`: Non-core, small change, confident fix
+   - `L2`: Non-core, large or uncertain impact
+   - `L3`: Core, simple logic change
+   - `L4`: Core complex, or new/refactored extension
+3. Append under `## Pending` with format: `- [ ] [L<n>] <description>`
+
+**Do NOT record**: vague wishes, already-tracked items, or items that belong in GitHub Issues instead.
+
 ## Known Limitations
 
 - `script -qfec` PTY may inject header line / ANSI escapes in `stream.jsonl` (parser skips non-JSON)
