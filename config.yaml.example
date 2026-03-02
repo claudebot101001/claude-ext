@@ -39,6 +39,7 @@ enabled:
   # - heartbeat                     # Autonomous periodic task agent
   # - cron                         # Uncomment to enable scheduled tasks
   # - subagent                     # Multi-agent orchestration (PM spawns workers)
+  # - session_ask                  # Cross-session RPC (session-to-session Q&A)
 
 # Per-extension configuration
 extensions:
@@ -99,3 +100,7 @@ extensions:
     #     system_prompt: "You are a testing specialist. Write comprehensive tests."
     #     disallowed_tools: []
     #     auto_cleanup: true
+
+  session_ask:
+    timeout: 300                   # Seconds to wait for target session's reply
+    max_question_length: 2000      # Max characters for question text
