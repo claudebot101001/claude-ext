@@ -80,8 +80,10 @@ def _generate_topics_index(memory_dir: Path) -> None:
                 lines.append(f"- **{rel}**: (unreadable)")
 
     index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    log.info("Created TOPICS_INDEX.md with %d topic entries",
-             sum(1 for l in lines if l.startswith("- **")))
+    log.info(
+        "Created TOPICS_INDEX.md with %d topic entries",
+        sum(1 for line in lines if line.startswith("- **")),
+    )
 
 
 def _archive_daily_logs(memory_dir: Path) -> None:
@@ -108,9 +110,7 @@ def _archive_daily_logs(memory_dir: Path) -> None:
 
     topics_dir = memory_dir / "topics"
     topics_dir.mkdir(parents=True, exist_ok=True)
-    (topics_dir / "daily-archive.md").write_text(
-        "\n".join(archive_lines), encoding="utf-8"
-    )
+    (topics_dir / "daily-archive.md").write_text("\n".join(archive_lines), encoding="utf-8")
     shutil.rmtree(daily_dir)
     log.info("Archived %d daily log file(s) to topics/daily-archive.md", len(md_files))
 

@@ -134,9 +134,18 @@ class ExtensionImpl(Extension):
                 {"name": "memory_append", "description": "Append content with UTC timestamp"},
                 {"name": "memory_search", "description": "Search across all memory files"},
                 {"name": "memory_list", "description": "List memory files by modification time"},
-                {"name": "personality_read", "description": "Read AI personality principles (decrypted)"},
-                {"name": "personality_write", "description": "Overwrite AI personality principles (encrypted)"},
-                {"name": "personality_append", "description": "Append a new AI personality principle (encrypted)"},
+                {
+                    "name": "personality_read",
+                    "description": "Read AI personality principles (decrypted)",
+                },
+                {
+                    "name": "personality_write",
+                    "description": "Overwrite AI personality principles (encrypted)",
+                },
+                {
+                    "name": "personality_append",
+                    "description": "Append a new AI personality principle (encrypted)",
+                },
             ],
         )
 
@@ -150,8 +159,11 @@ class ExtensionImpl(Extension):
         # 9. Seed files on first run
         self._seed_files(memory_dir)
 
-        log.info("Memory extension started. Store at %s (personality_key=%s)",
-                 memory_dir, "yes" if self._personality_key else "no")
+        log.info(
+            "Memory extension started. Store at %s (personality_key=%s)",
+            memory_dir,
+            "yes" if self._personality_key else "no",
+        )
 
     async def stop(self) -> None:
         self._personality_key = None
@@ -186,6 +198,7 @@ class ExtensionImpl(Extension):
 
         if key is None:
             from extensions.memory.crypto import generate_key
+
             key = generate_key()
             try:
                 vault.put(key_name, key, ["memory", "personality", "auto-generated"])
@@ -226,6 +239,7 @@ class ExtensionImpl(Extension):
         if raw is None:
             return {"content": None}
         from extensions.memory.crypto import decrypt_personality
+
         plaintext = decrypt_personality(raw, self._personality_key)
         return {"content": plaintext}
 
@@ -235,6 +249,7 @@ class ExtensionImpl(Extension):
             return {"error": "Personality encryption not available (vault not enabled)"}
         assert self._store is not None
         from extensions.memory.crypto import encrypt_personality
+
         encrypted = encrypt_personality(content, self._personality_key)
         nbytes = self._store.write_personality_raw(encrypted)
         return {"ok": True, "bytes": nbytes}
@@ -245,6 +260,7 @@ class ExtensionImpl(Extension):
             return {"error": "Personality encryption not available (vault not enabled)"}
         assert self._store is not None
         from extensions.memory.crypto import decrypt_personality, encrypt_personality
+
         raw = self._store.read_personality_raw()
         if raw:
             existing = decrypt_personality(raw, self._personality_key)
@@ -275,9 +291,7 @@ class ExtensionImpl(Extension):
         if not has_real_content:
             return None
         return SessionOverrides(
-            extra_system_prompt=[
-                f"## CONSTITUTIONAL RULES (immutable, human-authored)\n{content}"
-            ]
+            extra_system_prompt=[f"## CONSTITUTIONAL RULES (immutable, human-authored)\n{content}"]
         )
 
     def _user_profile_customizer(self, session) -> SessionOverrides | None:
@@ -292,9 +306,7 @@ class ExtensionImpl(Extension):
         if not content:
             return None
         return SessionOverrides(
-            extra_system_prompt=[
-                f"## USER PROFILE (user_id={user_id})\n{content}"
-            ]
+            extra_system_prompt=[f"## USER PROFILE (user_id={user_id})\n{content}"]
         )
 
     # -- seed files ---------------------------------------------------------
