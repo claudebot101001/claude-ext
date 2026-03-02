@@ -40,6 +40,7 @@ class HeartbeatState:
     runs_today_date: str | None = None  # YYYY-MM-DD
     consecutive_noop: int = 0  # Consecutive NOTHING decisions
     active_session_id: str | None = None  # Current Tier 3 session
+    pending_verification: str | None = None  # Commit hash awaiting post-restart verification
 
 
 class HeartbeatStore:

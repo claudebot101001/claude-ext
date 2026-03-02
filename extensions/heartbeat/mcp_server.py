@@ -135,6 +135,24 @@ class HeartbeatMCPServer(MCPServerBase):
                 },
             },
         },
+        {
+            "name": "heartbeat_set_verification",
+            "description": (
+                "Record a commit hash for post-restart verification, or null to clear. "
+                "Call after committing a backlog fix to enable the verification loop."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "commit_hash": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Full commit hash to verify after restart, or null to clear the flag."
+                        ),
+                    },
+                },
+            },
+        },
     ]
 
     def __init__(self):
@@ -145,6 +163,7 @@ class HeartbeatMCPServer(MCPServerBase):
             "heartbeat_trigger": self._handle_trigger,
             "heartbeat_get_trigger_command": self._handle_get_trigger_command,
             "heartbeat_dry_run": self._handle_dry_run,
+            "heartbeat_set_verification": self._handle_set_verification,
         }
 
     def _get_store(self) -> HeartbeatStore:
@@ -183,6 +202,7 @@ class HeartbeatMCPServer(MCPServerBase):
             f"Runs today: {state.runs_today}",
             f"Consecutive idle: {state.consecutive_noop}",
             f"Active session: {state.active_session_id or 'none'}",
+            f"Pending verification: {state.pending_verification or 'none'}",
         ]
         if enabled is not None:
             action = "resumed" if enabled else "paused"
@@ -289,6 +309,28 @@ class HeartbeatMCPServer(MCPServerBase):
         if prompt:
             lines.append(f"\n--- Tier 2 Prompt Used ---\n{prompt}")
         return "\n".join(lines)
+
+    def _handle_set_verification(self, args: dict) -> str:
+        if not self.bridge:
+            return "Error: bridge not available"
+
+        commit_hash = args.get("commit_hash")  # None to clear
+
+        try:
+            result = self.bridge.call(
+                "heartbeat_set_verification",
+                {"commit_hash": commit_hash},
+                timeout=5,
+            )
+        except Exception as e:
+            return f"Error: {e}"
+
+        if "error" in result:
+            return f"Error: {result['error']}"
+
+        if commit_hash:
+            return f"Verification pending for commit {commit_hash[:12]}"
+        return "Verification flag cleared."
 
 
 if __name__ == "__main__":

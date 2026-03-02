@@ -25,6 +25,14 @@ class Extension(ABC):
         """Gracefully stop the extension."""
         ...
 
+    def reconfigure(self, config: dict) -> None:
+        """Called on SIGHUP config reload.  Override to update runtime settings.
+
+        Default: update ``self.config`` only.  Must stay synchronous (called
+        from a signal handler context).
+        """
+        self.config = config
+
     async def health_check(self) -> dict:
         """Return extension health status.  Override for custom checks.
 

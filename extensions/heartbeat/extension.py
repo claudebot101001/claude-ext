@@ -10,10 +10,11 @@ Dual-channel scheduler (timer + event triggers) with three-tier execution:
 import asyncio
 import logging
 import os
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from core.extension import Extension
@@ -116,12 +117,25 @@ class ExtensionImpl(Extension):
         self._notify_context = config.get("notify_context", {})
         self._working_dir = config.get("working_dir") or os.getcwd()
 
+        self._restart_marker: Path | None = None  # set in start()
         self._store: HeartbeatStore | None = None
         self._scheduler_task: asyncio.Task | None = None
         self._trigger_queue: asyncio.Queue[TriggerEvent] = asyncio.Queue()
         self._pending_events: list[TriggerEvent] = []
         self._usage_cache: dict | None = None
         self._usage_cache_ts: float = 0.0
+
+    def reconfigure(self, config: dict) -> None:
+        super().reconfigure(config)
+        self._interval = config.get("interval", self._interval)
+        self._max_daily_runs = config.get("max_daily_runs", self._max_daily_runs)
+        self._usage_throttle = config.get("usage_throttle", self._usage_throttle)
+        self._usage_pause = config.get("usage_pause", self._usage_pause)
+        log.info(
+            "Heartbeat config reloaded: interval=%d, max_daily=%d",
+            self._interval,
+            self._max_daily_runs,
+        )
 
     @property
     def sm(self):
@@ -186,7 +200,49 @@ class ExtensionImpl(Extension):
                 )
                 self._store.update_state(active_session_id=None)
 
-        # 3. Register service (self, not store — includes trigger())
+        # 3. Restart marker safety net
+        self._restart_marker = heartbeat_dir / ".restart_marker"
+        state = self._store.load_state()  # re-read after recovery cleanup
+        if state.pending_verification:
+            if self._restart_marker.exists():
+                # Double restart: previous restart didn't reach verification.
+                # The committed code likely broke something — auto-revert.
+                commit = state.pending_verification
+                log.warning("Double restart with pending verification %s, auto-reverting", commit)
+                check = subprocess.run(
+                    ["git", "rev-parse", "--verify", commit],
+                    cwd=self._working_dir,
+                    capture_output=True,
+                )
+                if check.returncode == 0:
+                    revert = subprocess.run(
+                        ["git", "revert", commit, "--no-edit"],
+                        cwd=self._working_dir,
+                        capture_output=True,
+                    )
+                    if revert.returncode == 0:
+                        log.warning("Auto-reverted commit %s", commit)
+                    else:
+                        log.error(
+                            "git revert failed: %s",
+                            revert.stderr.decode(errors="replace")[:500],
+                        )
+                else:
+                    log.warning("Commit %s not found, clearing stale verification", commit)
+                self._store.update_state(pending_verification=None)
+                self._restart_marker.unlink(missing_ok=True)
+            else:
+                # First restart after commit — write marker for double-restart detection
+                self._restart_marker.write_text(state.pending_verification)
+                log.info(
+                    "Restart marker written for verification of %s", state.pending_verification
+                )
+                # Fast-schedule: bypass backoff so verification runs quickly
+                near_future = (datetime.now(UTC) + timedelta(seconds=30)).isoformat()
+                self._store.update_state(next_run=near_future, consecutive_noop=0)
+                log.info("Pending verification detected, scheduling fast check in 30s")
+
+        # 4. Register service (self, not store — includes trigger())
         self.engine.services["heartbeat"] = self
 
         # 4. Register MCP server
@@ -219,6 +275,10 @@ class ExtensionImpl(Extension):
                     "name": "heartbeat_dry_run",
                     "description": "Simulate a Tier 2 decision without side effects (for testing instructions)",
                 },
+                {
+                    "name": "heartbeat_set_verification",
+                    "description": "Record a commit hash for post-restart verification, or null to clear",
+                },
             ],
         )
 
@@ -237,8 +297,9 @@ class ExtensionImpl(Extension):
             self._store.write_instructions(_SEED_INSTRUCTIONS)
             log.info("Created seed HEARTBEAT.md")
 
-        # 9. Schedule first run
-        self._schedule_next()
+        # 9. Schedule first run (may already be set by fast-schedule above)
+        if not state.pending_verification:
+            self._schedule_next()
 
         # 10. Start scheduler
         self._scheduler_task = asyncio.create_task(
@@ -287,11 +348,22 @@ class ExtensionImpl(Extension):
 
     async def _handle_bridge_request(self, method: str, params: dict) -> dict | None:
         """Handle heartbeat bridge RPCs from MCP server processes."""
-        if method == "heartbeat_dry_run":
-            return await self._handle_bridge_dry_run(params)
-        if method != "heartbeat_trigger":
+        handlers = {
+            "heartbeat_trigger": self._handle_bridge_trigger,
+            "heartbeat_dry_run": self._handle_bridge_dry_run,
+            "heartbeat_set_verification": self._handle_bridge_set_verification,
+        }
+        handler = handlers.get(method)
+        if handler is None:
             return None  # not ours
+        try:
+            return await handler(params)
+        except Exception:
+            log.exception("Bridge handler error for %s", method)
+            return {"error": f"Internal error handling {method}"}
 
+    async def _handle_bridge_trigger(self, params: dict) -> dict:
+        """Handle heartbeat_trigger bridge RPC."""
         source = params.get("source", "session")
         event_type = params.get("event_type", "")
         urgency = params.get("urgency", "immediate")
@@ -301,13 +373,21 @@ class ExtensionImpl(Extension):
             return {"error": "event_type is required"}
 
         self.trigger(source, event_type, urgency, payload)
-
         return {"ok": True, "urgency": urgency}
 
     async def _handle_bridge_dry_run(self, params: dict) -> dict:
         """Handle heartbeat_dry_run bridge RPC."""
         custom_instructions = params.get("instructions")
         return await self.dry_run_tier2(custom_instructions)
+
+    async def _handle_bridge_set_verification(self, params: dict) -> dict:
+        """Record or clear pending verification commit hash."""
+        commit_hash = params.get("commit_hash")  # None to clear
+        self._store.update_state(pending_verification=commit_hash)
+        # Defense-in-depth: clear restart marker when verification is cleared
+        if commit_hash is None and self._restart_marker and self._restart_marker.exists():
+            self._restart_marker.unlink(missing_ok=True)
+        return {"ok": True, "pending_verification": commit_hash}
 
     # -- scheduler -----------------------------------------------------------
 
@@ -501,6 +581,18 @@ class ExtensionImpl(Extension):
                 f"Type: {trigger.event_type}\n"
                 f"Payload: {trigger.payload}"
             )
+
+        # Pending verification (highest priority context)
+        if self._store:
+            pv_state = self._store.load_state()
+            if pv_state.pending_verification:
+                context_parts.insert(
+                    0,
+                    f"## PENDING VERIFICATION\n"
+                    f"Commit {pv_state.pending_verification} was made by a previous "
+                    f"heartbeat run and has not been verified yet. **Priority: verify "
+                    f"this commit before picking new backlog items.**",
+                )
 
         context_section = "\n\n".join(context_parts) if context_parts else ""
 

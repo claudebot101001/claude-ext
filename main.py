@@ -29,6 +29,14 @@ def setup_logging():
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+async def _graceful_shutdown(registry, engine):
+    """Shutdown sequence: extensions → bridge → sessions."""
+    await registry.stop_all()
+    if engine.bridge:
+        await engine.bridge.stop()
+    await engine.session_manager.shutdown()
+
+
 async def main():
     setup_logging()
     log = logging.getLogger("main")
@@ -79,19 +87,58 @@ async def main():
 
     log.info("claude-ext running. Press Ctrl+C to stop.")
 
+    # -- Signal handlers -------------------------------------------------------
+
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop_event.set)
 
-    await stop_event.wait()
+    def _handle_sighup():
+        """Reload config.yaml on SIGHUP. Sync callback (signal handler requirement)."""
+        log.info("SIGHUP received, reloading config...")
+        try:
+            new_config = load_config()
+        except Exception:
+            log.exception("Config reload failed, keeping current config")
+            return
 
-    log.info("Shutting down...")
-    await registry.stop_all()
-    if engine.bridge:
-        await engine.bridge.stop()
-    await engine.session_manager.shutdown()
-    pid_file.unlink(missing_ok=True)
+        # Update session manager
+        sess_cfg = new_config.get("sessions", {})
+        new_max = sess_cfg.get("max_sessions_per_user")
+        if new_max is not None:
+            engine.session_manager.max_sessions_per_user = new_max
+
+        # Update engine (max_turns only — model/permission_mode not safe to hot-reload)
+        new_eng_cfg = new_config.get("engine", {})
+        engine.max_turns = new_eng_cfg.get("max_turns", engine.max_turns)
+
+        # Notify extensions
+        for ext in registry.extensions:
+            ext_config = new_config.get("extensions", {}).get(ext.name, {})
+            try:
+                ext.reconfigure(ext_config)
+            except Exception:
+                log.exception("Extension %s reconfigure failed", ext.name)
+
+        registry.config = new_config
+        if engine.events:
+            engine.events.log("config.reloaded")
+        log.info("Config reload complete")
+
+    loop.add_signal_handler(signal.SIGHUP, _handle_sighup)
+
+    # -- Wait for stop, then shutdown with timeout -----------------------------
+
+    try:
+        await stop_event.wait()
+    finally:
+        log.info("Shutting down...")
+        try:
+            await asyncio.wait_for(_graceful_shutdown(registry, engine), timeout=15.0)
+        except TimeoutError:
+            log.warning("Graceful shutdown timed out after 15s, forcing exit")
+        pid_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
