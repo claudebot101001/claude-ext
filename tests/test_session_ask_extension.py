@@ -213,7 +213,7 @@ class TestHandleAsk:
                 }
             )
 
-        result = _run(_test())
+        _run(_test())
         # Verify the prompt was sent with truncated question
         call_args = engine.session_manager.send_prompt.call_args
         prompt_text = call_args[0][1]
