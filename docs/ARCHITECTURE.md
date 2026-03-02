@@ -732,7 +732,7 @@ Cross-session persistent memory system. Lets the Agent accumulate knowledge acro
 **store.py — MemoryStore + MemoryIndex**:
 
 - Storage format: Plain Markdown files, human-readable, grep-friendly (source of truth)
-- Three-tier structure: `MEMORY.md` (hot index) / `topics/<name>.md` (deep knowledge) / `daily/YYYY-MM-DD.md` (logs)
+- Storage: `TOPICS_INDEX.md` (topic catalog) / `topics/<name>.md` (deep knowledge) — searched on-demand via FTS5
 - Path safety: Rejects absolute paths, `..` traversal, non-`.md` files, symlink escapes (`resolve()` + `is_relative_to`)
 - Concurrency control: Unified lockfile (`memory.lock`). Read ops use `LOCK_SH`, write ops use `LOCK_EX`
 - Atomic writes: `write()` uses temp+rename; `append()` appends directly under `LOCK_EX` (avoids large file copies)
@@ -749,9 +749,9 @@ Cross-session persistent memory system. Lets the Agent accumulate knowledge acro
 | `memory_search` | FTS5 full-text search with BM25 ranking (falls back to regex for regex patterns) |
 | `memory_list` | List files (sorted by modification time descending, filterable by subdirectory) |
 
-**System prompt driven**: Injects a concise system prompt guiding the Agent to operate memory files only through MCP tools (Session Start reads `MEMORY.md` + Curation rules + file organization instructions). Storage location `~/.claude-ext/memory/` is globally shared, independent of CC's built-in auto-memory (`~/.claude/projects/`). Note: Memory cannot disable built-in Read/Write via `--disallowedTools` (needed for coding), so behavioral guidance via system prompt is retained.
+**System prompt driven**: Injects a concise system prompt guiding the Agent to operate memory files only through MCP tools (Session Start calls `personality_read()` + knowledge accessed on-demand via `memory_search`). Storage location `~/.claude-ext/memory/` is globally shared, independent of CC's built-in auto-memory (`~/.claude/projects/`). Note: Memory cannot disable built-in Read/Write via `--disallowedTools` (needed for coding), so behavioral guidance via system prompt is retained.
 
-**Seed file**: On first startup, automatically creates a `MEMORY.md` template (with User Preferences / Active Projects / Key Decisions / Topic Files sections), without overwriting existing content.
+**Seed file**: On first startup, creates a `TOPICS_INDEX.md` template without overwriting existing content.
 
 ### Existing Extension: heartbeat
 

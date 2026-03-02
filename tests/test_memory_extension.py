@@ -39,22 +39,21 @@ class TestMemoryExtensionStart:
         _run(ext.start())
         assert memory_dir.exists()
 
-    def test_start_creates_seed_memory(self, ext, memory_dir):
+    def test_start_creates_seed_topics_index(self, ext, memory_dir):
         _run(ext.start())
-        memory_file = memory_dir / "MEMORY.md"
-        assert memory_file.exists()
-        content = memory_file.read_text(encoding="utf-8")
-        assert "# Memory" in content
-        assert "User Preferences" in content
+        topics_file = memory_dir / "TOPICS_INDEX.md"
+        assert topics_file.exists()
+        content = topics_file.read_text(encoding="utf-8")
+        assert "Topics Index" in content
 
-    def test_start_does_not_overwrite_existing_memory(self, ext, memory_dir):
+    def test_start_does_not_overwrite_existing_topics_index(self, ext, memory_dir):
         memory_dir.mkdir(parents=True)
-        existing = "# My existing memory\nDo not overwrite!"
-        (memory_dir / "MEMORY.md").write_text(existing, encoding="utf-8")
+        existing = "# My existing index\nDo not overwrite!"
+        (memory_dir / "TOPICS_INDEX.md").write_text(existing, encoding="utf-8")
 
         _run(ext.start())
 
-        content = (memory_dir / "MEMORY.md").read_text(encoding="utf-8")
+        content = (memory_dir / "TOPICS_INDEX.md").read_text(encoding="utf-8")
         assert content == existing
 
     def test_start_registers_mcp_server(self, ext):
@@ -70,8 +69,8 @@ class TestMemoryExtensionStart:
         _run(ext.start())
         ext.engine.session_manager.add_system_prompt.assert_called_once()
         prompt = ext.engine.session_manager.add_system_prompt.call_args[0][0]
-        assert "memory_read" in prompt
-        assert "MEMORY.md" in prompt
+        assert "memory_search" in prompt
+        assert "personality_read" in prompt
         assert "SESSION START" in prompt
 
     def test_start_registers_service(self, ext):

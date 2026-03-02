@@ -5,8 +5,8 @@ Layers:
 2. Personality: AI self-developed principles, Fernet-encrypted, AI-managed via MCP
 3. User Profile: per-user aspirations, injected per-session via customizer
 
-Knowledge store: MEMORY.md (hot index), TOPICS_INDEX.md (topic catalog),
-topics/<name>.md (deep knowledge). Personality encryption uses Vault-managed
+Knowledge store: TOPICS_INDEX.md (topic catalog), topics/<name>.md (deep
+knowledge), searchable via FTS5. Personality encryption uses Vault-managed
 key via bridge RPC; all other memory ops use direct file I/O.
 """
 
@@ -24,24 +24,6 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Seed content for first-run file creation
 # ---------------------------------------------------------------------------
-
-_SEED_MEMORY = """\
-# Memory
-
-This is your persistent memory file. It persists across sessions.
-
-## User Preferences
-<!-- Record user preferences here -->
-
-## Active Projects
-<!-- Track active projects and their status -->
-
-## Key Decisions
-<!-- Important decisions and their rationale -->
-
-## Topic Files
-<!-- Cross-references to detailed topic files in topics/ -->
-"""
 
 _SEED_TOPICS_INDEX = """\
 # Topics Index
@@ -76,15 +58,11 @@ Per-user preferences at users/<user_id>/profile.md. Users write their aspiration
 (not definitions). Injected into your system prompt per-session.
 
 ## Knowledge Store
-- MEMORY.md: Hot index (<200 lines). Rewrite periodically to stay concise.
-- TOPICS_INDEX.md: Detailed index of topic files. Read this to find relevant knowledge.
-- topics/<name>.md: Deep knowledge per subject. Update TOPICS_INDEX.md when creating/modifying.
+Persistent knowledge is stored in topic files (topics/<name>.md). \
+Use memory_search to find relevant knowledge when needed. \
+Use memory_read/memory_write/memory_append to manage files directly.
 
-SESSION START: call memory_read('MEMORY.md'), then memory_read('TOPICS_INDEX.md'). \
-Read specific topic files as needed via search or index lookup.
-
-CURATION: When MEMORY.md exceeds ~150 lines, consolidate and move detail to topic files. \
-Always keep TOPICS_INDEX.md in sync with topic files."""
+SESSION START: call personality_read() to load your personality principles."""
 
 
 class ExtensionImpl(Extension):
@@ -314,9 +292,6 @@ class ExtensionImpl(Extension):
     def _seed_files(self, memory_dir: Path) -> None:
         """Create seed files on first run."""
         assert self._store is not None
-        if not (memory_dir / "MEMORY.md").exists():
-            self._store.write("MEMORY.md", _SEED_MEMORY)
-            log.info("Created seed MEMORY.md")
         if not (memory_dir / "TOPICS_INDEX.md").exists():
             self._store.write("TOPICS_INDEX.md", _SEED_TOPICS_INDEX)
             log.info("Created seed TOPICS_INDEX.md")

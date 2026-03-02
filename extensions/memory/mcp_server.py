@@ -29,8 +29,8 @@ class MemoryMCPServer(MCPServerBase):
         {
             "name": "memory_read",
             "description": (
-                "Read a memory file. Use 'MEMORY.md' for the main index, "
-                "'TOPICS_INDEX.md' for topic catalog, 'topics/<name>.md' for topic files, "
+                "Read a memory file. Use 'TOPICS_INDEX.md' for topic catalog, "
+                "'topics/<name>.md' for topic files, "
                 "'constitution.md' for constitutional rules, "
                 "'users/<user_id>/profile.md' for user profiles."
             ),
@@ -39,7 +39,7 @@ class MemoryMCPServer(MCPServerBase):
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "Relative path to the memory file (e.g. 'MEMORY.md', 'topics/python.md')",
+                        "description": "Relative path to the memory file (e.g. 'topics/python.md')",
                     },
                 },
                 "required": ["path"],

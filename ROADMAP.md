@@ -54,10 +54,10 @@ When Phase 4 Wallet launches, just `self._internal_prefixes.append("wallet/")` �
 
 - **store.py**: MemoryStore — path safety (rejects absolute paths, `..` traversal, non-`.md` files, symlink escapes) + unified lockfile (`memory.lock`, LOCK_SH/LOCK_EX) + atomic writes (write uses temp+rename, append directly under LOCK_EX) + 512 KB read limit + 50 result search limit
 - **mcp_server.py**: `memory_read` / `memory_write` / `memory_append` / `memory_search` / `memory_list` five MCP tools, MCP process lazily initializes MemoryStore for direct read/write
-- **extension.py**: Registers `engine.services["memory"]` + registers MCP server (injects `MEMORY_DIR` env var) + system prompt injection (SESSION START PROTOCOL + CURATION rules) + seeds `MEMORY.md` template on first startup
+- **extension.py**: Registers `engine.services["memory"]` + registers MCP server (injects `MEMORY_DIR` env var) + system prompt injection (personality_read at session start + on-demand memory_search) + seeds `TOPICS_INDEX.md` on first startup
 - **Design decision**: Direct file I/O, no bridge RPC. Memory is plaintext Markdown with no encryption/access control needs. MCP server process holds its own MemoryStore instance, eliminating socket round-trips. Auditing can be met via `log.info` in MemoryStore methods
 - **Distinction from Claude Code auto-memory**: CC's built-in auto-memory is stored in `~/.claude/projects/<project>/memory/` (per-project isolation). This extension stores in `~/.claude-ext/memory/` (globally shared). System prompt explicitly declares both are independent, requiring the Agent to only operate this extension's memory via MCP tools, not mixing with built-in Read/Write tools
-- **Three-tier storage**: `MEMORY.md` (hot index, < 200 lines) / `topics/<name>.md` (deep knowledge) / `daily/YYYY-MM-DD.md` (append-only logs)
+- **Storage**: `TOPICS_INDEX.md` (topic catalog) / `topics/<name>.md` (deep knowledge) — searched on-demand via FTS5
 - **Phase 2b (deferred)**: Local embedding model vector semantic search
 
 ### Pre-Heartbeat Architecture Improvements

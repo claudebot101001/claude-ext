@@ -152,8 +152,7 @@ The memory extension implements an autonomous agent identity model with encrypte
 ~/.claude-ext/memory/
 ├── constitution.md          # Layer 1: human-authored, AI read-only
 ├── personality.md.enc       # Layer 2: Fernet-encrypted, AI-managed
-├── MEMORY.md                # Hot index (<200 lines)
-├── TOPICS_INDEX.md          # Topic catalog with detailed descriptions
+├── TOPICS_INDEX.md          # Topic catalog (searched via FTS5, not force-loaded)
 ├── topics/                  # Deep knowledge per subject
 │   └── backlog.md           # Self-improvement backlog
 ├── users/                   # Layer 3: per-user profiles
@@ -192,10 +191,11 @@ The memory extension implements an autonomous agent identity model with encrypte
 
 ### Knowledge Store
 
-- **MEMORY.md**: Hot index loaded at session start. Keep under 200 lines.
-- **TOPICS_INDEX.md**: Detailed catalog of topic files. Enables BM25 search to find relevant topics by description.
-- **topics/\<name\>.md**: Deep knowledge files. Always update `TOPICS_INDEX.md` when creating or modifying.
+- **TOPICS_INDEX.md**: Catalog of topic files. Enables FTS5/BM25 search via `memory_search`.
+- **topics/\<name\>.md**: Deep knowledge files. Update `TOPICS_INDEX.md` when creating or modifying.
 - **events/\<date\>-\<slug\>.md**: Verifiable experiences referenced from personality principles.
+
+Knowledge is accessed on-demand via `memory_search`, not force-loaded at session start.
 
 ### Migration
 

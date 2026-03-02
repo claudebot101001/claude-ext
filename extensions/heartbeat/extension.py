@@ -591,17 +591,9 @@ class ExtensionImpl(Extension):
         """Build the Tier 2 prompt from instructions and context. No side effects."""
         context_parts = []
 
-        # Memory summary
+        # Backlog and memory context
         memory_store = self.engine.services.get("memory")
         if memory_store and hasattr(memory_store, "read"):
-            try:
-                memory_content = memory_store.read("MEMORY.md")
-                if memory_content:
-                    lines = memory_content.splitlines()[:50]
-                    context_parts.append("## Memory Summary\n" + "\n".join(lines))
-            except Exception:
-                pass
-
             # Self-improvement backlog
             try:
                 backlog = memory_store.read("topics/backlog.md")

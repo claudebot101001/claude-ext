@@ -352,8 +352,8 @@ class MemoryStore:
     Usage::
 
         store = MemoryStore(Path("~/.claude-ext/memory"))
-        store.write("MEMORY.md", "# Memory\\n...")
-        print(store.read("MEMORY.md"))
+        store.write("topics/python.md", "# Python Notes\\n...")
+        print(store.read("topics/python.md"))
         store.append("daily/2025-01-15.md", "- learned X")
         results = store.search("pytest")
     """
