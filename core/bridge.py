@@ -10,7 +10,9 @@ BridgeClient — runs in MCP child processes (stdlib only, sync blocking).
 import asyncio
 import json
 import logging
+import os
 import socket
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 
@@ -133,21 +135,84 @@ class BridgeServer:
 class BridgeClient:
     """Sync blocking client for Unix socket bridge."""
 
+    _STALE_CHECK_INTERVAL = 1.0  # seconds between inode checks
+
     def __init__(self, socket_path: str | Path):
         self.socket_path = str(socket_path)
         self._sock: socket.socket | None = None
+        self._connected_inode: int | None = None
+        self._last_stale_check: float = 0.0
 
     def _connect(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.connect(self.socket_path)
+        try:
+            sock.connect(self.socket_path)
+        except BaseException:
+            sock.close()
+            raise
         self._sock = sock
+        try:
+            self._connected_inode = os.stat(self.socket_path).st_ino
+        except OSError:
+            self._connected_inode = None
+        self._last_stale_check = time.monotonic()
+
+    def _is_stale(self) -> bool:
+        """Check if socket file was replaced (inode mismatch)."""
+        now = time.monotonic()
+        if now - self._last_stale_check < self._STALE_CHECK_INTERVAL:
+            return False
+        self._last_stale_check = now
+        try:
+            current_inode = os.stat(self.socket_path).st_ino
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return self._connected_inode is not None and current_inode != self._connected_inode
+
+    def _close_socket(self) -> None:
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        self._connected_inode = None
+
+    def _send_recv(self, request: str, timeout: float) -> dict:
+        """Send request and read response. Raises on any I/O failure."""
+        assert self._sock is not None
+        self._sock.settimeout(timeout)
+        self._sock.sendall(request.encode("utf-8"))
+        buf = b""
+        while True:
+            chunk = self._sock.recv(65536)
+            if not chunk:
+                raise ConnectionError("Bridge connection closed")
+            buf += chunk
+            if b"\n" in buf:
+                break
+        line = buf.split(b"\n", 1)[0]
+        try:
+            response = json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Invalid bridge response: {e}") from e
+        if "error" in response:
+            raise RuntimeError(f"Bridge error: {response['error']}")
+        return response.get("result", {})
 
     def call(self, method: str, params: dict | None = None, timeout: float = 300) -> dict:
         """Send an RPC call and block for the response.
 
         Raises TimeoutError, ConnectionError, or RuntimeError on failure.
-        Auto-reconnects on stale connection.
+        Auto-reconnects on stale connection (inode mismatch) and retries once
+        on broken pipe / connection reset.
         """
+        # Proactive staleness check: detect socket replaced after restart
+        if self._sock is not None and self._is_stale():
+            self._close_socket()
+
         if self._sock is None:
             try:
                 self._connect()
@@ -157,40 +222,22 @@ class BridgeClient:
         request = json.dumps({"method": method, "params": params or {}}) + "\n"
 
         try:
-            self._sock.settimeout(timeout)
-            self._sock.sendall(request.encode("utf-8"))
-
-            # Read response line
-            buf = b""
-            while True:
-                chunk = self._sock.recv(65536)
-                if not chunk:
-                    raise ConnectionError("Bridge connection closed")
-                buf += chunk
-                if b"\n" in buf:
-                    break
+            return self._send_recv(request, timeout)
         except TimeoutError:
-            self._sock = None
+            self._close_socket()
             raise TimeoutError(f"Bridge call timed out after {timeout}s") from None
-        except OSError as e:
-            self._sock = None
-            raise ConnectionError(f"Bridge communication error: {e}") from e
-
-        line = buf.split(b"\n", 1)[0]
-        try:
-            response = json.loads(line.decode("utf-8"))
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"Invalid bridge response: {e}") from e
-
-        if "error" in response:
-            raise RuntimeError(f"Bridge error: {response['error']}")
-
-        return response.get("result", {})
+        except (OSError, ConnectionError):
+            # Transparent retry: reconnect and resend once
+            self._close_socket()
+            try:
+                self._connect()
+                return self._send_recv(request, timeout)
+            except TimeoutError:
+                self._close_socket()
+                raise TimeoutError(f"Bridge call timed out after {timeout}s") from None
+            except OSError as e:
+                self._close_socket()
+                raise ConnectionError(f"Bridge communication error: {e}") from e
 
     def close(self) -> None:
-        if self._sock:
-            try:
-                self._sock.close()
-            except OSError:
-                pass
-            self._sock = None
+        self._close_socket()
