@@ -704,10 +704,11 @@ class ExtensionImpl(Extension):
         name = found.name
         session_id = found.id
 
-        # Clean up stream buffer
+        # Clean up stream buffer and stale ask_user state
         buf = self._stream_buffers.pop(session_id, None)
         if buf and buf.flush_task and not buf.flush_task.done():
             buf.flush_task.cancel()
+        self._awaiting_text_answer.pop(session_id, None)
 
         await self.sm.destroy_session(session_id)
 
@@ -742,7 +743,11 @@ class ExtensionImpl(Extension):
             if self.engine.pending.resolve(request_id, text):
                 await update.message.reply_text(f"Answer sent: {text[:100]}")
                 return
-            # resolve() returned False = question expired, fall through
+            # Question expired before user replied — notify and discard
+            await update.message.reply_text(
+                "Question timed out. The session continued without your answer."
+            )
+            return
 
         session, auto_selected = await self._ensure_active_session(update, ctx)
 
