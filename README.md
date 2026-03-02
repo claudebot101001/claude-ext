@@ -105,7 +105,7 @@ Most orchestrators focus on coordinating multiple agents for development tasks. 
 | **Bridge RPC** | Bidirectional (MCP ↔ main process) | None |
 | **Credential vault** | Built-in (encrypted, bridge-isolated) | None |
 | **Autonomous heartbeat** | 3-tier with usage throttling | Basic cron at best |
-| **Extension system** | Decoupled lifecycle with health checks | Monolithic |
+| **Extension system** | Decoupled lifecycle with health checks | Often monolithic |
 
 ### vs. Official Claude Code plugins
 
