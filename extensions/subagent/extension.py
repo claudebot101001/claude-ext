@@ -198,6 +198,10 @@ class ExtensionImpl(Extension):
                     "name": "subagent_delete",
                     "description": "Delete a completed/stopped/failed/merged sub-agent",
                 },
+                {
+                    "name": "session_info",
+                    "description": "Get metadata about your own session",
+                },
             ],
         )
 

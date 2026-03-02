@@ -7,6 +7,7 @@ main process via bridge RPC.
 
 import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Ensure the project root is importable
@@ -188,6 +189,18 @@ class SubAgentMCPServer(MCPServerBase):
                 "required": ["agent_id"],
             },
         },
+        {
+            "name": "session_info",
+            "description": (
+                "Get metadata about your own session: session ID, status, runtime, "
+                "prompt count, last cost, working directory, and context fields. "
+                "Useful for self-awareness and decision-making."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
     ]
 
     def __init__(self):
@@ -201,6 +214,7 @@ class SubAgentMCPServer(MCPServerBase):
             "subagent_diff": self._handle_diff,
             "subagent_merge": self._handle_merge,
             "subagent_delete": self._handle_delete,
+            "session_info": self._handle_session_info,
         }
 
     def _bridge_call(self, method: str, extra_params: dict, timeout: float = 60) -> dict:
@@ -419,6 +433,55 @@ class SubAgentMCPServer(MCPServerBase):
         if "error" in result:
             return f"Error: {result['error']}"
         return "Agent deleted."
+
+    # Context keys safe to expose (session-relevant, no routing data from other extensions)
+    _CONTEXT_ALLOWLIST = {
+        "subagent_worker",
+        "subagent_parent_id",
+        "subagent_paradigm",
+        "subagent_task",
+        "subagent_worktree_branch",
+        "subagent_auto_cleanup",
+        "heartbeat_auto_cleanup",
+        "cron_auto_cleanup",
+    }
+
+    def _handle_session_info(self, args: dict) -> str:
+        state = self.session_context()
+
+        # Compute runtime
+        runtime_seconds = None
+        created_at = state.get("created_at", "")
+        if created_at:
+            try:
+                created = datetime.fromisoformat(created_at)
+                runtime_seconds = int((datetime.now(UTC) - created).total_seconds())
+            except (ValueError, TypeError):
+                pass
+
+        # Extract last prompt cost from metadata
+        meta = state.get("last_result_metadata", {})
+
+        # Filter context to allowlisted keys only
+        raw_ctx = state.get("context", {})
+        filtered_ctx = {k: v for k, v in raw_ctx.items() if k in self._CONTEXT_ALLOWLIST}
+
+        info = {
+            "session_id": state.get("id") or self.session_id,
+            "name": state.get("name"),
+            "status": state.get("status"),
+            "user_id": state.get("user_id") or self.session_user_id,
+            "working_dir": state.get("working_dir"),
+            "created_at": created_at or None,
+            "last_active_at": state.get("last_active_at"),
+            "runtime_seconds": runtime_seconds,
+            "prompt_count": state.get("prompt_count", 0),
+            "last_cost_usd": meta.get("total_cost_usd"),
+            "last_model": meta.get("model"),
+            "claude_session_id": state.get("claude_session_id"),
+            "context": filtered_ctx,
+        }
+        return json.dumps(info, indent=2)
 
 
 if __name__ == "__main__":
