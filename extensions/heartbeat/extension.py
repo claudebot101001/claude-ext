@@ -224,10 +224,9 @@ class ExtensionImpl(Extension):
                     if revert.returncode == 0:
                         log.warning("Auto-reverted commit %s", commit)
                     else:
-                        log.error(
-                            "git revert failed: %s",
-                            revert.stderr.decode(errors="replace")[:500],
-                        )
+                        stderr_text = revert.stderr.decode(errors="replace")
+                        log.error("git revert failed: %s", stderr_text[:500])
+                        self._handle_revert_failure(commit, stderr_text)
                 else:
                     log.warning("Commit %s not found, clearing stale verification", commit)
                 self._store.update_state(pending_verification=None)
@@ -918,6 +917,53 @@ class ExtensionImpl(Extension):
                 log.info("Reclaimed session %s to free slot for heartbeat", s.id[:8])
                 return True
         return False
+
+    # -- revert failure handling ---------------------------------------------
+
+    def _handle_revert_failure(self, commit: str, stderr_text: str) -> None:
+        """Handle a failed git revert: update backlog and schedule telegram notification."""
+        # Update backlog
+        memory = self.engine.services.get("memory")
+        if memory and hasattr(memory, "read") and hasattr(memory, "write"):
+            try:
+                err_short = stderr_text.strip()[:200]
+                new_item = (
+                    f"- [ ] [L3] [REVERT-FAILED] commit {commit[:12]} could not be "
+                    f"auto-reverted ({err_short}). Manually resolve conflict and re-do the fix.\n"
+                )
+                content = memory.read("topics/backlog.md") or ""
+                if "## Pending" in content:
+                    content = content.replace("## Pending\n", f"## Pending\n{new_item}", 1)
+                else:
+                    content += f"\n## Pending\n{new_item}"
+                memory.write("topics/backlog.md", content)
+                log.info("Added REVERT-FAILED item to backlog for commit %s", commit[:12])
+            except Exception:
+                log.exception("Failed to update backlog after revert failure")
+
+        # Schedule deferred telegram notification (after startup completes)
+        asyncio.create_task(self._notify_revert_failure(commit, stderr_text))
+
+    async def _notify_revert_failure(self, commit: str, stderr_text: str) -> None:
+        """Send a telegram notification about a failed auto-revert."""
+        await asyncio.sleep(15)  # Allow startup to complete and telegram to register
+        chat_id = self._notify_context.get("chat_id")
+        if not chat_id:
+            return
+        telegram = self.engine.services.get("telegram")
+        if not telegram:
+            log.warning("Cannot notify revert failure: telegram not in services")
+            return
+        msg = (
+            f"WARNING: REVERT FAILED\n"
+            f"Commit {commit[:12]} could not be auto-reverted on double-restart.\n"
+            f"Error: {stderr_text.strip()[:300]}\n"
+            f"A recovery item has been added to the backlog."
+        )
+        try:
+            await telegram.notify(chat_id, msg)
+        except Exception:
+            log.exception("Failed to send revert-failure telegram notification")
 
     # -- logging helpers -----------------------------------------------------
 

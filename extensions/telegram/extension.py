@@ -861,7 +861,12 @@ class ExtensionImpl(Extension):
 
     # -- lifecycle ----------------------------------------------------------
 
+    async def notify(self, chat_id: int, text: str) -> None:
+        """Send a direct notification message to a chat (bypasses session routing)."""
+        await self._send_chunked(chat_id, text)
+
     async def start(self) -> None:
+        self.engine.services["telegram"] = self
         self.sm.add_delivery_callback(self._deliver_result)
 
         self.app = Application.builder().token(self.token).build()
@@ -910,6 +915,8 @@ class ExtensionImpl(Extension):
                 buf.flush_task.cancel()
         self._stream_buffers.clear()
         self._awaiting_text_answer.clear()
+
+        self.engine.services.pop("telegram", None)
 
         if self.app:
             await self.app.updater.stop()
