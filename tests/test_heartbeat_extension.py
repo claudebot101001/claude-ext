@@ -10,6 +10,8 @@ from core.pending import PendingStore
 from core.session import SessionStatus
 from extensions.heartbeat.extension import (
     _BACKOFF_MAX_MULTIPLIER,
+    _MAX_RECON_COMMANDS,
+    _MAX_RECON_PER_CMD,
     ExtensionImpl,
     TriggerEvent,
 )
@@ -1152,6 +1154,252 @@ class TestBridgeSafeReload:
             await ext.start()
             result = await ext._handle_bridge_request("some_other_method", {})
             assert result is None
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+
+# -- Recon commands ---------------------------------------------------------
+
+
+class TestReconCommands:
+    def _make_ext_with_recon(self, engine, recon_commands):
+        ext = ExtensionImpl()
+        ext.configure(
+            engine,
+            {
+                "user_id": "123456789",
+                "recon_commands": recon_commands,
+            },
+        )
+        return ext
+
+    def test_recon_happy_path(self, engine):
+        """Recon command runs and captures stdout."""
+        ext = self._make_ext_with_recon(engine, [{"cmd": "echo hello", "label": "Test echo"}])
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            assert results[0][0] == "Test echo"
+            assert results[0][1] == "hello"
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_empty_config(self, engine):
+        """No recon_commands → empty results."""
+        ext = self._make_ext_with_recon(engine, [])
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert results == []
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_max_commands_enforced(self, engine):
+        """Only first _MAX_RECON_COMMANDS commands run."""
+        cmds = [
+            {"cmd": f"echo cmd{i}", "label": f"Cmd {i}"} for i in range(_MAX_RECON_COMMANDS + 2)
+        ]
+        ext = self._make_ext_with_recon(engine, cmds)
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == _MAX_RECON_COMMANDS
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_command_not_found(self, engine):
+        """Non-existent command → [command not found] in output."""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": "nonexistent_binary_xyz", "label": "Missing"}],
+        )
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            assert "[command not found" in results[0][1]
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_timeout(self, engine):
+        """Command that exceeds timeout → [timeout] in output."""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": "sleep 60", "label": "Slow", "timeout": 1}],
+        )
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            assert results[0][1] == "[timeout]"
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_nonzero_exit(self, engine):
+        """Command with non-zero exit → includes exit code."""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": "false", "label": "Fails"}],
+        )
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            assert "[exit" in results[0][1]
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_output_truncated(self, engine):
+        """Long output is truncated to _MAX_RECON_PER_CMD."""
+        # Generate output longer than the limit
+        long_cmd = f"python3 -c \"print('x' * {_MAX_RECON_PER_CMD + 100})\""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": long_cmd, "label": "Long output"}],
+        )
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            # Output should be truncated
+            assert len(results[0][1]) <= _MAX_RECON_PER_CMD + 5  # +5 for ellipsis
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_in_tier2_prompt(self, engine):
+        """Recon results appear in the Tier 2 prompt under ## Recon."""
+        ext = self._make_ext_with_recon(engine, [{"cmd": "echo hello", "label": "Test"}])
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Check stuff")
+            recon = await ext._run_recon()
+            prompt = ext._build_tier2_prompt("# Check stuff", recon_results=recon)
+            assert "## Recon" in prompt
+            assert "### Test" in prompt
+            assert "hello" in prompt
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_absent_from_prompt_when_empty(self, engine):
+        """No recon commands → no ## Recon section in prompt."""
+        ext = self._make_ext_with_recon(engine, [])
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Check stuff")
+            prompt = ext._build_tier2_prompt("# Check stuff", recon_results=[])
+            assert "## Recon" not in prompt
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_runs_in_tier2_decision(self, engine):
+        """_tier2_decision calls _run_recon and includes results in prompt."""
+        ext = self._make_ext_with_recon(engine, [{"cmd": "echo recon-marker", "label": "Marker"}])
+        engine.ask = AsyncMock(return_value="NOTHING")
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Check stuff")
+            await ext._tier2_decision("# Check stuff")
+            # Verify engine.ask was called with a prompt containing recon
+            call_args = engine.ask.call_args
+            prompt = call_args.kwargs.get("prompt") or call_args[1].get("prompt", call_args[0][0])
+            assert "## Recon" in prompt
+            assert "recon-marker" in prompt
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_runs_in_dry_run(self, engine):
+        """dry_run_tier2 includes recon results."""
+        ext = self._make_ext_with_recon(engine, [{"cmd": "echo dry-recon", "label": "DryTest"}])
+        engine.ask = AsyncMock(return_value="NOTHING")
+
+        async def _run_test():
+            await ext.start()
+            ext._store.write_instructions("# Check stuff")
+            result = await ext.dry_run_tier2()
+            assert "## Recon" in result["prompt"]
+            assert "dry-recon" in result["prompt"]
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_reconfigure_updates_recon(self, engine):
+        """reconfigure() picks up changed recon_commands."""
+        ext = self._make_ext_with_recon(engine, [])
+
+        _run(ext.start())
+        assert ext._recon_commands == []
+
+        ext.reconfigure({"recon_commands": [{"cmd": "echo new", "label": "New"}]})
+        assert len(ext._recon_commands) == 1
+        assert ext._recon_commands[0]["label"] == "New"
+        ext._scheduler_task.cancel()
+
+    def test_recon_invalid_cmd_syntax(self, engine):
+        """Malformed command string → parse error captured."""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": "echo 'unterminated", "label": "Bad syntax"}],
+        )
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            assert "[parse error" in results[0][1]
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_empty_cmd_skipped(self, engine):
+        """Entry with empty cmd string is skipped."""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": "", "label": "Empty"}, {"cmd": "echo ok", "label": "Valid"}],
+        )
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            assert results[0][0] == "Valid"
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_default_label_from_cmd(self, engine):
+        """Missing label defaults to first 40 chars of cmd."""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": "echo fallback-label-test"}],
+        )
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            assert "echo fallback-label-test" in results[0][0]
             ext._scheduler_task.cancel()
 
         asyncio.run(_run_test())

@@ -3,7 +3,7 @@
 Dual-channel scheduler (timer + event triggers) with three-tier execution:
   Tier 0: Python gate checks (zero cost)
   Tier 1: Pre-checks (instructions exist? events pending?)
-  Tier 2: LLM decision via engine.ask() (low cost, ~500 input tokens)
+  Tier 2: Recon commands + LLM decision via engine.ask() (low cost)
   Tier 3: Full session execution (normal cost, only when action needed)
 """
 
@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import re
+import shlex
 import signal
 import subprocess
 import sys
@@ -87,6 +88,13 @@ _TIER3_PROMPT_TEMPLATE = """\
 {trigger_context}
 Execute this task now. Use all available tools. Summarize results when done."""
 
+# Recon limits
+_MAX_RECON_COMMANDS = 3
+_MAX_RECON_PER_CMD = 500  # chars per command output
+_MAX_RECON_TOTAL = 2000  # chars total for all recon output
+_DEFAULT_RECON_TIMEOUT = 10  # seconds
+_MAX_RECON_TIMEOUT = 30  # seconds
+
 # Usage cache TTL
 _NOOP_MAX_LEN = 200
 
@@ -118,6 +126,7 @@ class ExtensionImpl(Extension):
         self._user_id = str(config.get("user_id", ""))
         self._notify_context = config.get("notify_context", {})
         self._working_dir = config.get("working_dir") or os.getcwd()
+        self._recon_commands: list[dict] = config.get("recon_commands", [])
 
         self._restart_marker: Path | None = None  # set in start()
         self._store: HeartbeatStore | None = None
@@ -133,10 +142,12 @@ class ExtensionImpl(Extension):
         self._max_daily_runs = config.get("max_daily_runs", self._max_daily_runs)
         self._usage_throttle = config.get("usage_throttle", self._usage_throttle)
         self._usage_pause = config.get("usage_pause", self._usage_pause)
+        self._recon_commands = config.get("recon_commands", self._recon_commands)
         log.info(
-            "Heartbeat config reloaded: interval=%d, max_daily=%d",
+            "Heartbeat config reloaded: interval=%d, max_daily=%d, recon_cmds=%d",
             self._interval,
             self._max_daily_runs,
+            len(self._recon_commands),
         )
 
     @property
@@ -580,16 +591,91 @@ class ExtensionImpl(Extension):
 
         await self._tier2_decision(instructions, trigger=trigger)
 
-    # -- Tier 2: LLM decision -----------------------------------------------
+    # -- Tier 2: recon + LLM decision ----------------------------------------
+
+    async def _run_recon(self) -> list[tuple[str, str]]:
+        """Run operator-defined recon commands and return (label, output) pairs.
+
+        Commands are defined in config.yaml, not by the LLM. Each runs via
+        subprocess exec (no shell) with a short timeout. Failures are captured
+        gracefully — they never block the Tier 2 decision.
+        """
+        if not self._recon_commands:
+            return []
+
+        results: list[tuple[str, str]] = []
+        total_chars = 0
+
+        for entry in self._recon_commands[:_MAX_RECON_COMMANDS]:
+            cmd_str = entry.get("cmd", "")
+            label = entry.get("label", cmd_str[:40])
+            timeout = min(entry.get("timeout", _DEFAULT_RECON_TIMEOUT), _MAX_RECON_TIMEOUT)
+
+            if not cmd_str:
+                continue
+
+            try:
+                args = shlex.split(cmd_str)
+            except ValueError as e:
+                results.append((label, f"[parse error: {e}]"))
+                continue
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *args,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=self._working_dir,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                output = stdout.decode(errors="replace").strip()
+                if proc.returncode != 0:
+                    err = stderr.decode(errors="replace").strip()[:200]
+                    output = output or f"[exit {proc.returncode}: {err}]"
+            except TimeoutError:
+                output = "[timeout]"
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+            except FileNotFoundError:
+                output = f"[command not found: {args[0]}]"
+            except Exception as e:
+                output = f"[error: {e}]"
+
+            # Truncate per-command output
+            if len(output) > _MAX_RECON_PER_CMD:
+                output = output[:_MAX_RECON_PER_CMD] + "…"
+
+            # Enforce total cap
+            if total_chars + len(output) > _MAX_RECON_TOTAL:
+                remaining = _MAX_RECON_TOTAL - total_chars
+                if remaining > 50:
+                    output = output[:remaining] + "…"
+                    results.append((label, output))
+                break
+
+            total_chars += len(output)
+            results.append((label, output))
+
+        return results
 
     def _build_tier2_prompt(
         self,
         instructions: str,
         pending_events: list[TriggerEvent] | None = None,
         trigger: TriggerEvent | None = None,
+        recon_results: list[tuple[str, str]] | None = None,
     ) -> str:
         """Build the Tier 2 prompt from instructions and context. No side effects."""
         context_parts = []
+
+        # Recon results (operator-defined command outputs)
+        if recon_results:
+            recon_lines = []
+            for label, output in recon_results:
+                recon_lines.append(f"### {label}\n```\n{output}\n```")
+            context_parts.append("## Recon\n" + "\n".join(recon_lines))
 
         # Backlog and memory context
         memory_store = self.engine.services.get("memory")
@@ -664,7 +750,8 @@ class ExtensionImpl(Extension):
         if not instructions.strip():
             return {"error": "No instructions available (HEARTBEAT.md empty or missing)"}
 
-        prompt = self._build_tier2_prompt(instructions)
+        recon = await self._run_recon()
+        prompt = self._build_tier2_prompt(instructions, recon_results=recon)
 
         try:
             response = await self.engine.ask(
@@ -695,7 +782,10 @@ class ExtensionImpl(Extension):
         trigger: TriggerEvent | None = None,
     ) -> None:
         """Ask Claude whether action is needed. Low-cost engine.ask() call."""
-        prompt = self._build_tier2_prompt(instructions, pending_events, trigger)
+        recon = await self._run_recon()
+        prompt = self._build_tier2_prompt(
+            instructions, pending_events, trigger, recon_results=recon
+        )
 
         # Update counters
         now_iso = datetime.now(UTC).isoformat()

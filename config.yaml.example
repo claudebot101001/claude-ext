@@ -79,6 +79,15 @@ extensions:
     notify_context:                  # Delivery routing
       chat_id: 123456789             # Telegram chat ID for Tier 3 results
     working_dir: null                # Default working directory (null = cwd)
+    # Optional: read-only commands to run before Tier 2 LLM decision.
+    # Output is injected as context so the LLM has real-world data.
+    # Max 3 commands, each with configurable timeout (default 10s, max 30s).
+    # recon_commands:
+    #   - cmd: "git log --oneline -5"
+    #     label: "Recent commits"
+    #   - cmd: "ruff check --statistics"
+    #     label: "Lint status"
+    #     timeout: 15
 
   cron:
     # Static jobs (optional). Claude can also create jobs dynamically via MCP tools.
