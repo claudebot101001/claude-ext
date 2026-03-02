@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Memory MCP server — persistent knowledge store via Claude tool calls.
+"""Memory MCP server — three-layer identity + persistent knowledge store.
 
 Spawned by Claude Code per session.  Inherits MCPServerBase for protocol
-handling; uses direct file I/O via MEMORY_DIR environment variable.
+handling.  Regular memory ops use direct file I/O via MEMORY_DIR env var.
+Personality ops use bridge RPC for encryption/decryption via main process.
 """
 
 import os
@@ -17,15 +18,21 @@ if _project_root not in sys.path:
 from core.mcp_base import MCPServerBase  # noqa: E402
 from extensions.memory.store import MemoryStore  # noqa: E402
 
+# Paths that the AI cannot write to (human-authored only)
+_READONLY_PATHS = {"constitution.md"}
+
 
 class MemoryMCPServer(MCPServerBase):
     name = "memory"
     tools = [
+        # -- Layer 1-3 + Knowledge Store: direct file I/O tools --
         {
             "name": "memory_read",
             "description": (
                 "Read a memory file. Use 'MEMORY.md' for the main index, "
-                "'topics/<name>.md' for topic files, 'daily/YYYY-MM-DD.md' for daily logs."
+                "'TOPICS_INDEX.md' for topic catalog, 'topics/<name>.md' for topic files, "
+                "'constitution.md' for constitutional rules, "
+                "'users/<user_id>/profile.md' for user profiles."
             ),
             "inputSchema": {
                 "type": "object",
@@ -42,7 +49,8 @@ class MemoryMCPServer(MCPServerBase):
             "name": "memory_write",
             "description": (
                 "Overwrite a memory file. Use for creating or rewriting files. "
-                "Parent directories are created automatically."
+                "Parent directories are created automatically. "
+                "Note: constitution.md is read-only and cannot be written."
             ),
             "inputSchema": {
                 "type": "object",
@@ -67,7 +75,8 @@ class MemoryMCPServer(MCPServerBase):
             "name": "memory_append",
             "description": (
                 "Append content to a memory file with automatic UTC timestamp. "
-                "Ideal for daily logs. Creates the file if it doesn't exist."
+                "Creates the file if it doesn't exist. "
+                "Note: constitution.md is read-only and cannot be appended to."
             ),
             "inputSchema": {
                 "type": "object",
@@ -116,9 +125,61 @@ class MemoryMCPServer(MCPServerBase):
                 "properties": {
                     "subdir": {
                         "type": "string",
-                        "description": "Optional subdirectory to list (e.g. 'topics', 'daily')",
+                        "description": "Optional subdirectory to list (e.g. 'topics', 'users', 'events')",
                     },
                 },
+            },
+        },
+        # -- Layer 2: Personality tools (bridge RPC for encryption) --
+        {
+            "name": "personality_read",
+            "description": (
+                "Read the AI's personality principles. These are self-developed rules "
+                "with hyperlinked formative events. Encrypted at rest, decrypted via bridge."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+        {
+            "name": "personality_write",
+            "description": (
+                "Overwrite the AI's personality principles. Content should be structured as "
+                "one principle per line with a hyperlinked formative event. Encrypted at rest."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": (
+                            "Full personality content. One principle per line. "
+                            "Format: '- <principle> → [YYYY-MM-DD: description](events/YYYY-MM-DD-slug.md)'"
+                        ),
+                    },
+                },
+                "required": ["content"],
+            },
+        },
+        {
+            "name": "personality_append",
+            "description": (
+                "Append a new personality principle. Must include a formative event "
+                "explaining why this principle was developed. Encrypted at rest."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "principle": {
+                        "type": "string",
+                        "description": (
+                            "New principle with its formative event hyperlink. "
+                            "Format: '- <principle> → [YYYY-MM-DD: description](events/YYYY-MM-DD-slug.md)'"
+                        ),
+                    },
+                },
+                "required": ["principle"],
             },
         },
     ]
@@ -131,6 +192,9 @@ class MemoryMCPServer(MCPServerBase):
             "memory_append": self._handle_append,
             "memory_search": self._handle_search,
             "memory_list": self._handle_list,
+            "personality_read": self._handle_personality_read,
+            "personality_write": self._handle_personality_write,
+            "personality_append": self._handle_personality_append,
         }
 
     def _get_store(self) -> MemoryStore:
@@ -141,7 +205,18 @@ class MemoryMCPServer(MCPServerBase):
             self._store = MemoryStore(Path(memory_dir))
         return self._store
 
-    # -- handlers -----------------------------------------------------------
+    @staticmethod
+    def _check_readonly(path: str) -> str | None:
+        """Return error string if path is read-only, else None."""
+        normalized = path.strip().lower()
+        if normalized in _READONLY_PATHS:
+            return (
+                f"Error: '{path}' is read-only (human-authored constitutional rules). "
+                "Only the human operator can edit this file directly."
+            )
+        return None
+
+    # -- direct file I/O handlers -------------------------------------------
 
     def _handle_read(self, args: dict) -> str:
         path = args.get("path")
@@ -164,6 +239,9 @@ class MemoryMCPServer(MCPServerBase):
             return "Error: 'path' is required."
         if content is None:
             return "Error: 'content' is required."
+        err = self._check_readonly(path)
+        if err:
+            return err
         store = self._get_store()
         try:
             nbytes = store.write(path, content, expires=expires)
@@ -182,6 +260,9 @@ class MemoryMCPServer(MCPServerBase):
             return "Error: 'path' is required."
         if content is None:
             return "Error: 'content' is required."
+        err = self._check_readonly(path)
+        if err:
+            return err
         store = self._get_store()
         try:
             nbytes = store.append(path, content, expires=expires)
@@ -224,6 +305,44 @@ class MemoryMCPServer(MCPServerBase):
         for f in files:
             lines.append(f"{f['path']}  ({f['size']} bytes, {f['modified']})")
         return "\n".join(lines)
+
+    # -- personality handlers (bridge RPC for encryption) --------------------
+
+    def _handle_personality_read(self, args: dict) -> str:
+        try:
+            result = self.bridge.call("memory_personality_read", {})
+        except Exception as e:
+            return f"Error: Failed to read personality: {e}"
+        if "error" in result:
+            return f"Error: {result['error']}"
+        content = result.get("content")
+        if content is None:
+            return "No personality principles recorded yet."
+        return content
+
+    def _handle_personality_write(self, args: dict) -> str:
+        content = args.get("content")
+        if content is None:
+            return "Error: 'content' is required."
+        try:
+            result = self.bridge.call("memory_personality_write", {"content": content})
+        except Exception as e:
+            return f"Error: Failed to write personality: {e}"
+        if "error" in result:
+            return f"Error: {result['error']}"
+        return f"Personality principles written ({result.get('bytes', 0)} bytes encrypted)"
+
+    def _handle_personality_append(self, args: dict) -> str:
+        principle = args.get("principle")
+        if not principle:
+            return "Error: 'principle' is required."
+        try:
+            result = self.bridge.call("memory_personality_append", {"content": principle})
+        except Exception as e:
+            return f"Error: Failed to append personality: {e}"
+        if "error" in result:
+            return f"Error: {result['error']}"
+        return f"Personality principle appended ({result.get('bytes', 0)} bytes encrypted)"
 
 
 if __name__ == "__main__":

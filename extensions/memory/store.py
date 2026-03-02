@@ -628,6 +628,27 @@ class MemoryStore:
                             return results
         return results
 
+    # -- personality raw I/O (bypasses _safe_resolve for .enc file) -----------
+
+    _PERSONALITY_FILE = "personality.md.enc"
+
+    def read_personality_raw(self) -> bytes | None:
+        """Read raw encrypted personality bytes. Returns None if not found."""
+        path = self.memory_dir / self._PERSONALITY_FILE
+        with self._shared_lock():
+            if not path.exists() or not path.is_file():
+                return None
+            return path.read_bytes()
+
+    def write_personality_raw(self, data: bytes) -> int:
+        """Atomically write raw encrypted personality bytes."""
+        path = self.memory_dir / self._PERSONALITY_FILE
+        with self._exclusive_lock():
+            tmp = path.with_suffix(".enc.tmp")
+            tmp.write_bytes(data)
+            tmp.rename(path)
+        return len(data)
+
     # -- path safety (core security boundary) --------------------------------
 
     def _safe_resolve(self, path: str) -> Path:

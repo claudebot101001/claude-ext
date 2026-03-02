@@ -31,9 +31,10 @@ sessions:
 
 # Extensions to enable (must match directory names under extensions/)
 # Order matters: dependencies must come before dependents.
+# IMPORTANT: vault must come before memory (personality encryption depends on vault).
 enabled:
-  # - vault                        # Encrypted credential vault (required by wallet, email)
-  # - memory                       # Persistent cross-session knowledge store (load early)
+  # - vault                        # Encrypted credential vault (required by memory personality, wallet, email)
+  # - memory                       # Three-layer identity + persistent knowledge store (load after vault)
   - telegram
   # - ask_user                     # Uncomment to let Claude ask the user questions mid-session
   # - heartbeat                     # Autonomous periodic task agent
@@ -62,7 +63,10 @@ extensions:
     {}
 
   memory:
-    # No required configuration. Memory files stored in {state_dir}/memory/
+    # Three-layer identity system + knowledge store. Files in {state_dir}/memory/.
+    # Personality encryption requires vault to be enabled and listed before memory.
+    # On first run, auto-migrates from v1 format (creates constitution.md, TOPICS_INDEX.md,
+    # archives daily/ logs, creates users/ and events/ directories).
     {}
 
   heartbeat:

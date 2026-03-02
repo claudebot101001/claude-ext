@@ -20,7 +20,7 @@ claude-ext/
 │   └── status.py            # Auth + usage API queries
 ├── extensions/              # Each subdirectory is fully independent
 │   ├── vault/               # Encrypted credential store (Fernet + bridge RPC)
-│   ├── memory/              # Cross-session persistent memory (Markdown + direct I/O)
+│   ├── memory/              # Three-layer identity + knowledge store (Markdown + bridge RPC)
 │   ├── heartbeat/           # Autonomous periodic agent (dual-channel + 3-tier)
 │   ├── cron/                # Scheduled tasks (croniter + MCP)
 │   ├── ask_user/            # Interactive questions (bridge + PendingStore)
@@ -134,13 +134,76 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 | Extension | MCP Tools | Communication |
 |-----------|-----------|---------------|
 | **vault** | `vault_store`, `vault_list`, `vault_retrieve`, `vault_delete` | Bridge RPC (passphrase never in MCP process) |
-| **memory** | `memory_read`, `memory_write`, `memory_append`, `memory_search`, `memory_list` | Direct file I/O (no bridge needed) |
+| **memory** | `memory_read`, `memory_write`, `memory_append`, `memory_search`, `memory_list`, `personality_read`, `personality_write`, `personality_append` | Direct file I/O + Bridge RPC (personality encryption via vault) |
 | **heartbeat** | `heartbeat_instructions`, `heartbeat_status`, `heartbeat_trigger`, `heartbeat_get_trigger_command`, `heartbeat_dry_run`, `heartbeat_set_verification` | Mixed (file I/O + bridge for trigger) |
 | **cron** | `cron_create`, `cron_delete`, `cron_status` | Bridge RPC |
 | **ask_user** | `ask_user` | Bridge RPC → PendingStore |
 | **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_diff`, `subagent_merge`, `subagent_delete`, `subagent_reclaim_respond`, `session_info` | Bridge RPC → PendingStore + SessionManager |
 | **session_ask** | `session_ask`, `session_reply`, `session_list` | Bridge RPC → PendingStore + SessionManager |
 | **telegram** | (none — frontend only) | Delivery callbacks |
+
+## Memory Extension: Three-Layer Identity System
+
+The memory extension implements an autonomous agent identity model with encrypted personality storage and per-user profiling.
+
+### Storage Layout
+
+```
+~/.claude-ext/memory/
+├── constitution.md          # Layer 1: human-authored, AI read-only
+├── personality.md.enc       # Layer 2: Fernet-encrypted, AI-managed
+├── MEMORY.md                # Hot index (<200 lines)
+├── TOPICS_INDEX.md          # Topic catalog with detailed descriptions
+├── topics/                  # Deep knowledge per subject
+│   └── backlog.md           # Self-improvement backlog
+├── users/                   # Layer 3: per-user profiles
+│   └── <user_id>/
+│       └── profile.md       # User aspirations and demands
+├── events/                  # Formative events linked from personality
+│   └── <date>-<slug>.md
+├── memory.lock
+└── .search_index.db         # FTS5 cache (derived, rebuildable)
+```
+
+### Layer 1: Constitutional Rules
+
+- **File**: `constitution.md` — human-authored, AI **cannot** modify via MCP tools
+- **Injection**: Session customizer reads the file and injects into system prompt for every session
+- **Enforcement**: `memory_write` and `memory_append` reject writes to `constitution.md`
+- Seed template created on first run; only injected once the operator adds real rules
+
+### Layer 2: Personality Principles
+
+- **Storage**: `personality.md.enc` — Fernet-encrypted binary on disk
+- **Encryption key**: Auto-generated, stored in Vault (`memory/personality/encryption_key`); held in main process memory at runtime
+- **Access**: MCP tools (`personality_read`, `personality_write`, `personality_append`) → bridge RPC → main process decrypts/encrypts
+- **Format**: One principle per line with hyperlinked formative event:
+  ```
+  - <principle> → [YYYY-MM-DD: description](events/YYYY-MM-DD-slug.md)
+  ```
+- **Security model**: Defense-in-depth. Encrypted at rest; key in Vault (itself encrypted). Not a hard isolation boundary — a human with filesystem access can extract the key from Vault.
+- **Requires**: Vault extension enabled and loaded before memory. Without vault, personality tools return a clear error; all other memory features work normally.
+
+### Layer 3: User Profiles
+
+- **Storage**: `users/<user_id>/profile.md` — one file per user
+- **Injection**: Session customizer reads profile based on `session.user_id` and injects into system prompt
+- **Content style**: Aspiration/demand-oriented, not definition-based (e.g. "wants logically rigorous code" not "is a software engineer")
+
+### Knowledge Store
+
+- **MEMORY.md**: Hot index loaded at session start. Keep under 200 lines.
+- **TOPICS_INDEX.md**: Detailed catalog of topic files. Enables BM25 search to find relevant topics by description.
+- **topics/\<name\>.md**: Deep knowledge files. Always update `TOPICS_INDEX.md` when creating or modifying.
+- **events/\<date\>-\<slug\>.md**: Verifiable experiences referenced from personality principles.
+
+### Migration
+
+On first start after upgrade, auto-migrates v1 format:
+1. Generates `TOPICS_INDEX.md` from existing topic files
+2. Archives `daily/` logs into `topics/daily-archive.md`
+3. Seeds `constitution.md`, creates `users/` and `events/` directories
+4. Writes `.migrated_v2` marker (idempotent)
 
 ## Adding a New Extension
 
@@ -183,7 +246,7 @@ enabled:
 
 extensions:
   vault: {}           # Zero-config (passphrase auto-generated)
-  memory: {}          # Zero-config (files in state_dir/memory/)
+  memory: {}          # Three-layer identity (requires vault before memory for personality encryption)
   telegram:
     token: "BOT_TOKEN"
     allowed_users: [123456789]
