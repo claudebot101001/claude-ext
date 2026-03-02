@@ -37,16 +37,19 @@ claude-ext/
 │   ├── heartbeat/
 │   │   ├── extension.py           # Autonomous heartbeat (dual-channel scheduler + three-tier execution + usage-aware)
 │   │   ├── store.py               # HeartbeatStore: state + instruction file I/O + flock
-│   │   ├── mcp_server.py          # MCP stdio server (four heartbeat tools)
+│   │   ├── mcp_server.py          # MCP stdio server (six heartbeat tools)
 │   │   └── trigger_cli.py         # Standalone CLI: external processes trigger heartbeat via bridge.sock
 │   ├── ask_user/
 │   │   ├── extension.py           # Interactive question extension (bridge + PendingStore)
 │   │   └── mcp_server.py          # MCP stdio server (ask_user tool)
-│   └── subagent/
-│       ├── extension.py           # Multi-agent orchestration (PM → worker sessions)
-│       ├── mcp_server.py          # MCP stdio server (7 subagent tools)
-│       ├── store.py               # SubAgentStore: agent records + flock + prefix ID matching
-│       └── worktree.py            # Git worktree utilities (create/diff/merge/cleanup)
+│   ├── subagent/
+│   │   ├── extension.py           # Multi-agent orchestration (PM → worker sessions)
+│   │   ├── mcp_server.py          # MCP stdio server (10 subagent tools)
+│   │   ├── store.py               # SubAgentStore: agent records + flock + prefix ID matching
+│   │   └── worktree.py            # Git worktree utilities (create/diff/merge/cleanup)
+│   └── session_ask/
+│       ├── extension.py           # Cross-session RPC (bridge + PendingStore)
+│       └── mcp_server.py          # MCP stdio server (3 session tools)
 ├── config.yaml                    # Global config (engine params + extension toggles + extension config) (.gitignore)
 ├── config.yaml.example            # Config template (tracked)
 ├── main.py                        # Entry point (load config → build engine → init sessions → register extensions → run)
@@ -870,14 +873,17 @@ PM Claude → MCP tool(subagent_*) → bridge.call("subagent_*") → BridgeServe
   → Delivery callback → SubAgentStore.update + PendingStore.resolve → PM unblocks
 ```
 
-**MCP Tools** (7):
+**MCP Tools** (10):
 - `subagent_spawn(task, name?, worktree?, paradigm?)` — Create worker, returns agent_id
 - `subagent_wait(agent_ids, timeout?)` — **Blocking**: wait until all specified agents complete
-- `subagent_status(agent_id, include_result?)` — Status + cost + optional result text
+- `subagent_status(agent_id?, include_result?)` — Status + cost + optional result text; omit agent_id to list all
 - `subagent_send(agent_id, prompt)` — Follow-up prompt (re-activates completed agents)
 - `subagent_stop(agent_id)` — Interrupt running worker
 - `subagent_diff(agent_id)` — Full git diff for worktree agent
 - `subagent_merge(agent_id)` — Squash-merge worktree into parent branch (staged, not committed)
+- `subagent_delete(agent_id)` — Delete completed/stopped/failed agent (destroys session + worktree)
+- `subagent_reclaim_respond(request_id, approve)` — Respond to slot reclamation request from another session
+- `session_info()` — Get metadata about the current session (ID, status, runtime, cost, working dir)
 
 **Paradigms**: `coder` (full access, auto-cleanup), `reviewer` (read-only, persistent, excludes vault/heartbeat/cron/ask_user), `researcher` (read-only, persistent, excludes vault/heartbeat/cron/ask_user). Custom paradigms via config with optional `exclude_mcp_servers`.
 
@@ -889,6 +895,31 @@ PM Claude → MCP tool(subagent_*) → bridge.call("subagent_*") → BridgeServe
 - **Auto-cleanup**: Completed workers are destroyed after `cleanup_delay` (default 120s). Store records persist for status queries after session destruction.
 
 **Storage**: `{state_dir}/subagent/agents.json` (flock-based, same pattern as HeartbeatStore/JobStore).
+
+### Existing Extension: session_ask
+
+Cross-session RPC. Sessions can ask questions to other sessions and wait for replies, enabling inter-session coordination.
+
+**Data flow**:
+```
+Session A → MCP tool(session_ask) → bridge.call("session_ask") → BridgeServer handler
+  → PendingStore.register + SessionManager.send_prompt(B, question)
+  → Session B receives question as prompt
+  → Session B calls MCP tool(session_reply) → bridge.call("session_reply")
+  → PendingStore.resolve → Session A unblocks with reply
+```
+
+**MCP Tools** (3):
+- `session_ask(target_session_id, question)` — Send question to another session and **block** until reply
+- `session_reply(request_id, reply)` — Reply to an inter-session question (called by the target session)
+- `session_list()` — List all active sessions for the current user (ID, name, slot, status)
+
+**Design**:
+- Uses PendingStore for async request/response (same pattern as ask_user)
+- Question is injected as a prompt into the target session via `send_prompt()`
+- Target session's reply is delivered via bridge RPC → `pending.resolve()`
+- Default timeout: 300s, configurable
+- Fail-closed validation: if the target session doesn't exist or is stopped, the request fails immediately
 
 ---
 
@@ -942,9 +973,27 @@ extensions:                       # Per-extension config
         working_dir: /path/to/project
         user_id: "123456789"
         notify_context: {chat_id: 123456789}
+  subagent:
+    max_subagents_per_session: 5  # Max concurrent workers per PM session
+    default_paradigm: coder       # Default paradigm for new workers
+    cleanup_delay: 120.0          # Seconds before auto-destroying completed workers
+  session_ask:
+    timeout: 300                  # Default timeout for inter-session questions
+    max_question_length: 2000     # Max characters for question text
 ```
 
 **Note: `config.yaml` contains sensitive information (bot token) and is excluded via `.gitignore`. Copy `config.yaml.example` and fill in actual values.**
+
+### SIGHUP Config Reload
+
+Sending SIGHUP to the main process triggers a live config reload without restart:
+
+1. Re-reads `config.yaml` from disk
+2. Updates `SessionManager.max_sessions_per_user` and `engine.max_turns`
+3. Calls `reconfigure(config)` on all loaded extensions (synchronous, signal-safe)
+4. Extensions can update their runtime settings without full restart
+
+The `reconfigure()` method on the `Extension` base class is a no-op by default; extensions override it to handle config changes they care about.
 
 ---
 

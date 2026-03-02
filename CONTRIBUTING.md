@@ -16,7 +16,7 @@ pip install -e ".[all,dev]"
 pytest -v
 ```
 
-All 239 tests should pass. Tests cover core stores, MCP handlers, extension lifecycle, and bridge communication.
+All 464 tests should pass. Tests cover core stores, MCP handlers, extension lifecycle, bridge communication, and signal handling.
 
 ## Code Style
 

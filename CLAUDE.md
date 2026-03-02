@@ -25,6 +25,7 @@ claude-ext/
 │   ├── cron/                # Scheduled tasks (croniter + MCP)
 │   ├── ask_user/            # Interactive questions (bridge + PendingStore)
 │   ├── subagent/            # Multi-agent orchestration (PM → worker sessions)
+│   ├── session_ask/         # Cross-session RPC (bridge + PendingStore)
 │   └── telegram/            # Telegram bot bridge (multi-session + streaming)
 ├── config.yaml              # Runtime config (.gitignored)
 ├── config.yaml.example      # Config template
@@ -134,10 +135,11 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 |-----------|-----------|---------------|
 | **vault** | `vault_store`, `vault_list`, `vault_retrieve`, `vault_delete` | Bridge RPC (passphrase never in MCP process) |
 | **memory** | `memory_read`, `memory_write`, `memory_append`, `memory_search`, `memory_list` | Direct file I/O (no bridge needed) |
-| **heartbeat** | `heartbeat_instructions`, `heartbeat_status`, `heartbeat_trigger`, `heartbeat_get_trigger_command` | Mixed (file I/O + bridge for trigger) |
+| **heartbeat** | `heartbeat_instructions`, `heartbeat_status`, `heartbeat_trigger`, `heartbeat_get_trigger_command`, `heartbeat_dry_run`, `heartbeat_set_verification` | Mixed (file I/O + bridge for trigger) |
 | **cron** | `cron_create`, `cron_delete`, `cron_status` | Bridge RPC |
 | **ask_user** | `ask_user` | Bridge RPC → PendingStore |
-| **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_diff`, `subagent_merge` | Bridge RPC → PendingStore + SessionManager |
+| **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_diff`, `subagent_merge`, `subagent_delete`, `subagent_reclaim_respond`, `session_info` | Bridge RPC → PendingStore + SessionManager |
+| **session_ask** | `session_ask`, `session_reply`, `session_list` | Bridge RPC → PendingStore + SessionManager |
 | **telegram** | (none — frontend only) | Delivery callbacks |
 
 ## Adding a New Extension
@@ -173,10 +175,11 @@ enabled:
   - vault       # Encrypted credential store
   - memory      # Cross-session memory
   - telegram    # Telegram bot frontend
-  # - heartbeat # Autonomous periodic agent
-  # - ask_user  # Interactive questions
-  # - cron      # Scheduled tasks
-  # - subagent  # Multi-agent orchestration
+  # - heartbeat    # Autonomous periodic agent
+  # - ask_user     # Interactive questions
+  # - cron         # Scheduled tasks
+  # - subagent     # Multi-agent orchestration
+  # - session_ask  # Cross-session RPC
 
 extensions:
   vault: {}           # Zero-config (passphrase auto-generated)

@@ -6,98 +6,116 @@ English | [中文](README.zh-CN.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
 
-Extensible framework for [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code). Claude Code is already a complete AI coding agent — this framework wraps the CLI and manages independent extensions, nothing more.
+Server-side framework that turns [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) into a programmable, always-on, multi-session agent platform. It wraps the official `claude` binary and manages independent extensions — nothing more.
 
 ## Why claude-ext
 
-### The subscription advantage
+### Subscription-based agent platform
 
-claude-ext invokes the official `claude` binary (`claude -p`) under the hood. This means it runs as a first-party Claude Code session, authenticated via your existing Claude subscription (Free, Pro, or Max plan OAuth).
+claude-ext invokes `claude -p` under the hood, running as a first-party Claude Code session authenticated via your existing subscription (Free, Pro, or Max plan OAuth). Other approaches — the [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview), custom API integrations, or third-party wrappers — must use API key authentication with pay-per-token billing.
 
-Other approaches — the [Agent SDK](https://platform.claude.com/docs/en/agent-sdk/overview), [OpenClaw](https://github.com/openclaw/openclaw), or any third-party tool calling the API directly — must use API key authentication with pay-per-token billing.
+For heavy agent workloads (autonomous heartbeat, multi-agent orchestration, scheduled tasks), this is a significant cost difference. A Max plan gives a flat monthly rate; equivalent API usage can easily exceed $3,000/month.
 
-For heavy agent workloads, this is a significant cost difference. A Max plan gives you a flat monthly rate, while API usage for similar workloads can easily exceed $3,000/month depending on volume.
+### Integrated infrastructure, not just a wrapper
 
-| | claude-ext | Agent SDK | OpenClaw |
-|---|---|---|---|
-| **Authentication** | Subscription OAuth (via CLI) | API key | API key |
-| **Billing model** | Flat monthly plan | Pay-per-token | Pay-per-token |
-| **How it works** | Wraps `claude -p` binary | Direct API calls | Direct API calls |
+Most Claude Code extension projects focus on a single concern — session management, Telegram bridging, or cron scheduling. claude-ext provides a **complete server-side infrastructure layer**:
+
+| Capability | What it does |
+|---|---|
+| **Multi-session management** | tmux-backed sessions with per-user slots, prompt queuing, crash recovery |
+| **MCP server injection** | Per-session MCP servers with dynamic tool registration |
+| **Bridge RPC** | Bidirectional Unix socket IPC between MCP child processes and main process |
+| **Extension lifecycle** | Dynamic discovery, hot-reload (SIGHUP), health checks, strict decoupling |
+| **Delivery callbacks** | Real-time streaming with structured metadata (cost, status, tool use) |
+| **Pending store** | Generic async request/response registry for cross-process coordination |
+
+These core primitives power 8 independent extensions that can be enabled/disabled via config.
 
 ### How it stays compliant
 
-claude-ext does not extract, store, or proxy OAuth tokens. It spawns the official `claude` CLI binary as a subprocess — the same binary you'd run in your terminal. The token handling is entirely within Anthropic's own code.
+claude-ext does not extract, store, or proxy OAuth tokens. It spawns the official `claude` CLI binary as a subprocess — the same binary you'd run in your terminal. Token handling is entirely within Anthropic's own code.
 
-Anthropic's [legal and compliance documentation](https://code.claude.com/docs/en/legal-and-compliance) states:
+> **Disclaimer**: Anthropic's terms and policies may change at any time. Check the [latest terms](https://code.claude.com/docs/en/legal-and-compliance) to confirm current policy.
 
-> **OAuth authentication** (used with Free, Pro, and Max plans) is intended exclusively for Claude Code and Claude.ai. Using OAuth tokens obtained through Claude Free, Pro, or Max accounts in any other product, tool, or service — including the Agent SDK — is not permitted and constitutes a violation of the Consumer Terms of Service.
-
-claude-ext delegates to Claude Code itself, which is exactly what OAuth tokens are intended for.
-
-> **Disclaimer**: Anthropic's terms and policies may change at any time. Always check the [latest terms](https://code.claude.com/docs/en/legal-and-compliance) to confirm current policy.
-
-## How It Works
+## Architecture
 
 ```
-User / Frontend (e.g. Telegram)
+User / Frontend (Telegram, CLI, ...)
         │
         ▼
    Extensions ──── config.yaml
         │
         ▼
-   ClaudeEngine
-   SessionManager
-   Bridge RPC
+   ClaudeEngine ─── Bridge RPC (Unix socket)
+   SessionManager   PendingStore
+   EventLog         Service Registry
         │
         ▼
    tmux sessions ──── MCP servers (per-session)
         │
         ▼
-   claude -p ──── file IPC (prompt → stream → result)
+   claude -p ──── file IPC (prompt → stream.jsonl → result)
 ```
-
-Each Claude Code session runs in its own tmux session, fully decoupled from the main process. Extensions communicate with sessions through file-based IPC and receive results via async delivery callbacks.
 
 **Key properties:**
 
-- **Crash-resilient** — tmux sessions survive main process restarts; recovery is automatic
-- **Multi-user** — per-user session slots with independent queues
-- **Dynamic extensions** — add/remove extensions without touching core or other extensions
-- **Bridge RPC** — MCP child processes call the main process via Unix socket (line-delimited JSON)
+- **Crash-resilient** — tmux sessions survive main process restarts; automatic recovery on startup
+- **Multi-user** — per-user session slots with independent prompt queues
+- **Dynamic extensions** — add/remove via `config.yaml`; no core or cross-extension changes
+- **SIGHUP reload** — update config without restart; extensions receive `reconfigure()` callback
+- **Usage-aware** — query auth status and API usage quotas for cost control
 - **Structured events** — JSONL event log with rotation for observability
-- **Usage-aware** — extensions can query auth status and API usage for cost control
-
-## Comparison
-
-| | claude-ext | Agent SDK | OpenClaw |
-|---|---|---|---|
-| **Authentication** | Subscription OAuth (via CLI) | API key | API key |
-| **Billing** | Flat monthly plan | Pay-per-token | Pay-per-token |
-| **Runtime** | tmux + `claude -p` subprocess | In-process API calls | In-process API calls |
-| **Language** | Python | TypeScript / Python | Python |
-| **Multi-session** | Yes (per-user slots, queue) | Manual | Manual |
-| **Tool system** | MCP servers (per-session) | Native tool_use | Skills (5700+) |
-| **Crash recovery** | Automatic (tmux survives) | Application-level | Application-level |
-| **Model support** | Claude only (via CLI) | Claude only (via API) | 12+ providers |
-
-**When to use what:**
-
-- **claude-ext** — You want autonomous Claude agents on subscription pricing, with multi-session management, and Claude Code's full built-in toolset (file editing, bash, etc.)
-- **Agent SDK** — You're building a product with Claude and need direct API control, custom tool definitions, and tight integration
-- **OpenClaw** — You need multi-provider support, a large skill library, or cross-platform frontends (Discord, Slack, Web, etc.)
-
-These are complementary tools for different use cases.
 
 ## Extensions
 
-| Extension | Description | Status |
-|-----------|------------|--------|
-| **telegram** | Telegram bot bridge. Multi-session management, streaming output, inline commands | Stable |
-| **vault** | Encrypted credential store (Fernet + PBKDF2). MCP tools for Claude to store/retrieve secrets | Stable |
-| **memory** | Cross-session persistent memory. Markdown files with MCP tools for read/write/search | Stable |
-| **heartbeat** | Autonomous periodic agent. Dual-channel scheduler + LLM decision + usage-aware cost control | Stable |
-| **cron** | Scheduled task execution. Static config + dynamic MCP-created jobs | Stable |
-| **ask_user** | Interactive questions from Claude to user during session execution | Stable |
+| Extension | MCP Tools | Description |
+|-----------|:---------:|-------------|
+| **vault** | 4 | Encrypted credential store (Fernet + PBKDF2). Passphrase never leaves main process |
+| **memory** | 5 | Cross-session persistent memory. Markdown files with FTS5 search |
+| **heartbeat** | 6 | Autonomous periodic agent. 3-tier execution (gate → LLM decision → session) with 5 safety valves |
+| **cron** | 3 | Scheduled task execution. Cron expressions + one-time delays, static or MCP-created |
+| **ask_user** | 1 | Interactive questions from Claude to user, with optional choice buttons |
+| **subagent** | 10 | Multi-agent orchestration. PM spawns worker sessions with paradigms + git worktree isolation |
+| **session_ask** | 3 | Cross-session RPC. Sessions ask questions to each other and wait for replies |
+| **telegram** | 0 | Telegram bot frontend. Multi-session, streaming output, inline commands |
+
+All extensions are fully independent — delete the directory + remove from `enabled` = zero impact.
+
+## Comparison
+
+### vs. Agent SDK / API-based tools
+
+| | claude-ext | Agent SDK | API wrappers |
+|---|---|---|---|
+| **Billing** | Flat subscription | Pay-per-token | Pay-per-token |
+| **Runtime** | tmux + `claude -p` | In-process API | In-process API |
+| **Multi-session** | Built-in (per-user slots, queue) | Manual | Manual |
+| **Tool system** | MCP servers (per-session injection) | Native tool_use | Varies |
+| **Crash recovery** | Automatic (tmux survives) | Application-level | Application-level |
+| **Model support** | Claude only (via CLI) | Claude only (via API) | Often multi-provider |
+
+### vs. Multi-agent orchestrators (Ruflo, Claude Squad, Overstory, etc.)
+
+Most orchestrators focus on coordinating multiple agents for development tasks. claude-ext is different — it provides the **infrastructure layer** beneath orchestration:
+
+| Capability | claude-ext | Typical orchestrators |
+|---|---|---|
+| **Session lifecycle** | Managed (create → queue → execute → recover) | Spawn and forget |
+| **MCP injection** | Per-session, dynamic | None or static |
+| **Bridge RPC** | Bidirectional (MCP ↔ main process) | None |
+| **Credential vault** | Built-in (encrypted, bridge-isolated) | None |
+| **Autonomous heartbeat** | 3-tier with usage throttling | Basic cron at best |
+| **Extension system** | Decoupled lifecycle with health checks | Monolithic |
+
+### vs. Official Claude Code plugins
+
+The [Claude Code plugin system](https://docs.anthropic.com/en/docs/claude-code) extends Claude Code from within a single session. claude-ext operates at a different level — it manages **multiple concurrent sessions** with server-side infrastructure (persistent state, credential vault, autonomous scheduling, cross-session coordination). They are complementary: claude-ext sessions can use Claude Code plugins.
+
+**When to use what:**
+
+- **claude-ext** — You want always-on autonomous agents on subscription pricing, with multi-session management and server-side infrastructure
+- **Agent SDK** — You're building a product with Claude and need direct API control and tight integration
+- **CC plugins** — You want to extend a single Claude Code session with custom tools and skills
 
 ## Quick Start
 
@@ -151,8 +169,8 @@ Then add it to the `enabled` list in `config.yaml`. No changes to core or other 
 
 ## Documentation
 
-- [Technical Reference](CLAUDE.md) — development guide and core APIs
-- [Architecture Deep Dive](docs/ARCHITECTURE.md) — full implementation details
+- [Architecture Deep Dive](docs/ARCHITECTURE.md) — full implementation details, core APIs, extension reference
+- [Technical Reference](CLAUDE.md) — quick development guide
 - [Roadmap](ROADMAP.md) — completed phases and planned features
 - [Contributing](CONTRIBUTING.md) — development setup, code style, PR process
 - [Security](SECURITY.md) — vulnerability reporting, security model
