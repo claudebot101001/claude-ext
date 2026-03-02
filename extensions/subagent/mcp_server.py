@@ -190,6 +190,27 @@ class SubAgentMCPServer(MCPServerBase):
             },
         },
         {
+            "name": "subagent_reclaim_respond",
+            "description": (
+                "Respond to a sub-agent slot reclamation request when another "
+                "session needs your idle sub-agent's slot."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "request_id": {
+                        "type": "string",
+                        "description": "The request_id from the reclamation request",
+                    },
+                    "approve": {
+                        "type": "boolean",
+                        "description": "True to approve deletion, False to deny",
+                    },
+                },
+                "required": ["request_id", "approve"],
+            },
+        },
+        {
             "name": "session_info",
             "description": (
                 "Get metadata about your own session: session ID, status, runtime, "
@@ -214,6 +235,7 @@ class SubAgentMCPServer(MCPServerBase):
             "subagent_diff": self._handle_diff,
             "subagent_merge": self._handle_merge,
             "subagent_delete": self._handle_delete,
+            "subagent_reclaim_respond": self._handle_reclaim_respond,
             "session_info": self._handle_session_info,
         }
 
@@ -433,6 +455,19 @@ class SubAgentMCPServer(MCPServerBase):
         if "error" in result:
             return f"Error: {result['error']}"
         return "Agent deleted."
+
+    def _handle_reclaim_respond(self, args: dict) -> str:
+        result = self._bridge_call(
+            "subagent_reclaim_respond",
+            {
+                "request_id": args.get("request_id", ""),
+                "approve": args.get("approve", False),
+            },
+        )
+        if "error" in result:
+            return f"Error: {result['error']}"
+        approved = result.get("approved", False)
+        return f"Reclamation {'approved' if approved else 'denied'}."
 
     # Context keys safe to expose (session-relevant, no routing data from other extensions)
     _CONTEXT_ALLOWLIST = {

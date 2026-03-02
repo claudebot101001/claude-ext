@@ -199,6 +199,10 @@ class ExtensionImpl(Extension):
                     "description": "Delete a completed/stopped/failed/merged sub-agent",
                 },
                 {
+                    "name": "subagent_reclaim_respond",
+                    "description": "Respond to a sub-agent slot reclamation request",
+                },
+                {
                     "name": "session_info",
                     "description": "Get metadata about your own session",
                 },
@@ -444,6 +448,7 @@ class ExtensionImpl(Extension):
             "subagent_diff": self._handle_diff,
             "subagent_merge": self._handle_merge,
             "subagent_delete": self._handle_delete,
+            "subagent_reclaim_respond": self._handle_reclaim_respond,
         }
         handler = handlers.get(method)
         if handler is None:
@@ -915,23 +920,135 @@ class ExtensionImpl(Extension):
 
     # -- slot reclamation ----------------------------------------------------
 
+    _RECLAIM_TIMEOUT = 30.0  # seconds to wait for cross-session approval
+
     async def _reclaim_session(self, user_id: str, parent_session_id: str) -> bool:
-        """Try to destroy a completed sub-agent session to free a slot."""
-        for s in self.sm.get_sessions_for_user(user_id):
-            # Only reclaim sub-agent sessions (or auto-cleanup heartbeat/cron)
+        """Try to destroy a completed sub-agent session to free a slot.
+
+        Phase 1 (immediate): reclaim own subagent workers or any auto-cleanup
+        session without confirmation.
+
+        Phase 2 (negotiated): if phase 1 finds nothing, ask another parent
+        session for permission to reclaim their idle subagent via PendingStore.
+        """
+        user_sessions = self.sm.get_sessions_for_user(user_id)
+
+        # Phase 1: immediate reclamation (own workers + auto-cleanup sessions)
+        for s in user_sessions:
             if s.id == parent_session_id:
                 continue
-            is_subagent = s.context.get("subagent_worker")
+            if s.status not in (SessionStatus.IDLE, SessionStatus.STOPPED):
+                continue
+            is_own_subagent = (
+                s.context.get("subagent_worker")
+                and s.context.get("subagent_parent_id") == parent_session_id
+            )
             is_auto_cleanup = (
                 s.context.get("subagent_auto_cleanup")
                 or s.context.get("heartbeat_auto_cleanup")
                 or s.context.get("cron_auto_cleanup")
             )
-            if (is_subagent or is_auto_cleanup) and s.status in (
-                SessionStatus.IDLE,
-                SessionStatus.STOPPED,
-            ):
+            if is_own_subagent or is_auto_cleanup:
                 await self.sm.destroy_session(s.id)
                 log.info("Reclaimed session %s to free slot for sub-agent", s.id[:8])
                 return True
+
+        # Phase 2: negotiate with another parent to reclaim their idle worker
+        for s in user_sessions:
+            if s.id == parent_session_id:
+                continue
+            if not s.context.get("subagent_worker"):
+                continue
+            if s.status not in (SessionStatus.IDLE, SessionStatus.STOPPED):
+                continue
+
+            other_parent_id = s.context.get("subagent_parent_id")
+            if not other_parent_id or other_parent_id == parent_session_id:
+                continue  # own worker (handled in phase 1) or orphan
+
+            # Only attempt if the other parent is IDLE (can respond promptly)
+            other_parent = self.sm.sessions.get(other_parent_id)
+            if not other_parent or other_parent.status != SessionStatus.IDLE:
+                continue
+
+            approved = await self._negotiate_reclaim(s, other_parent_id)
+            if approved:
+                await self.sm.destroy_session(s.id)
+                log.info(
+                    "Reclaimed negotiated session %s from parent %s",
+                    s.id[:8],
+                    other_parent_id[:8],
+                )
+                return True
+
         return False
+
+    async def _negotiate_reclaim(self, candidate, parent_session_id: str) -> bool:
+        """Ask another parent session for permission to reclaim their idle subagent."""
+        agent = self._store.get_agent(candidate.id)
+        agent_name = agent.name if agent else candidate.id[:8]
+
+        entry = self.engine.pending.register(
+            session_id=parent_session_id,
+            data={"type": "subagent_reclaim", "candidate_id": candidate.id},
+            timeout=self._RECLAIM_TIMEOUT,
+        )
+
+        prompt = (
+            f"## Sub-agent Slot Reclamation Request [request_id: {entry.key}]\n\n"
+            f"Another session needs a slot to spawn a new sub-agent.\n"
+            f"Your idle sub-agent '{agent_name}' (ID: {candidate.id[:8]}, "
+            f"status: {candidate.status.value}) is a candidate for deletion.\n\n"
+            f"---\n"
+            f"You MUST respond using the `subagent_reclaim_respond` MCP tool:\n"
+            f'Call: subagent_reclaim_respond(request_id="{entry.key}", approve=true)\n'
+            f"to approve, or approve=false to deny.\n"
+            f"If you do not respond within {int(self._RECLAIM_TIMEOUT)} seconds, "
+            f"the request will be denied automatically."
+        )
+
+        try:
+            await self.sm.send_prompt(parent_session_id, prompt)
+        except (KeyError, RuntimeError) as e:
+            log.warning("Failed to send reclaim request to %s: %s", parent_session_id[:8], e)
+            self.engine.pending.resolve(entry.key, None)
+            self.engine.pending._entries.pop(entry.key, None)
+            return False
+
+        try:
+            result = await self.engine.pending.wait(entry.key)
+            return isinstance(result, dict) and bool(result.get("approved"))
+        except (TimeoutError, asyncio.CancelledError):
+            return False
+
+    async def _handle_reclaim_respond(self, params: dict) -> dict:
+        """Handle response to a slot reclamation request."""
+        request_id = params.get("request_id", "")
+        approve = params.get("approve", False)
+        session_id = params.get("session_id", "")
+
+        if not request_id:
+            return {"error": "request_id is required"}
+
+        entry = self.engine.pending.get(request_id)
+        if not entry:
+            return {"error": f"No pending request with ID {request_id}. It may have timed out."}
+
+        if entry.data.get("type") != "subagent_reclaim":
+            return {"error": "Request ID does not correspond to a reclamation request"}
+
+        if entry.session_id != session_id:
+            return {
+                "error": f"This request was directed to session "
+                f"{entry.session_id[:8]}, not you ({session_id[:8]})"
+            }
+
+        if self.engine.pending.resolve(request_id, {"approved": approve}):
+            log.info(
+                "Reclaim request %s %s by session %s",
+                request_id[:8],
+                "approved" if approve else "denied",
+                session_id[:8],
+            )
+            return {"resolved": True, "approved": approve}
+        return {"error": "Request already resolved or expired"}

@@ -1029,6 +1029,352 @@ class TestSlotReclamation:
 
         asyncio.run(_test())
 
+    def test_reclaim_prefers_own_over_others(self, ext):
+        """Phase 1 (own worker) should be preferred over phase 2 (negotiation)."""
+
+        async def _test():
+            await ext.start()
+            # Own idle worker
+            own = _mock_session(
+                session_id="own-worker",
+                context={
+                    "subagent_worker": True,
+                    "subagent_parent_id": "parent-001",
+                },
+                status=SessionStatus.IDLE,
+            )
+            # Another parent's idle worker
+            other = _mock_session(
+                session_id="other-worker",
+                context={
+                    "subagent_worker": True,
+                    "subagent_parent_id": "parent-002",
+                },
+                status=SessionStatus.IDLE,
+            )
+            ext.sm.get_sessions_for_user = MagicMock(return_value=[own, other])
+
+            reclaimed = await ext._reclaim_session("user-1", "parent-001")
+            assert reclaimed is True
+            # Should reclaim own worker, not negotiate with other parent
+            ext.sm.destroy_session.assert_called_once_with("own-worker")
+
+        asyncio.run(_test())
+
+    def test_reclaim_negotiates_with_other_parent(self, ext):
+        """Phase 2: negotiates with other parent when no own sessions to reclaim."""
+
+        async def _test():
+            await ext.start()
+            # Another parent's idle worker (not auto-cleanup, not own)
+            other_worker = _mock_session(
+                session_id="other-worker",
+                context={
+                    "subagent_worker": True,
+                    "subagent_parent_id": "parent-002",
+                },
+                status=SessionStatus.IDLE,
+            )
+            other_parent = _mock_session(
+                session_id="parent-002",
+                status=SessionStatus.IDLE,
+            )
+            ext.sm.get_sessions_for_user = MagicMock(return_value=[other_worker])
+            ext.sm.sessions["parent-002"] = other_parent
+
+            # Store agent record for the other worker
+            ext._store.add_agent(
+                SubAgent(
+                    id="other-worker",
+                    parent_session_id="parent-002",
+                    name="old-task",
+                    task="t",
+                    paradigm="coder",
+                    user_id="user-1",
+                    working_dir="/tmp",
+                    status="completed",
+                )
+            )
+
+            # Simulate approval: resolve pending after send_prompt is called
+            async def auto_approve(session_id, prompt):
+                # Find and approve the pending entry
+                for entry in ext.engine.pending._entries.values():
+                    if (
+                        entry.data.get("type") == "subagent_reclaim"
+                        and entry.session_id == session_id
+                    ):
+                        ext.engine.pending.resolve(entry.key, {"approved": True})
+                        break
+                return 0
+
+            ext.sm.send_prompt = AsyncMock(side_effect=auto_approve)
+
+            reclaimed = await ext._reclaim_session("user-1", "parent-001")
+            assert reclaimed is True
+            ext.sm.destroy_session.assert_called_once_with("other-worker")
+            ext.sm.send_prompt.assert_called_once()
+            # Verify prompt was sent to the other parent
+            call_args = ext.sm.send_prompt.call_args
+            assert call_args[0][0] == "parent-002"
+            assert "Reclamation Request" in call_args[0][1]
+
+        asyncio.run(_test())
+
+    def test_reclaim_negotiation_denied(self, ext):
+        """Phase 2: denied negotiation returns False."""
+
+        async def _test():
+            await ext.start()
+            other_worker = _mock_session(
+                session_id="other-worker",
+                context={
+                    "subagent_worker": True,
+                    "subagent_parent_id": "parent-002",
+                },
+                status=SessionStatus.IDLE,
+            )
+            other_parent = _mock_session(
+                session_id="parent-002",
+                status=SessionStatus.IDLE,
+            )
+            ext.sm.get_sessions_for_user = MagicMock(return_value=[other_worker])
+            ext.sm.sessions["parent-002"] = other_parent
+
+            ext._store.add_agent(
+                SubAgent(
+                    id="other-worker",
+                    parent_session_id="parent-002",
+                    name="old-task",
+                    task="t",
+                    paradigm="coder",
+                    user_id="user-1",
+                    working_dir="/tmp",
+                    status="completed",
+                )
+            )
+
+            async def auto_deny(session_id, prompt):
+                for entry in ext.engine.pending._entries.values():
+                    if entry.data.get("type") == "subagent_reclaim":
+                        ext.engine.pending.resolve(entry.key, {"approved": False})
+                        break
+                return 0
+
+            ext.sm.send_prompt = AsyncMock(side_effect=auto_deny)
+
+            reclaimed = await ext._reclaim_session("user-1", "parent-001")
+            assert reclaimed is False
+            ext.sm.destroy_session.assert_not_called()
+
+        asyncio.run(_test())
+
+    def test_reclaim_negotiation_timeout(self, ext):
+        """Phase 2: timeout returns False without destroying."""
+
+        async def _test():
+            await ext.start()
+            ext._RECLAIM_TIMEOUT = 0.1  # very short for test
+
+            other_worker = _mock_session(
+                session_id="other-worker",
+                context={
+                    "subagent_worker": True,
+                    "subagent_parent_id": "parent-002",
+                },
+                status=SessionStatus.IDLE,
+            )
+            other_parent = _mock_session(
+                session_id="parent-002",
+                status=SessionStatus.IDLE,
+            )
+            ext.sm.get_sessions_for_user = MagicMock(return_value=[other_worker])
+            ext.sm.sessions["parent-002"] = other_parent
+
+            ext._store.add_agent(
+                SubAgent(
+                    id="other-worker",
+                    parent_session_id="parent-002",
+                    name="old-task",
+                    task="t",
+                    paradigm="coder",
+                    user_id="user-1",
+                    working_dir="/tmp",
+                    status="completed",
+                )
+            )
+
+            # Don't resolve — let it timeout
+            ext.sm.send_prompt = AsyncMock(return_value=0)
+
+            reclaimed = await ext._reclaim_session("user-1", "parent-001")
+            assert reclaimed is False
+            ext.sm.destroy_session.assert_not_called()
+
+        asyncio.run(_test())
+
+    def test_reclaim_skips_busy_other_parent(self, ext):
+        """Phase 2: skip negotiation if other parent is BUSY."""
+
+        async def _test():
+            await ext.start()
+            other_worker = _mock_session(
+                session_id="other-worker",
+                context={
+                    "subagent_worker": True,
+                    "subagent_parent_id": "parent-002",
+                },
+                status=SessionStatus.IDLE,
+            )
+            busy_parent = _mock_session(
+                session_id="parent-002",
+                status=SessionStatus.BUSY,
+            )
+            ext.sm.get_sessions_for_user = MagicMock(return_value=[other_worker])
+            ext.sm.sessions["parent-002"] = busy_parent
+
+            reclaimed = await ext._reclaim_session("user-1", "parent-001")
+            assert reclaimed is False
+            ext.sm.send_prompt.assert_not_called()
+
+        asyncio.run(_test())
+
+    def test_reclaim_send_prompt_failure(self, ext):
+        """Phase 2: if send_prompt fails, return False gracefully."""
+
+        async def _test():
+            await ext.start()
+            other_worker = _mock_session(
+                session_id="other-worker",
+                context={
+                    "subagent_worker": True,
+                    "subagent_parent_id": "parent-002",
+                },
+                status=SessionStatus.IDLE,
+            )
+            other_parent = _mock_session(
+                session_id="parent-002",
+                status=SessionStatus.IDLE,
+            )
+            ext.sm.get_sessions_for_user = MagicMock(return_value=[other_worker])
+            ext.sm.sessions["parent-002"] = other_parent
+
+            ext._store.add_agent(
+                SubAgent(
+                    id="other-worker",
+                    parent_session_id="parent-002",
+                    name="old-task",
+                    task="t",
+                    paradigm="coder",
+                    user_id="user-1",
+                    working_dir="/tmp",
+                    status="completed",
+                )
+            )
+
+            ext.sm.send_prompt = AsyncMock(side_effect=RuntimeError("Session gone"))
+
+            reclaimed = await ext._reclaim_session("user-1", "parent-001")
+            assert reclaimed is False
+            ext.sm.destroy_session.assert_not_called()
+
+        asyncio.run(_test())
+
+
+# -- Bridge handler: reclaim_respond ----------------------------------------
+
+
+class TestReclaimRespond:
+    def test_respond_missing_request_id(self, ext):
+        async def _test():
+            await ext.start()
+            result = await ext._handle_reclaim_respond({"session_id": "s1", "approve": True})
+            assert "error" in result
+            assert "request_id" in result["error"]
+
+        asyncio.run(_test())
+
+    def test_respond_unknown_request_id(self, ext):
+        async def _test():
+            await ext.start()
+            result = await ext._handle_reclaim_respond(
+                {"session_id": "s1", "request_id": "nonexistent", "approve": True}
+            )
+            assert "error" in result
+            assert "timed out" in result["error"]
+
+        asyncio.run(_test())
+
+    def test_respond_wrong_type(self, ext):
+        async def _test():
+            await ext.start()
+            entry = ext.engine.pending.register(session_id="s1", data={"type": "ask_user"})
+            result = await ext._handle_reclaim_respond(
+                {"session_id": "s1", "request_id": entry.key, "approve": True}
+            )
+            assert "error" in result
+            assert "does not correspond" in result["error"]
+
+        asyncio.run(_test())
+
+    def test_respond_wrong_session(self, ext):
+        async def _test():
+            await ext.start()
+            entry = ext.engine.pending.register(session_id="s1", data={"type": "subagent_reclaim"})
+            result = await ext._handle_reclaim_respond(
+                {"session_id": "s2", "request_id": entry.key, "approve": True}
+            )
+            assert "error" in result
+            assert "not you" in result["error"]
+
+        asyncio.run(_test())
+
+    def test_respond_approve(self, ext):
+        async def _test():
+            await ext.start()
+            entry = ext.engine.pending.register(
+                session_id="s1",
+                data={"type": "subagent_reclaim", "candidate_id": "w1"},
+            )
+            result = await ext._handle_reclaim_respond(
+                {"session_id": "s1", "request_id": entry.key, "approve": True}
+            )
+            assert result["resolved"] is True
+            assert result["approved"] is True
+
+        asyncio.run(_test())
+
+    def test_respond_deny(self, ext):
+        async def _test():
+            await ext.start()
+            entry = ext.engine.pending.register(
+                session_id="s1",
+                data={"type": "subagent_reclaim", "candidate_id": "w1"},
+            )
+            result = await ext._handle_reclaim_respond(
+                {"session_id": "s1", "request_id": entry.key, "approve": False}
+            )
+            assert result["resolved"] is True
+            assert result["approved"] is False
+
+        asyncio.run(_test())
+
+    def test_respond_already_resolved(self, ext):
+        async def _test():
+            await ext.start()
+            entry = ext.engine.pending.register(
+                session_id="s1",
+                data={"type": "subagent_reclaim", "candidate_id": "w1"},
+            )
+            ext.engine.pending.resolve(entry.key, {"approved": True})
+            result = await ext._handle_reclaim_respond(
+                {"session_id": "s1", "request_id": entry.key, "approve": True}
+            )
+            assert "error" in result
+            assert "already resolved" in result["error"]
+
+        asyncio.run(_test())
+
 
 # -- Bridge handler: diff ---------------------------------------------------
 
