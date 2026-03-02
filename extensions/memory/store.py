@@ -22,6 +22,7 @@ bridge layer.
 
 import contextlib
 import fcntl
+import json
 import logging
 import re
 import sqlite3
@@ -35,6 +36,7 @@ _MAX_READ_SIZE = 512 * 1024  # 512 KB
 _MAX_SEARCH_RESULTS = 50
 _LOCK_FILE = "memory.lock"
 _INDEX_DB = ".search_index.db"
+_EXPIRY_FILE = ".expiry.json"
 _HEADING_RE = re.compile(r"^(#{1,4})\s+(.+)$")
 _CODE_FENCE_RE = re.compile(r"^```")
 _SNIPPET_MAX = 500
@@ -380,8 +382,15 @@ class MemoryStore:
                 log.warning("File %s exceeds max read size (%d > %d)", path, size, _MAX_READ_SIZE)
             return resolved.read_text(encoding="utf-8")[:_MAX_READ_SIZE]
 
-    def write(self, path: str, content: str) -> int:
+    def write(self, path: str, content: str, expires: str | None = None) -> int:
         """Atomically overwrite a memory file. Creates parent dirs as needed.
+
+        Args:
+            path: Relative path to the memory file.
+            content: Full content to write.
+            expires: Optional ISO 8601 expiry timestamp. File will be eligible
+                     for cleanup after this time. Pass None to clear any
+                     existing expiry.
 
         Returns the number of bytes written.
         """
@@ -392,14 +401,28 @@ class MemoryStore:
             data = content.encode("utf-8")
             tmp.write_bytes(data)
             tmp.rename(resolved)
+            if expires:
+                self._set_expiry_locked(path, expires)
+            else:
+                self._clear_expiry_locked(path)
         self._index.invalidate_file(path)
         log.info("Memory: wrote %d bytes to %s", len(data), path)
         return len(data)
 
-    def append(self, path: str, content: str, timestamp: bool = True) -> int:
+    def append(
+        self, path: str, content: str, timestamp: bool = True, expires: str | None = None
+    ) -> int:
         """Append content to a memory file with optional UTC timestamp.
 
         Creates the file and parent dirs if they don't exist.
+
+        Args:
+            path: Relative path to the memory file.
+            content: Content to append.
+            timestamp: Whether to prepend a UTC timestamp line.
+            expires: Optional ISO 8601 expiry timestamp. Sets or updates
+                     the file's expiry. Only the latest expiry value is kept.
+
         Returns the number of bytes appended.
         """
         resolved = self._safe_resolve(path)
@@ -416,9 +439,94 @@ class MemoryStore:
             data = chunk.encode("utf-8")
             with open(resolved, "a", encoding="utf-8") as f:
                 f.write(chunk)
+            if expires:
+                self._set_expiry_locked(path, expires)
         self._index.invalidate_file(path)
         log.info("Memory: appended %d bytes to %s", len(data), path)
         return len(data)
+
+    def cleanup_expired(self) -> list[str]:
+        """Remove memory files whose expiry timestamp has passed.
+
+        Returns list of deleted relative paths.  Safe to call frequently;
+        no-op when nothing is expired.
+        """
+        now = datetime.now(UTC)
+        deleted: list[str] = []
+        with self._exclusive_lock():
+            expiry_map = self._read_expiry_locked()
+            if not expiry_map:
+                return []
+            remaining = {}
+            for path, ts_str in expiry_map.items():
+                try:
+                    expires_at = datetime.fromisoformat(ts_str)
+                except (ValueError, TypeError):
+                    log.warning("Invalid expiry timestamp for %s: %s, removing entry", path, ts_str)
+                    continue
+                if expires_at <= now:
+                    # Delete the file if it exists
+                    try:
+                        resolved = self._safe_resolve(path)
+                        if resolved.exists():
+                            resolved.unlink()
+                            self._index.invalidate_file(path)
+                            log.info("Memory: expired and deleted %s", path)
+                        deleted.append(path)
+                    except (ValueError, OSError) as e:
+                        log.warning("Failed to delete expired file %s: %s", path, e)
+                else:
+                    remaining[path] = ts_str
+            self._write_expiry_locked(remaining)
+        return deleted
+
+    def get_expiry(self, path: str) -> str | None:
+        """Return the ISO 8601 expiry timestamp for a file, or None."""
+        with self._shared_lock():
+            expiry_map = self._read_expiry_locked()
+            return expiry_map.get(path)
+
+    # -- expiry internals (must be called under lock) -----------------------
+
+    def _read_expiry_locked(self) -> dict[str, str]:
+        """Read the expiry map from disk. Returns empty dict on any error."""
+        expiry_path = self.memory_dir / _EXPIRY_FILE
+        if not expiry_path.exists():
+            return {}
+        try:
+            data = expiry_path.read_text(encoding="utf-8")
+            return json.loads(data) if data.strip() else {}
+        except (json.JSONDecodeError, OSError):
+            log.warning("Corrupt expiry file, resetting")
+            return {}
+
+    def _write_expiry_locked(self, expiry_map: dict[str, str]) -> None:
+        """Atomically write the expiry map to disk."""
+        expiry_path = self.memory_dir / _EXPIRY_FILE
+        if not expiry_map:
+            expiry_path.unlink(missing_ok=True)
+            return
+        tmp = expiry_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(expiry_map, indent=2), encoding="utf-8")
+        tmp.rename(expiry_path)
+
+    def _set_expiry_locked(self, path: str, expires: str) -> None:
+        """Set expiry for a path. Validates the timestamp format."""
+        # Validate ISO 8601
+        try:
+            datetime.fromisoformat(expires)
+        except ValueError as e:
+            raise ValueError(f"Invalid expiry timestamp: {expires!r} ({e})") from e
+        expiry_map = self._read_expiry_locked()
+        expiry_map[path] = expires
+        self._write_expiry_locked(expiry_map)
+
+    def _clear_expiry_locked(self, path: str) -> None:
+        """Remove expiry for a path (if any)."""
+        expiry_map = self._read_expiry_locked()
+        if path in expiry_map:
+            del expiry_map[path]
+            self._write_expiry_locked(expiry_map)
 
     def search(self, query: str, glob_pattern: str = "**/*.md") -> list[dict]:
         """Search memory files by keyword (FTS5) or regex pattern.

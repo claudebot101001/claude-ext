@@ -55,6 +55,10 @@ class MemoryMCPServer(MCPServerBase):
                         "type": "string",
                         "description": "Full content to write",
                     },
+                    "expires": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 expiry timestamp (e.g. '2025-02-01T00:00:00Z'). File auto-deleted after this time.",
+                    },
                 },
                 "required": ["path", "content"],
             },
@@ -75,6 +79,10 @@ class MemoryMCPServer(MCPServerBase):
                     "content": {
                         "type": "string",
                         "description": "Content to append",
+                    },
+                    "expires": {
+                        "type": "string",
+                        "description": "Optional ISO 8601 expiry timestamp. Sets/updates the file's expiry.",
                     },
                 },
                 "required": ["path", "content"],
@@ -151,30 +159,38 @@ class MemoryMCPServer(MCPServerBase):
     def _handle_write(self, args: dict) -> str:
         path = args.get("path")
         content = args.get("content")
+        expires = args.get("expires")
         if not path:
             return "Error: 'path' is required."
         if content is None:
             return "Error: 'content' is required."
         store = self._get_store()
         try:
-            nbytes = store.write(path, content)
+            nbytes = store.write(path, content, expires=expires)
         except ValueError as e:
             return f"Error: {e}"
-        return f"Written {nbytes} bytes to {path}"
+        msg = f"Written {nbytes} bytes to {path}"
+        if expires:
+            msg += f" (expires: {expires})"
+        return msg
 
     def _handle_append(self, args: dict) -> str:
         path = args.get("path")
         content = args.get("content")
+        expires = args.get("expires")
         if not path:
             return "Error: 'path' is required."
         if content is None:
             return "Error: 'content' is required."
         store = self._get_store()
         try:
-            nbytes = store.append(path, content)
+            nbytes = store.append(path, content, expires=expires)
         except ValueError as e:
             return f"Error: {e}"
-        return f"Appended {nbytes} bytes to {path}"
+        msg = f"Appended {nbytes} bytes to {path}"
+        if expires:
+            msg += f" (expires: {expires})"
+        return msg
 
     def _handle_search(self, args: dict) -> str:
         query = args.get("query")
