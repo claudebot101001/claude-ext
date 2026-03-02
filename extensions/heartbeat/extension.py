@@ -292,6 +292,15 @@ class ExtensionImpl(Extension):
         # 8. Delivery callback
         self.sm.add_delivery_callback(self._on_delivery)
 
+        # 8b. Re-schedule cleanup for orphaned heartbeat sessions
+        for sid, session in list(self.sm.sessions.items()):
+            if session.context.get("heartbeat_auto_cleanup") and session.status in (
+                SessionStatus.IDLE,
+                SessionStatus.STOPPED,
+            ):
+                asyncio.create_task(self._delayed_cleanup(sid))
+                log.info("Re-scheduled cleanup for orphaned session %s", sid[:8])
+
         # 9. Seed HEARTBEAT.md
         if not (heartbeat_dir / "HEARTBEAT.md").exists():
             self._store.write_instructions(_SEED_INSTRUCTIONS)
