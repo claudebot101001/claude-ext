@@ -235,8 +235,7 @@ class ExtensionImpl(Extension):
             # Clean up both _active_asks and the PendingStore entry directly
             # (we never call wait(), so its finally-block won't run to clean up).
             self._active_asks.pop(entry.key, None)
-            pending.resolve(entry.key, None)
-            pending._entries.pop(entry.key, None)
+            pending.remove(entry.key)
             return {"error": f"Failed to deliver question: {e}"}
 
         # Log event

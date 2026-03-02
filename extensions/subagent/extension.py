@@ -1011,8 +1011,7 @@ class ExtensionImpl(Extension):
             await self.sm.send_prompt(parent_session_id, prompt)
         except (KeyError, RuntimeError) as e:
             log.warning("Failed to send reclaim request to %s: %s", parent_session_id[:8], e)
-            self.engine.pending.resolve(entry.key, None)
-            self.engine.pending._entries.pop(entry.key, None)
+            self.engine.pending.remove(entry.key)
             return False
 
         try:

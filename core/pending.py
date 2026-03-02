@@ -88,6 +88,19 @@ class PendingStore:
                 cancelled += 1
         return cancelled
 
+    def remove(self, key: str) -> bool:
+        """Cancel and remove a pending entry (e.g. when send_prompt fails).
+
+        Resolves the future with ``None`` so any waiter won't hang, then
+        removes the entry.  Returns True if the entry existed.
+        """
+        entry = self._entries.pop(key, None)
+        if entry is None:
+            return False
+        if not entry.future.done():
+            entry.future.set_result(None)
+        return True
+
     def get(self, key: str) -> PendingEntry | None:
         return self._entries.get(key)
 
