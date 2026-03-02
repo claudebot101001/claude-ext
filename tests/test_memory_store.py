@@ -23,8 +23,8 @@ def store(memory_dir):
 
 class TestMemoryStoreBasics:
     def test_write_and_read(self, store):
-        store.write("MEMORY.md", "# Hello\nWorld")
-        assert store.read("MEMORY.md") == "# Hello\nWorld"
+        store.write("notes.md", "# Hello\nWorld")
+        assert store.read("notes.md") == "# Hello\nWorld"
 
     def test_read_missing_returns_none(self, store):
         assert store.read("nonexistent.md") is None
@@ -187,15 +187,15 @@ class TestMemoryStoreSearch:
 
 class TestMemoryStoreList:
     def test_list_all(self, store):
-        store.write("MEMORY.md", "index")
+        store.write("notes.md", "index")
         store.write("topics/python.md", "python notes")
         files = store.list_files()
         assert len(files) == 2
         paths = {f["path"] for f in files}
-        assert paths == {"MEMORY.md", "topics/python.md"}
+        assert paths == {"notes.md", "topics/python.md"}
 
     def test_list_subdir(self, store):
-        store.write("MEMORY.md", "index")
+        store.write("notes.md", "index")
         store.write("topics/a.md", "a")
         store.write("topics/b.md", "b")
         files = store.list_files("topics")
@@ -320,7 +320,7 @@ class TestMemoryStoreEdgeCases:
         assert "line3" in content
 
     def test_write_then_search(self, store):
-        store.write("MEMORY.md", "# Important: use pytest")
+        store.write("notes.md", "# Important: use pytest")
         store.write("topics/tools.md", "pytest and mypy are useful")
         results = store.search("pytest")
         assert len(results) == 2

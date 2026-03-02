@@ -20,8 +20,8 @@ def mcp(memory_dir, monkeypatch):
 
 class TestMemoryMCPRead:
     def test_read_existing_file(self, mcp, memory_dir):
-        (memory_dir / "MEMORY.md").write_text("# Hello", encoding="utf-8")
-        result = mcp.handlers["memory_read"]({"path": "MEMORY.md"})
+        (memory_dir / "notes.md").write_text("# Hello", encoding="utf-8")
+        result = mcp.handlers["memory_read"]({"path": "notes.md"})
         assert result == "# Hello"
 
     def test_read_missing_file(self, mcp):
@@ -137,4 +137,4 @@ class TestMemoryMCPNoEnv:
         # RuntimeError from _get_store is caught by MCPServerBase protocol layer,
         # but at handler level it propagates. Verify it raises.
         with pytest.raises(RuntimeError, match="MEMORY_DIR"):
-            server.handlers["memory_read"]({"path": "MEMORY.md"})
+            server.handlers["memory_read"]({"path": "notes.md"})
