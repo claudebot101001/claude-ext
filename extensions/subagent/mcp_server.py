@@ -170,6 +170,24 @@ class SubAgentMCPServer(MCPServerBase):
                 "required": ["agent_id"],
             },
         },
+        {
+            "name": "subagent_delete",
+            "description": (
+                "Delete a completed/stopped/failed/merged sub-agent. "
+                "Destroys session, cleans up worktree if present, and removes the record. "
+                "Cannot delete running agents — stop them first."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent ID to delete",
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        },
     ]
 
     def __init__(self):
@@ -182,6 +200,7 @@ class SubAgentMCPServer(MCPServerBase):
             "subagent_stop": self._handle_stop,
             "subagent_diff": self._handle_diff,
             "subagent_merge": self._handle_merge,
+            "subagent_delete": self._handle_delete,
         }
 
     def _bridge_call(self, method: str, extra_params: dict, timeout: float = 60) -> dict:
@@ -389,6 +408,17 @@ class SubAgentMCPServer(MCPServerBase):
         lines.append("")
         lines.append(result.get("note", "Review and commit manually."))
         return "\n".join(lines)
+
+    def _handle_delete(self, args: dict) -> str:
+        result = self._bridge_call(
+            "subagent_delete",
+            {
+                "agent_id": args.get("agent_id", ""),
+            },
+        )
+        if "error" in result:
+            return f"Error: {result['error']}"
+        return "Agent deleted."
 
 
 if __name__ == "__main__":

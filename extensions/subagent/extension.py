@@ -58,7 +58,7 @@ You have sub-agent orchestration tools available. Use them to delegate tasks \
 to independent worker sessions that run in parallel.
 
 Tools: subagent_spawn, subagent_wait, subagent_status, \
-subagent_send, subagent_stop, subagent_diff, subagent_merge.
+subagent_send, subagent_stop, subagent_diff, subagent_merge, subagent_delete.
 
 Workflow: spawn workers → wait for completion → review diffs → merge → commit.
 
@@ -193,6 +193,10 @@ class ExtensionImpl(Extension):
                 {
                     "name": "subagent_merge",
                     "description": "Squash-merge sub-agent worktree into parent branch",
+                },
+                {
+                    "name": "subagent_delete",
+                    "description": "Delete a completed/stopped/failed/merged sub-agent",
                 },
             ],
         )
@@ -435,6 +439,7 @@ class ExtensionImpl(Extension):
             "subagent_list": self._handle_list,
             "subagent_diff": self._handle_diff,
             "subagent_merge": self._handle_merge,
+            "subagent_delete": self._handle_delete,
         }
         handler = handlers.get(method)
         if handler is None:
@@ -845,6 +850,64 @@ class ExtensionImpl(Extension):
             "staged_files": result.get("staged_files", []),
             "note": "Changes are staged but NOT committed. Review and commit manually.",
         }
+
+    # -- delete --------------------------------------------------------------
+
+    async def _handle_delete(self, params: dict) -> dict:
+        agent_id = params.get("agent_id", "")
+
+        agent = self._store.get_agent(agent_id)
+        if not agent:
+            return {"error": f"Agent {agent_id[:8]} not found"}
+        if agent.status in ("pending", "running"):
+            return {"error": f"Cannot delete agent in status '{agent.status}'. Stop it first."}
+
+        # 1. Cleanup worktree if present
+        if agent.worktree_enabled and agent.worktree_path and Path(agent.worktree_path).exists():
+            parent_session = self.sm.sessions.get(agent.parent_session_id)
+            if parent_session:
+                repo_dir = parent_session.working_dir
+            else:
+                from extensions.subagent.worktree import _run as _git_run
+
+                rc, repo_path, _ = await _git_run(
+                    ["git", "rev-parse", "--git-common-dir"],
+                    cwd=agent.worktree_path,
+                )
+                if rc == 0 and repo_path:
+                    repo_dir = str(Path(repo_path).parent)
+                else:
+                    repo_dir = None
+
+            if repo_dir:
+                try:
+                    await cleanup_worktree(repo_dir, agent.worktree_path, agent.worktree_branch)
+                except Exception as e:
+                    log.warning("Worktree cleanup failed for %s: %s", agent.id[:8], e)
+            else:
+                log.warning(
+                    "Cannot determine repo_dir for worktree cleanup of %s, skipping",
+                    agent.id[:8],
+                )
+
+        # 2. Destroy session if still exists
+        session = self.sm.sessions.get(agent.id)
+        if session:
+            await self.sm.destroy_session(agent.id)
+
+        # 3. Remove from store
+        deleted = self._store.delete_agent(agent.id)
+        if not deleted:
+            return {"error": "Agent record not found in store"}
+
+        if self.engine.events:
+            self.engine.events.log(
+                "subagent.deleted",
+                session_id=agent.id,
+                detail={"name": agent.name, "status": agent.status},
+            )
+
+        return {"deleted": True, "agent_id": agent.id}
 
     # -- slot reclamation ----------------------------------------------------
 
