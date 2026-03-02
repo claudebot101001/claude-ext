@@ -3,6 +3,7 @@
 
 import asyncio
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -29,6 +30,25 @@ def setup_logging():
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
+def add_file_logging(state_dir: Path):
+    """Add rotating file handler after config is loaded."""
+    state_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(state_dir, 0o700)
+    file_handler = logging.handlers.RotatingFileHandler(
+        state_dir / "claude-ext.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(
+        logging.Formatter(
+            "%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
+    logging.getLogger().addHandler(file_handler)
+
+
 async def _graceful_shutdown(registry, engine):
     """Shutdown sequence: extensions → bridge → sessions."""
     await registry.stop_all()
@@ -53,6 +73,7 @@ async def main():
 
     # Initialize tmux-backed session manager
     state_dir = Path(config.get("state_dir", "~/.claude-ext")).expanduser()
+    add_file_logging(state_dir)
     session_cfg = config.get("sessions", {})
     engine.init_sessions(
         state_dir,
