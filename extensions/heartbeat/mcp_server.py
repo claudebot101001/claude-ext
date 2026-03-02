@@ -153,6 +153,18 @@ class HeartbeatMCPServer(MCPServerBase):
                 },
             },
         },
+        {
+            "name": "heartbeat_safe_reload",
+            "description": (
+                "Safely reload the main process after a backlog commit. "
+                "Checks for busy sessions and in-flight RPCs before issuing SIGTERM. "
+                "If sessions are active, returns an error instead of killing the process."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+            },
+        },
     ]
 
     def __init__(self):
@@ -164,6 +176,7 @@ class HeartbeatMCPServer(MCPServerBase):
             "heartbeat_get_trigger_command": self._handle_get_trigger_command,
             "heartbeat_dry_run": self._handle_dry_run,
             "heartbeat_set_verification": self._handle_set_verification,
+            "heartbeat_safe_reload": self._handle_safe_reload,
         }
 
     def _get_store(self) -> HeartbeatStore:
@@ -331,6 +344,35 @@ class HeartbeatMCPServer(MCPServerBase):
         if commit_hash:
             return f"Verification pending for commit {commit_hash[:12]}"
         return "Verification flag cleared."
+
+    def _handle_safe_reload(self, args: dict) -> str:
+        if not self.bridge:
+            return "Error: bridge not available"
+
+        ctx = self.session_context()
+        session_id = ctx.get("id") if ctx else None
+
+        try:
+            result = self.bridge.call(
+                "heartbeat_safe_reload",
+                {"session_id": session_id},
+                timeout=10,
+            )
+        except Exception as e:
+            return f"Error: {e}"
+
+        if "error" in result:
+            return f"Error: {result['error']}"
+
+        if result.get("ok") and result.get("scheduled"):
+            return "Safe reload scheduled. Process will SIGTERM in ~1 second."
+
+        busy = result.get("busy_sessions", [])
+        pending = result.get("pending_rpcs", 0)
+        return (
+            f"Reload deferred: {len(busy)} busy session(s) ({', '.join(busy)}), "
+            f"{pending} pending RPC(s). Retry on next heartbeat run."
+        )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -279,6 +280,10 @@ class ExtensionImpl(Extension):
                     "name": "heartbeat_set_verification",
                     "description": "Record a commit hash for post-restart verification, or null to clear",
                 },
+                {
+                    "name": "heartbeat_safe_reload",
+                    "description": "Safely reload the process if no sessions are busy or RPCs in flight",
+                },
             ],
         )
 
@@ -361,6 +366,7 @@ class ExtensionImpl(Extension):
             "heartbeat_trigger": self._handle_bridge_trigger,
             "heartbeat_dry_run": self._handle_bridge_dry_run,
             "heartbeat_set_verification": self._handle_bridge_set_verification,
+            "heartbeat_safe_reload": self._handle_bridge_safe_reload,
         }
         handler = handlers.get(method)
         if handler is None:
@@ -399,6 +405,45 @@ class ExtensionImpl(Extension):
         if commit_hash is None and self._restart_marker and self._restart_marker.exists():
             self._restart_marker.unlink(missing_ok=True)
         return {"ok": True, "pending_verification": commit_hash}
+
+    async def _handle_bridge_safe_reload(self, params: dict) -> dict:
+        """Check for active sessions/RPCs and SIGTERM self only if safe.
+
+        Returns immediately with status. If safe, schedules SIGTERM after a
+        1-second delay so the bridge RPC response can be delivered first.
+        """
+        caller_session = params.get("session_id")
+        if not caller_session:
+            log.warning("safe_reload called without session_id, cannot exclude caller")
+
+        # Check for busy sessions (exclude the heartbeat session calling us)
+        busy = []
+        for sid, session in self.sm.sessions.items():
+            if caller_session and sid == caller_session:
+                continue
+            # Also exclude sessions with heartbeat_run context (our own sessions)
+            if session.context.get("heartbeat_run"):
+                continue
+            if session.status == SessionStatus.BUSY:
+                busy.append(session.name or sid[:8])
+
+        # Check for in-flight pending requests (subagent_wait, session_ask, etc.)
+        pending_count = len(self.engine.pending)
+
+        if busy or pending_count:
+            return {
+                "ok": False,
+                "reason": "active_sessions",
+                "busy_sessions": busy,
+                "pending_rpcs": pending_count,
+            }
+
+        # Note: 1s TOCTOU window between check and kill; acceptable for
+        # heartbeat idle-time reload since Tier 3 already gates on busy sessions.
+        log.info("Safe reload approved, scheduling SIGTERM in 1s")
+        loop = asyncio.get_running_loop()
+        loop.call_later(1.0, os.kill, os.getpid(), signal.SIGTERM)
+        return {"ok": True, "scheduled": True}
 
     # -- scheduler -----------------------------------------------------------
 
@@ -729,9 +774,9 @@ class ExtensionImpl(Extension):
 
         # Gate: skip Tier 3 if other sessions are busy (avoid git conflicts)
         busy_others = [
-            s for s in self.sm.sessions.values()
-            if s.status == SessionStatus.BUSY
-            and not s.context.get("heartbeat_run")
+            s
+            for s in self.sm.sessions.values()
+            if s.status == SessionStatus.BUSY and not s.context.get("heartbeat_run")
         ]
         if busy_others:
             names = ", ".join(s.name or s.id[:8] for s in busy_others)

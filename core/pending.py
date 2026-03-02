@@ -101,6 +101,9 @@ class PendingStore:
             entry.future.set_result(None)
         return True
 
+    def __len__(self) -> int:
+        return len(self._entries)
+
     def get(self, key: str) -> PendingEntry | None:
         return self._entries.get(key)
 

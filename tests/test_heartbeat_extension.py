@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.pending import PendingStore
 from core.session import SessionStatus
 from extensions.heartbeat.extension import (
     _BACKOFF_MAX_MULTIPLIER,
@@ -665,7 +666,8 @@ class TestBridgeHandler:
         assert "heartbeat_status" in tool_names
         assert "heartbeat_dry_run" in tool_names
         assert "heartbeat_set_verification" in tool_names
-        assert len(tool_names) == 6
+        assert "heartbeat_safe_reload" in tool_names
+        assert len(tool_names) == 7
         ext._scheduler_task.cancel()
 
 
@@ -1014,6 +1016,142 @@ class TestRestartMarker:
 
             # Marker should be deleted
             assert not marker.exists()
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+
+# -- Safe reload bridge handler ---------------------------------------------
+
+
+class TestBridgeSafeReload:
+    def test_safe_reload_when_idle(self, ext):
+        """safe_reload with no busy sessions or pending RPCs → ok + scheduled."""
+        ext.engine.pending = PendingStore()
+
+        async def _run_test():
+            await ext.start()
+            ext.engine.session_manager.sessions = {}
+
+            with patch("os.kill") as mock_kill:
+                result = await ext._handle_bridge_request(
+                    "heartbeat_safe_reload",
+                    {"session_id": "hb-session"},
+                )
+                assert result["ok"] is True
+                assert result["scheduled"] is True
+
+                # call_later schedules os.kill — run the event loop briefly
+                await asyncio.sleep(1.1)
+                mock_kill.assert_called_once()
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_safe_reload_deferred_busy_session(self, ext):
+        """safe_reload with busy session → deferred."""
+        ext.engine.pending = PendingStore()
+
+        async def _run_test():
+            await ext.start()
+            busy = MagicMock()
+            busy.status = SessionStatus.BUSY
+            busy.name = "user-session"
+            busy.context = {}
+            ext.engine.session_manager.sessions = {"other-sess": busy}
+
+            result = await ext._handle_bridge_request(
+                "heartbeat_safe_reload",
+                {"session_id": "hb-session"},
+            )
+            assert result["ok"] is False
+            assert result["reason"] == "active_sessions"
+            assert "user-session" in result["busy_sessions"]
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_safe_reload_deferred_pending_rpcs(self, ext):
+        """safe_reload with pending RPCs → deferred."""
+        pending = PendingStore()
+        ext.engine.pending = pending
+
+        async def _run_test():
+            await ext.start()
+            ext.engine.session_manager.sessions = {}
+
+            # Register a pending entry to simulate in-flight RPC
+            pending.register("some-session", {"question": "test?"})
+
+            result = await ext._handle_bridge_request(
+                "heartbeat_safe_reload",
+                {"session_id": "hb-session"},
+            )
+            assert result["ok"] is False
+            assert result["pending_rpcs"] == 1
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_safe_reload_excludes_caller_session(self, ext):
+        """safe_reload ignores the calling heartbeat session's busy status."""
+        ext.engine.pending = PendingStore()
+
+        async def _run_test():
+            await ext.start()
+            # The heartbeat session itself is BUSY (it's running the reload command)
+            hb_sess = MagicMock()
+            hb_sess.status = SessionStatus.BUSY
+            hb_sess.name = "heartbeat-28"
+            hb_sess.context = {"heartbeat_run": True}
+            ext.engine.session_manager.sessions = {"hb-session": hb_sess}
+
+            with patch("os.kill"):
+                result = await ext._handle_bridge_request(
+                    "heartbeat_safe_reload",
+                    {"session_id": "hb-session"},
+                )
+                assert result["ok"] is True
+                assert result["scheduled"] is True
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_safe_reload_session_id_none_uses_heartbeat_context(self, ext):
+        """safe_reload with session_id=None still excludes heartbeat_run sessions."""
+        ext.engine.pending = PendingStore()
+
+        async def _run_test():
+            await ext.start()
+            # Heartbeat session without explicit session_id match
+            hb_sess = MagicMock()
+            hb_sess.status = SessionStatus.BUSY
+            hb_sess.name = "heartbeat-28"
+            hb_sess.context = {"heartbeat_run": True}
+            ext.engine.session_manager.sessions = {"hb-session": hb_sess}
+
+            with patch("os.kill"):
+                result = await ext._handle_bridge_request(
+                    "heartbeat_safe_reload",
+                    {"session_id": None},  # session_id unavailable
+                )
+                # Should still succeed because heartbeat_run context excludes it
+                assert result["ok"] is True
+                assert result["scheduled"] is True
+
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_safe_reload_unknown_method_passthrough(self, ext):
+        """Non-safe_reload method still returns None."""
+
+        async def _run_test():
+            await ext.start()
+            result = await ext._handle_bridge_request("some_other_method", {})
+            assert result is None
             ext._scheduler_task.cancel()
 
         asyncio.run(_run_test())
