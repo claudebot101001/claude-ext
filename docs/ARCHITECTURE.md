@@ -726,14 +726,15 @@ Cross-session persistent memory system. Lets the Agent accumulate knowledge acro
 
 **Design decision: Direct file I/O, no bridge RPC.** Memory is plaintext Markdown with no encryption/access control requirements and no security constraint against entering the LLM context. The MCP server process holds its own MemoryStore instance for direct disk reads/writes, eliminating socket round-trips. If auditing is needed, add `log.info` to MemoryStore methods.
 
-**store.py — MemoryStore**:
+**store.py — MemoryStore + MemoryIndex**:
 
-- Storage format: Plain Markdown files, human-readable, grep-friendly
+- Storage format: Plain Markdown files, human-readable, grep-friendly (source of truth)
 - Three-tier structure: `MEMORY.md` (hot index) / `topics/<name>.md` (deep knowledge) / `daily/YYYY-MM-DD.md` (logs)
 - Path safety: Rejects absolute paths, `..` traversal, non-`.md` files, symlink escapes (`resolve()` + `is_relative_to`)
 - Concurrency control: Unified lockfile (`memory.lock`). Read ops use `LOCK_SH`, write ops use `LOCK_EX`
 - Atomic writes: `write()` uses temp+rename; `append()` appends directly under `LOCK_EX` (avoids large file copies)
 - Read limit: 512 KB truncation, prevents large files from blowing up context
+- **FTS5 search index** (`MemoryIndex`): SQLite FTS5 with BM25 ranking and Porter stemming, stored at `.search_index.db`. Derived cache — auto-rebuilds on corruption/deletion. Heading-aware Markdown chunking provides section context in results. Multi-process safe via WAL mode + `busy_timeout`. Graceful fallback to regex if FTS5 unavailable. Queries with regex metacharacters automatically route to legacy regex search.
 
 **MCP Tools**:
 
@@ -742,7 +743,7 @@ Cross-session persistent memory system. Lets the Agent accumulate knowledge acro
 | `memory_read` | Read a memory file |
 | `memory_write` | Overwrite/create a file (auto-creates parent directories) |
 | `memory_append` | Append content (auto UTC timestamp, suitable for daily logs) |
-| `memory_search` | Full directory regex search (case-insensitive, 50 result limit) |
+| `memory_search` | FTS5 full-text search with BM25 ranking (falls back to regex for regex patterns) |
 | `memory_list` | List files (sorted by modification time descending, filterable by subdirectory) |
 
 **System prompt driven**: Injects a concise system prompt guiding the Agent to operate memory files only through MCP tools (Session Start reads `MEMORY.md` + Curation rules + file organization instructions). Storage location `~/.claude-ext/memory/` is globally shared, independent of CC's built-in auto-memory (`~/.claude/projects/`). Note: Memory cannot disable built-in Read/Write via `--disallowedTools` (needed for coding), so behavioral guidance via system prompt is retained.

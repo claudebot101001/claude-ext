@@ -84,7 +84,7 @@ class MemoryMCPServer(MCPServerBase):
             "name": "memory_search",
             "description": (
                 "Search all memory files by keyword or regex pattern (case-insensitive). "
-                "Returns matching lines with file paths and line numbers."
+                "Returns matching sections with relevance ranking and heading context."
             ),
             "inputSchema": {
                 "type": "object",
@@ -189,7 +189,10 @@ class MemoryMCPServer(MCPServerBase):
             return "No matches found."
         lines = []
         for r in results:
-            lines.append(f"{r['file']}:{r['line']}: {r['text']}")
+            if "heading" in r:
+                lines.append(f"{r['file']} [{r['heading']}]: {r['snippet']}")
+            else:
+                lines.append(f"{r['file']}:{r['line']}: {r['text']}")
         return "\n".join(lines)
 
     def _handle_list(self, args: dict) -> str:

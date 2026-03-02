@@ -83,7 +83,7 @@ class ExtensionImpl(Extension):
                 {"name": "memory_read", "description": "Read a memory file"},
                 {"name": "memory_write", "description": "Overwrite/create a memory file"},
                 {"name": "memory_append", "description": "Append content with UTC timestamp"},
-                {"name": "memory_search", "description": "Regex search across all memory files"},
+                {"name": "memory_search", "description": "Search across all memory files"},
                 {"name": "memory_list", "description": "List memory files by modification time"},
             ],
         )

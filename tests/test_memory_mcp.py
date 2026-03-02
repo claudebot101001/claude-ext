@@ -77,7 +77,7 @@ class TestMemoryMCPSearch:
     def test_search_finds_matches(self, mcp, memory_dir):
         (memory_dir / "notes.md").write_text("use pytest\nuse mypy", encoding="utf-8")
         result = mcp.handlers["memory_search"]({"query": "pytest"})
-        assert "notes.md:1:" in result
+        assert "notes.md" in result
         assert "pytest" in result
 
     def test_search_no_matches(self, mcp, memory_dir):
@@ -90,8 +90,26 @@ class TestMemoryMCPSearch:
         assert "Error" in result
 
     def test_search_invalid_regex(self, mcp):
-        result = mcp.handlers["memory_search"]({"query": "[invalid"})
+        # Pattern must be detected as regex by heuristic AND be invalid
+        result = mcp.handlers["memory_search"]({"query": r"error \d(unclosed"})
         assert "Error" in result
+
+    def test_search_fts5_format(self, mcp, memory_dir):
+        """FTS5 results should include heading context in output."""
+        (memory_dir / "guide.md").write_text(
+            "# Setup\nInstall dependencies\n\n## Config\nEdit config.yaml",
+            encoding="utf-8",
+        )
+        result = mcp.handlers["memory_search"]({"query": "config"})
+        assert "guide.md" in result
+        # FTS5 format: "file [heading]: snippet"
+        assert "[" in result
+
+    def test_search_regex_format(self, mcp, memory_dir):
+        """Regex fallback results should use line:text format."""
+        (memory_dir / "notes.md").write_text("error code 404\nok 200", encoding="utf-8")
+        result = mcp.handlers["memory_search"]({"query": r"code \d+"})
+        assert "notes.md:1:" in result
 
 
 class TestMemoryMCPList:
