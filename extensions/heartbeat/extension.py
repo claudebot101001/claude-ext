@@ -10,6 +10,7 @@ Dual-channel scheduler (timer + event triggers) with three-tier execution:
 import asyncio
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -245,7 +246,7 @@ class ExtensionImpl(Extension):
         # 4. Register service (self, not store — includes trigger())
         self.engine.services["heartbeat"] = self
 
-        # 4. Register MCP server
+        # 5. Register MCP server
         mcp_script = str(Path(__file__).parent / "mcp_server.py")
         self.sm.register_mcp_server(
             "heartbeat",
@@ -282,26 +283,26 @@ class ExtensionImpl(Extension):
             ],
         )
 
-        # 5. Bridge handler (MCP → trigger)
+        # 6. Bridge handler (MCP → trigger)
         if self.engine.bridge:
             self.engine.bridge.add_handler(self._handle_bridge_request)
 
-        # 6. System prompt
+        # 7. System prompt
         self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="heartbeat")
 
-        # 7. Delivery callback
+        # 8. Delivery callback
         self.sm.add_delivery_callback(self._on_delivery)
 
-        # 8. Seed HEARTBEAT.md
+        # 9. Seed HEARTBEAT.md
         if not (heartbeat_dir / "HEARTBEAT.md").exists():
             self._store.write_instructions(_SEED_INSTRUCTIONS)
             log.info("Created seed HEARTBEAT.md")
 
-        # 9. Schedule first run (may already be set by fast-schedule above)
+        # 10. Schedule first run (may already be set by fast-schedule above)
         if not state.pending_verification:
             self._schedule_next()
 
-        # 10. Start scheduler
+        # 11. Start scheduler
         self._scheduler_task = asyncio.create_task(
             self._scheduler_loop(), name="heartbeat-scheduler"
         )
@@ -383,6 +384,8 @@ class ExtensionImpl(Extension):
     async def _handle_bridge_set_verification(self, params: dict) -> dict:
         """Record or clear pending verification commit hash."""
         commit_hash = params.get("commit_hash")  # None to clear
+        if commit_hash is not None and not re.match(r"^[0-9a-f]{7,40}$", commit_hash):
+            return {"error": f"Invalid commit hash format: {commit_hash!r}"}
         self._store.update_state(pending_verification=commit_hash)
         # Defense-in-depth: clear restart marker when verification is cleared
         if commit_hash is None and self._restart_marker and self._restart_marker.exists():

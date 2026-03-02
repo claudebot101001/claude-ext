@@ -664,7 +664,8 @@ class TestBridgeHandler:
         assert "heartbeat_instructions" in tool_names
         assert "heartbeat_status" in tool_names
         assert "heartbeat_dry_run" in tool_names
-        assert len(tool_names) == 5
+        assert "heartbeat_set_verification" in tool_names
+        assert len(tool_names) == 6
         ext._scheduler_task.cancel()
 
 
@@ -823,3 +824,196 @@ class TestDryRun:
         """dry_run_tier2 before start → error."""
         result = _run(ext.dry_run_tier2())
         assert "error" in result
+
+
+# -- Verification state ----------------------------------------------------
+
+
+class TestPendingVerification:
+    def test_pending_verification_in_tier2_prompt(self, ext):
+        """pending_verification set → Tier 2 prompt includes PENDING VERIFICATION section."""
+
+        async def _run_test():
+            await ext.start()
+            ext._store.update_state(pending_verification="abc123def456")
+            ext._store.write_instructions("# Check stuff")
+            prompt = ext._build_tier2_prompt("# Check stuff")
+            assert "PENDING VERIFICATION" in prompt
+            assert "abc123def456" in prompt
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_pending_verification_cleared(self, ext):
+        """No pending_verification → Tier 2 prompt omits PENDING VERIFICATION section."""
+
+        async def _run_test():
+            await ext.start()
+            ext._store.update_state(pending_verification=None)
+            ext._store.write_instructions("# Check stuff")
+            prompt = ext._build_tier2_prompt("# Check stuff")
+            assert "PENDING VERIFICATION" not in prompt
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+
+# -- Reconfigure -----------------------------------------------------------
+
+
+class TestReconfigure:
+    def test_reconfigure_updates_interval(self, ext):
+        """reconfigure() updates heartbeat settings from new config."""
+        _run(ext.start())
+        assert ext._interval == 1800
+        assert ext._max_daily_runs == 48
+        ext.reconfigure(
+            {"interval": 900, "max_daily_runs": 24, "usage_throttle": 70, "usage_pause": 90}
+        )
+        assert ext._interval == 900
+        assert ext._max_daily_runs == 24
+        assert ext._usage_throttle == 70
+        assert ext._usage_pause == 90
+        ext._scheduler_task.cancel()
+
+    def test_reconfigure_keeps_defaults(self, ext):
+        """reconfigure() with empty config keeps existing values."""
+        _run(ext.start())
+        ext._interval = 1800
+        ext._max_daily_runs = 48
+        ext.reconfigure({})
+        assert ext._interval == 1800
+        assert ext._max_daily_runs == 48
+        ext._scheduler_task.cancel()
+
+
+# -- Bridge dispatch: set_verification ------------------------------------
+
+
+class TestBridgeSetVerification:
+    def test_bridge_dispatch_set_verification(self, ext):
+        """Bridge handler routes heartbeat_set_verification correctly."""
+
+        async def _run_test():
+            await ext.start()
+            result = await ext._handle_bridge_request(
+                "heartbeat_set_verification",
+                {"commit_hash": "abc1234"},
+            )
+            assert result["ok"] is True
+            assert result["pending_verification"] == "abc1234"
+            state = ext._store.load_state()
+            assert state.pending_verification == "abc1234"
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_set_verification_clear(self, ext):
+        """Clearing verification also deletes restart marker."""
+
+        async def _run_test():
+            await ext.start()
+            # Set verification and create marker
+            ext._store.update_state(pending_verification="abc1234")
+            ext._restart_marker.write_text("abc1234")
+            assert ext._restart_marker.exists()
+
+            result = await ext._handle_bridge_request(
+                "heartbeat_set_verification",
+                {"commit_hash": None},
+            )
+            assert result["ok"] is True
+            assert result["pending_verification"] is None
+            assert not ext._restart_marker.exists()
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_bridge_dispatch_unknown_method(self, ext):
+        """Unknown bridge method → returns None."""
+
+        async def _run_test():
+            await ext.start()
+            result = await ext._handle_bridge_request("some_other_method", {})
+            assert result is None
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+
+# -- Fast schedule on pending verification ---------------------------------
+
+
+class TestFastSchedule:
+    def test_fast_schedule_on_pending_verification(self, ext, heartbeat_dir):
+        """start() with pending_verification → next_run set near-immediate."""
+        heartbeat_dir.mkdir(parents=True)
+        store = HeartbeatStore(heartbeat_dir)
+        store.save_state(HeartbeatState(pending_verification="deadbeef1234"))
+
+        async def _run_test():
+            await ext.start()
+            state = ext._store.load_state()
+            # next_run should be set to ~30s in the future (not normal interval)
+            assert state.next_run is not None
+            next_dt = datetime.fromisoformat(state.next_run)
+            now = datetime.now(UTC)
+            delta = (next_dt - now).total_seconds()
+            # Should be within 0-60s (fast schedule), not 1800s
+            assert delta < 60
+            assert state.consecutive_noop == 0
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+
+# -- Restart marker safety net ---------------------------------------------
+
+
+class TestRestartMarker:
+    def test_restart_marker_created_on_pending_verification(self, ext, heartbeat_dir):
+        """start() with pending_verification (no marker) → marker file created."""
+        heartbeat_dir.mkdir(parents=True)
+        store = HeartbeatStore(heartbeat_dir)
+        store.save_state(HeartbeatState(pending_verification="face0123"))
+
+        async def _run_test():
+            await ext.start()
+            marker = heartbeat_dir / ".restart_marker"
+            assert marker.exists()
+            assert marker.read_text() == "face0123"
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    @patch("subprocess.run")
+    def test_double_restart_auto_reverts(self, mock_subprocess_run, ext, heartbeat_dir):
+        """Marker exists + pending_verification → auto-revert via git."""
+        heartbeat_dir.mkdir(parents=True)
+        store = HeartbeatStore(heartbeat_dir)
+        store.save_state(HeartbeatState(pending_verification="bad0commit1"))
+
+        # Create marker (simulates first restart already happened)
+        marker = heartbeat_dir / ".restart_marker"
+        marker.write_text("bad0commit1")
+
+        # Mock git rev-parse succeeds, git revert succeeds
+        mock_subprocess_run.return_value = MagicMock(returncode=0, stderr=b"")
+
+        async def _run_test():
+            await ext.start()
+
+            # Verify git rev-parse and git revert were called
+            calls = mock_subprocess_run.call_args_list
+            assert any("rev-parse" in str(c) for c in calls)
+            assert any("revert" in str(c) for c in calls)
+
+            # pending_verification should be cleared
+            state = ext._store.load_state()
+            assert state.pending_verification is None
+
+            # Marker should be deleted
+            assert not marker.exists()
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
