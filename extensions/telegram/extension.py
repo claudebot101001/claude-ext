@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 MAX_TG_MESSAGE = 4000  # Telegram limit is 4096; leave margin
 STREAM_FLUSH_DELAY = 2.0  # seconds to wait before flushing text buffer
+STREAM_LEVELS = ("all", "mcp", "none")  # tool_use verbosity levels
 
 
 @dataclass
@@ -49,6 +50,7 @@ class ExtensionImpl(Extension):
         self.app: Application | None = None
         self._stream_buffers: dict[str, _StreamBuffer] = {}  # session_id -> buffer
         self._awaiting_text_answer: dict[str, str] = {}  # session_id -> request_id
+        self._user_stream_levels: dict[str, str] = {}  # user_id -> "all"|"mcp"|"none"
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -97,6 +99,30 @@ class ExtensionImpl(Extension):
         if sid and sid in self.sm.sessions:
             return sid
         return None
+
+    # -- stream level persistence -------------------------------------------
+
+    def _stream_levels_path(self):
+        return self.sm.base_dir / "stream_levels.json"
+
+    def _load_stream_levels(self) -> dict[str, str]:
+        p = self._stream_levels_path()
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                return {}
+        return {}
+
+    def _save_stream_levels(self) -> None:
+        p = self._stream_levels_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(self._user_stream_levels), encoding="utf-8")
+        tmp.rename(p)
+
+    def _get_stream_level(self, user_id: str) -> str:
+        return self._user_stream_levels.get(user_id, "all")
 
     # -- delivery callback (called by SessionManager) -----------------------
 
@@ -167,12 +193,16 @@ class ExtensionImpl(Extension):
             buf.flush_task = asyncio.create_task(self._delayed_flush(session_id))
             return
 
-        # --- Stream: tool_use event (immediate) ---
+        # --- Stream: tool_use event (immediate, filtered by verbosity) ---
         if metadata.get("is_stream") and metadata.get("stream_type") == "tool_use":
-            await self._flush_stream_buffer(session_id)
-            summary = self._format_tool_use(metadata)
-            prefix = f"[#{session.slot} {session.name}] "
-            await self._send_chunked(chat_id, f"{prefix}{summary}")
+            level = self._get_stream_level(session.user_id)
+            tool_name = metadata.get("tool_name") or ""
+            show = level == "all" or (level == "mcp" and tool_name.startswith("mcp__"))
+            if show:
+                await self._flush_stream_buffer(session_id)
+                summary = self._format_tool_use(metadata)
+                prefix = f"[#{session.slot} {session.name}] "
+                await self._send_chunked(chat_id, f"{prefix}{summary}")
             return
 
         # --- Stopped ---
@@ -438,7 +468,8 @@ class ExtensionImpl(Extension):
             "/switch <slot|name> - Switch session\n"
             "/status - Auth, usage & session info\n"
             "/stop - Stop running task + clear queue\n"
-            "/delete <slot|name> - Delete session\n\n"
+            "/delete <slot|name> - Delete session\n"
+            "/verbose [all|mcp|none] - Tool call verbosity\n\n"
             "Send any message to start working."
         )
 
@@ -727,6 +758,35 @@ class ExtensionImpl(Extension):
 
         await update.message.reply_text(f"Deleted #{slot} '{name}'.")
 
+    async def _cmd_verbose(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        user_id = str(update.effective_user.id)
+        parts = update.message.text.split(maxsplit=1)
+
+        if len(parts) >= 2:
+            level = parts[1].strip().lower()
+            if level not in STREAM_LEVELS:
+                await update.message.reply_text(
+                    f"Unknown level '{level}'. Use: all, mcp, none"
+                )
+                return
+        else:
+            # Cycle to next level
+            current = self._get_stream_level(user_id)
+            idx = STREAM_LEVELS.index(current) if current in STREAM_LEVELS else 0
+            level = STREAM_LEVELS[(idx + 1) % len(STREAM_LEVELS)]
+
+        self._user_stream_levels[user_id] = level
+        self._save_stream_levels()
+
+        labels = {
+            "all": "all tool calls",
+            "mcp": "MCP tool calls only",
+            "none": "no tool calls",
+        }
+        await update.message.reply_text(f"Stream verbosity: {level} ({labels[level]})")
+
     # -- message handler ----------------------------------------------------
 
     async def _handle_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -873,6 +933,7 @@ class ExtensionImpl(Extension):
     async def start(self) -> None:
         self.engine.services["telegram"] = self
         self.sm.add_delivery_callback(self._deliver_result)
+        self._user_stream_levels = self._load_stream_levels()
 
         self.app = Application.builder().token(self.token).build()
         self.app.add_handler(CommandHandler("start", self._cmd_start))
@@ -882,6 +943,7 @@ class ExtensionImpl(Extension):
         self.app.add_handler(CommandHandler("status", self._cmd_status))
         self.app.add_handler(CommandHandler("stop", self._cmd_stop))
         self.app.add_handler(CommandHandler("delete", self._cmd_delete))
+        self.app.add_handler(CommandHandler("verbose", self._cmd_verbose))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self.app.add_handler(
@@ -907,6 +969,7 @@ class ExtensionImpl(Extension):
                 BotCommand("status", "Auth, usage & session info"),
                 BotCommand("stop", "Stop running task + clear queue"),
                 BotCommand("delete", "Delete a session"),
+                BotCommand("verbose", "Tool verbosity: all/mcp/none"),
             ]
         )
         await self.app.start()
