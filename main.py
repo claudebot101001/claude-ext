@@ -73,17 +73,6 @@ async def main():
             ", ".join(sorted(blocked_essential)),
         )
 
-    # Resolve system_prompt_file: "compact" -> bundled path, str -> absolute, null -> None
-    raw_spf = eng_cfg.get("system_prompt_file")
-    resolved_spf = None
-    if raw_spf == "compact":
-        resolved_spf = str(Path(__file__).parent / "core" / "compact_prompt.md")
-    elif raw_spf:
-        resolved_spf = str(Path(raw_spf).expanduser().resolve())
-        if not Path(resolved_spf).is_file():
-            log.error("system_prompt_file not found: %s", resolved_spf)
-            sys.exit(1)
-
     engine = ClaudeEngine(
         model=eng_cfg.get("model"),
         max_turns=eng_cfg.get("max_turns", 0),
@@ -91,7 +80,6 @@ async def main():
         allowed_tools=eng_cfg.get("allowed_tools"),
         disallowed_tools=disallowed_tools or None,
         gateway_mode=bool(eng_cfg.get("gateway_mode")),
-        system_prompt_file=resolved_spf,
     )
 
     # Initialize tmux-backed session manager
