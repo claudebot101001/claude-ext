@@ -636,10 +636,17 @@ class ExtensionImpl(Extension):
                 output = "[timeout]"
                 try:
                     proc.kill()
+                    await proc.wait()
                 except ProcessLookupError:
                     pass
-            except FileNotFoundError:
-                output = f"[command not found: {args[0]}]"
+            except FileNotFoundError as e:
+                fn = getattr(e, "filename", None)
+                if fn and fn != args[0]:
+                    output = f"[os error: {e}]"
+                else:
+                    output = f"[command not found: {args[0]}]"
+            except OSError as e:
+                output = f"[os error: {e}]"
             except Exception as e:
                 output = f"[error: {e}]"
 

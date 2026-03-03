@@ -12,6 +12,7 @@ from extensions.heartbeat.extension import (
     _BACKOFF_MAX_MULTIPLIER,
     _MAX_RECON_COMMANDS,
     _MAX_RECON_PER_CMD,
+    _MAX_RECON_TOTAL,
     ExtensionImpl,
     TriggerEvent,
 )
@@ -1400,6 +1401,47 @@ class TestReconCommands:
             results = await ext._run_recon()
             assert len(results) == 1
             assert "echo fallback-label-test" in results[0][0]
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_total_output_cap(self, engine):
+        """Combined output across commands is capped at _MAX_RECON_TOTAL."""
+        # Each command outputs ~900 chars; 3 commands would be ~2700, exceeding 2000
+        per_cmd_len = (_MAX_RECON_TOTAL // 2) - 50  # ~950
+        cmds = [
+            {"cmd": f"python3 -c \"print('A' * {per_cmd_len})\"", "label": f"Big {i}"}
+            for i in range(3)
+        ]
+        ext = self._make_ext_with_recon(engine, cmds)
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            total = sum(len(output) for _, output in results)
+            # Total should not exceed the cap (plus small margin for ellipsis)
+            assert total <= _MAX_RECON_TOTAL + 10
+            # First command should be full, not all 3 should have full output
+            assert len(results) <= 3
+            ext._scheduler_task.cancel()
+
+        asyncio.run(_run_test())
+
+    def test_recon_bad_cwd(self, engine):
+        """Non-existent working directory → os error, not 'command not found'."""
+        ext = self._make_ext_with_recon(
+            engine,
+            [{"cmd": "echo test", "label": "BadCwd"}],
+        )
+        ext._working_dir = "/nonexistent/path/that/does/not/exist"
+
+        async def _run_test():
+            await ext.start()
+            results = await ext._run_recon()
+            assert len(results) == 1
+            # Should NOT say "command not found" — it's a cwd issue
+            assert "command not found" not in results[0][1]
+            assert "[os error" in results[0][1] or "[error" in results[0][1]
             ext._scheduler_task.cancel()
 
         asyncio.run(_run_test())
