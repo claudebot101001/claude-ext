@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from extensions.browser.extension import ExtensionImpl, _SYSTEM_PROMPT
+from extensions.browser.extension import _SYSTEM_PROMPT, ExtensionImpl
 from extensions.browser.mcp_server import BrowserMCPServer
 
 

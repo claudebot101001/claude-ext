@@ -1,12 +1,9 @@
 """Tests for MCP gateway mode — consolidated tool dispatch."""
 
-import json
-import os
 
 import pytest
 
 from core.mcp_base import MCPServerBase
-
 
 # ---------------------------------------------------------------------------
 # Fixtures: test server subclasses
