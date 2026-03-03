@@ -52,7 +52,6 @@ extensions:
     # Default working directory for Claude Code. null = current directory.
     # Can be overridden per-session with /new <name> <dir>
     working_dir: null
-    # streaming: partial         # Real-time draft streaming (requires bot forum topic mode)
 
   ask_user:
     timeout: 300                   # Seconds to wait for user response before timing out
