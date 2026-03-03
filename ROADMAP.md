@@ -170,23 +170,30 @@ extensions/email/
 
 ---
 
-### Phase 5b: Browser — Playwright Browser
+### Phase 5b: Browser — agent-browser CLI Integration
 
-**Goal**: Agent can browse web pages, take screenshots, fill forms, execute JS.
+**Status**: Implemented
+**Goal**: Agent can browse web pages, fill forms, click elements, take screenshots, extract data.
 
-**Architecture direction**:
+**Architecture**: Thin CLI extension pattern (no MCP wrapper).
 
 ```
 extensions/browser/
-    mcp_server.py      # browser_navigate / browser_screenshot / browser_click / browser_type / browser_evaluate
-    extension.py       # Playwright lifecycle + bridge handler
+    extension.py      # System prompt + health check (no MCP server)
 ```
 
 **Key design**:
-- Single Chromium instance, per-session browser context (isolates cookies)
-- MCP tool → bridge RPC → main process Playwright operations → return results (avoids each MCP process launching an independent browser)
-- Screenshots saved to file → Claude views with Read tool (CC natively supports images)
-- Max simultaneous open pages configurable, memory threshold restart
+- Uses [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs) — Rust native binary + Node.js daemon + Playwright
+- NO MCP server — Claude calls `agent-browser` directly via Bash (30+ commands, AI-optimized ref system)
+- Compact system prompt (~130 tokens): ref-based workflow hint + `--help` pointer for full docs
+- Tagged system prompt for per-session exclusion (`mcp_server="browser"`)
+- Health check verifies binary installation + daemon status
+- **Prerequisite**: `npm install -g agent-browser && agent-browser install`
+- No hard dependencies on other extensions
+
+**Change from original plan**: Originally planned as a custom Playwright MCP wrapper (5 MCP tools, bridge RPC, single Chromium instance). agent-browser replaces this entirely — maintained by Vercel, 30+ AI-optimized commands, ref-based element targeting, session isolation, built-in auth vault. Wrapping it in MCP would only add token overhead with no functional benefit.
+
+**Establishes**: "Thin CLI Extension" pattern — reusable template for future CLI tool integrations where the tool is self-documenting (`--help`) and best invoked directly via Bash rather than wrapped in MCP
 
 ---
 
@@ -201,7 +208,7 @@ Phase 3: Heartbeat ←── The leap from passive to proactive ✅ Completed
     ↓ (can parallelize with 4, 5)
 Phase 4: Wallet ←── Depends on Vault (hard dependency)
 Phase 5a: Email ←── Depends on Vault (SMTP credentials)
-Phase 5b: Browser ←── No hard dependencies
+Phase 5b: Browser ←── No hard dependencies ✅ Completed (thin CLI extension)
 ```
 
 ## Recommended enabled Order

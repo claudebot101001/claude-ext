@@ -93,7 +93,7 @@ _BUILTIN_PARADIGMS = {
         ),
         disallowed_tools=["Write", "Edit", "NotebookEdit"],
         auto_cleanup=False,
-        exclude_mcp_servers={"vault", "heartbeat", "cron", "ask_user"},
+        exclude_mcp_servers={"vault", "heartbeat", "cron", "ask_user", "browser"},
     ),
     "researcher": Paradigm(
         name="researcher",
@@ -105,7 +105,7 @@ _BUILTIN_PARADIGMS = {
         ),
         disallowed_tools=["Write", "Edit", "NotebookEdit"],
         auto_cleanup=False,
-        exclude_mcp_servers={"vault", "heartbeat", "cron", "ask_user"},
+        exclude_mcp_servers={"vault", "heartbeat", "cron", "ask_user", "browser"},
     ),
 }
 

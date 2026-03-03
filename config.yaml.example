@@ -68,6 +68,7 @@ enabled:
   # - cron                         # Uncomment to enable scheduled tasks
   # - subagent                     # Multi-agent orchestration (PM spawns workers)
   # - session_ask                  # Cross-session RPC (session-to-session Q&A)
+  # - browser                      # Web browser automation (agent-browser CLI)
 
 # Per-extension configuration
 extensions:
@@ -144,3 +145,10 @@ extensions:
   session_ask:
     timeout: 300                   # Seconds to wait for target session's reply
     max_question_length: 2000      # Max characters for question text
+
+  browser:
+    # Thin CLI extension: agent-browser (https://github.com/vercel-labs/agent-browser)
+    # Prerequisites: npm install -g agent-browser && agent-browser install
+    # On Linux: agent-browser install --with-deps (for system Chromium dependencies)
+    # binary: agent-browser         # Override path to binary if not in PATH
+    {}

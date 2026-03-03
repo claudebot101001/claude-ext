@@ -26,6 +26,7 @@ claude-ext/
 │   ├── ask_user/            # Interactive questions (bridge + PendingStore)
 │   ├── subagent/            # Multi-agent orchestration (PM → worker sessions)
 │   ├── session_ask/         # Cross-session RPC (bridge + PendingStore)
+│   ├── browser/             # Web browser automation (agent-browser CLI, thin CLI extension)
 │   └── telegram/            # Telegram bot bridge (multi-session + streaming)
 ├── config.yaml              # Runtime config (.gitignored)
 ├── config.yaml.example      # Config template
@@ -140,6 +141,7 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 | **ask_user** | `ask_user` | Bridge RPC → PendingStore |
 | **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_diff`, `subagent_merge`, `subagent_delete`, `subagent_reclaim_respond`, `session_info` | Bridge RPC → PendingStore + SessionManager |
 | **session_ask** | `session_ask`, `session_reply`, `session_list` | Bridge RPC → PendingStore + SessionManager |
+| **browser** | (none — thin CLI extension) | System prompt only (Bash → agent-browser) |
 | **telegram** | (none — frontend only) | Delivery callbacks |
 
 ## Memory Extension: Three-Layer Identity System
