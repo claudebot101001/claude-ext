@@ -1,7 +1,8 @@
-"""Tests for Telegram typing indicator functionality."""
+"""Tests for Telegram typing indicator (Phase A + D: gap-aware typing)."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -22,6 +23,7 @@ def engine(tmp_path):
     engine.session_manager.create_session = AsyncMock()
     engine.session_manager.send_prompt = AsyncMock(return_value=0)
     engine.session_manager.stop_session = AsyncMock(return_value=(True, 0))
+    engine.session_manager.destroy_session = AsyncMock()
     engine.session_manager.add_delivery_callback = MagicMock()
     engine.session_manager.list_mcp_tools = MagicMock(return_value={})
     engine.pending = MagicMock()
@@ -119,35 +121,67 @@ class TestTypingStartsOnProcessing:
         _run(_test())
 
 
-class TestTypingCancelledOnDelivery:
-    def test_typing_cancelled_on_stream_text(self, ext):
+class TestTypingContinuesDuringStream:
+    def test_typing_continues_during_stream(self, ext):
+        """Typing task is NOT cancelled on stream text events (gap-aware)."""
         session = _make_session()
         ext.engine.session_manager.sessions = {"test-session-id": session}
 
+        async def fake_typing():
+            try:
+                while True:
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                return
+
         async def _test():
-            # Start typing
-            ext._start_typing(999, "test-session-id")
-            assert "test-session-id" in ext._typing_tasks
+            ext._typing_tasks["test-session-id"] = asyncio.create_task(fake_typing())
 
             # Deliver a stream text event
             await ext._deliver_result(
                 "test-session-id",
-                "hello",
+                "some text",
                 {"is_stream": True, "stream_type": "text"},
             )
 
-            # Typing should be cancelled
-            assert "test-session-id" not in ext._typing_tasks
+            # Typing task should still be running (not cancelled by stream events)
+            assert "test-session-id" in ext._typing_tasks
+            task = ext._typing_tasks["test-session-id"]
+            assert not task.done()
+
+            # Also check tool_use events don't cancel typing
+            await ext._deliver_result(
+                "test-session-id",
+                "",
+                {"is_stream": True, "stream_type": "tool_use", "tool_name": "Read"},
+            )
+            assert "test-session-id" in ext._typing_tasks
+            assert not ext._typing_tasks["test-session-id"].done()
+
+            # Clean up
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         _run(_test())
 
+
+class TestTypingCancelledOnTerminalEvents:
     def test_typing_cancelled_on_final(self, ext):
         session = _make_session()
         ext.engine.session_manager.sessions = {"test-session-id": session}
 
+        async def fake_typing():
+            try:
+                while True:
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                return
+
         async def _test():
-            ext._start_typing(999, "test-session-id")
-            assert "test-session-id" in ext._typing_tasks
+            ext._typing_tasks["test-session-id"] = asyncio.create_task(fake_typing())
 
             await ext._deliver_result(
                 "test-session-id",
@@ -159,12 +193,44 @@ class TestTypingCancelledOnDelivery:
 
         _run(_test())
 
-    def test_typing_cancelled_on_heartbeat(self, ext):
+    def test_typing_cancelled_on_stopped(self, ext):
         session = _make_session()
         ext.engine.session_manager.sessions = {"test-session-id": session}
 
+        async def fake_typing():
+            try:
+                while True:
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                return
+
         async def _test():
-            ext._start_typing(999, "test-session-id")
+            ext._typing_tasks["test-session-id"] = asyncio.create_task(fake_typing())
+
+            await ext._deliver_result(
+                "test-session-id",
+                "",
+                {"is_stopped": True},
+            )
+
+            assert "test-session-id" not in ext._typing_tasks
+
+        _run(_test())
+
+    def test_typing_not_cancelled_on_heartbeat(self, ext):
+        """Heartbeat events should NOT cancel typing (it's not a terminal event)."""
+        session = _make_session()
+        ext.engine.session_manager.sessions = {"test-session-id": session}
+
+        async def fake_typing():
+            try:
+                while True:
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                return
+
+        async def _test():
+            ext._typing_tasks["test-session-id"] = asyncio.create_task(fake_typing())
 
             await ext._deliver_result(
                 "test-session-id",
@@ -172,7 +238,12 @@ class TestTypingCancelledOnDelivery:
                 {"is_heartbeat": True, "elapsed_s": 120},
             )
 
-            assert "test-session-id" not in ext._typing_tasks
+            # Typing should still be running
+            assert "test-session-id" in ext._typing_tasks
+            assert not ext._typing_tasks["test-session-id"].done()
+
+            # Clean up
+            ext._cancel_typing("test-session-id")
 
         _run(_test())
 
@@ -255,6 +326,79 @@ class TestKeepTypingLoop:
         """Cancelling typing for non-existent session should not error."""
         ext._cancel_typing("nonexistent-session")
         assert "nonexistent-session" not in ext._typing_tasks
+
+
+class TestTypingSuppressedDuringActiveMessages:
+    def test_typing_suppressed_during_active_messages(self, ext):
+        """Typing action is NOT sent when last_message_time is recent."""
+        from extensions.telegram.extension import _StreamBuffer
+
+        async def _test():
+            # Set up a buffer with a recent last_message_time
+            buf = _StreamBuffer(chat_id=999, slot=1, name="session-1")
+            buf.last_message_time = time.monotonic()  # just now
+            ext._stream_buffers["test-session-id"] = buf
+
+            # Run one iteration of the typing loop, then cancel
+            task = asyncio.create_task(ext._keep_typing(999, "test-session-id"))
+            # Give it a moment to execute the first check
+            await asyncio.sleep(0.05)
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+            # send_chat_action should NOT have been called (last_message_time is recent)
+            ext.app.bot.send_chat_action.assert_not_called()
+
+        _run(_test())
+
+
+class TestTypingResumesAfterGap:
+    def test_typing_resumes_after_gap(self, ext):
+        """Typing action IS sent when last_message_time is stale (>3s ago)."""
+        from extensions.telegram.extension import _StreamBuffer
+
+        async def _test():
+            # Set up a buffer with a stale last_message_time (>3s ago)
+            buf = _StreamBuffer(chat_id=999, slot=1, name="session-1")
+            buf.last_message_time = time.monotonic() - 5.0  # 5 seconds ago
+            ext._stream_buffers["test-session-id"] = buf
+
+            # Patch sleep to avoid waiting 4 seconds
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                # Make sleep raise CancelledError on first call to exit the loop
+                mock_sleep.side_effect = asyncio.CancelledError()
+
+                try:
+                    await ext._keep_typing(999, "test-session-id")
+                except asyncio.CancelledError:
+                    pass
+
+            # send_chat_action SHOULD have been called (last_message_time is stale)
+            ext.app.bot.send_chat_action.assert_called_once_with(chat_id=999, action="typing")
+
+        _run(_test())
+
+    def test_typing_always_sends_when_no_buffer(self, ext):
+        """Typing action IS sent when no StreamBuffer exists (pre-first-delivery)."""
+
+        async def _test():
+            # No buffer for this session — pre-first-delivery state
+            assert "test-session-id" not in ext._stream_buffers
+
+            with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+                mock_sleep.side_effect = asyncio.CancelledError()
+
+                try:
+                    await ext._keep_typing(999, "test-session-id")
+                except asyncio.CancelledError:
+                    pass
+
+            ext.app.bot.send_chat_action.assert_called_once_with(chat_id=999, action="typing")
+
+        _run(_test())
 
 
 class TestMediaTypingIndicator:

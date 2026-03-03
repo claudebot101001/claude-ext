@@ -55,6 +55,8 @@ class _StreamBuffer:
     # C3: cost footer integration (multi mode)
     last_sent_message_id: int | None = None
     last_sent_text: str = ""  # text of last sent message (for edit-to-append)
+    # D1: gap-aware typing
+    last_message_time: float = 0.0  # monotonic time of last sent/edited message
 
 
 class ExtensionImpl(Extension):
@@ -178,9 +180,6 @@ class ExtensionImpl(Extension):
         if not chat_id:
             return
 
-        # Cancel typing indicator on first delivery for this session
-        self._cancel_typing(session_id)
-
         # --- Question from Claude (ask_user) ---
         if metadata.get("is_question"):
             request_id = metadata["request_id"]
@@ -268,6 +267,7 @@ class ExtensionImpl(Extension):
 
         # --- Stopped ---
         if metadata.get("is_stopped"):
+            self._cancel_typing(session_id)
             buf = self._stream_buffers.get(session_id)
             if buf and buf.tool_parts:
                 await self._flush_tool_buffer(session_id)
@@ -281,6 +281,7 @@ class ExtensionImpl(Extension):
 
         # --- Final result (streaming mode: text already delivered) ---
         if metadata.get("is_final"):
+            self._cancel_typing(session_id)
             buf = self._stream_buffers.get(session_id)
 
             # Flush any pending tool summaries first
@@ -472,6 +473,7 @@ class ExtensionImpl(Extension):
                 parse_mode="HTML",
             )
             buf.last_edit_time = now
+            buf.last_message_time = now
         except BadRequest as e:
             err_msg = str(e).lower()
             if "message is not modified" in err_msg:
@@ -495,6 +497,7 @@ class ExtensionImpl(Extension):
                         message_id=buf.live_message_id,
                     )
                     buf.last_edit_time = now
+                    buf.last_message_time = now
                 except Exception:
                     log.exception("edit_message_text plain fallback failed")
         except Exception:
@@ -689,6 +692,10 @@ class ExtensionImpl(Extension):
                     )
                 msg = await self.app.bot.send_message(**kwargs)
                 last_message_id = msg.message_id
+                # Update last_message_time for gap-aware typing
+                for buf in self._stream_buffers.values():
+                    if buf.chat_id == chat_id:
+                        buf.last_message_time = time.monotonic()
             except Exception:
                 log.exception("Failed to deliver message to chat %s", chat_id)
                 break  # subsequent chunks will almost certainly fail too
@@ -716,11 +723,18 @@ class ExtensionImpl(Extension):
                     )
                 msg = await self.app.bot.send_message(**kwargs)
                 last_message_id = msg.message_id
+                # Update last_message_time for gap-aware typing
+                for buf in self._stream_buffers.values():
+                    if buf.chat_id == chat_id:
+                        buf.last_message_time = time.monotonic()
             except BadRequest:
                 log.warning("HTML parse failed for chunk, retrying as plain text")
                 try:
                     msg = await self.app.bot.send_message(chat_id=chat_id, text=chunk)
                     last_message_id = msg.message_id
+                    for buf in self._stream_buffers.values():
+                        if buf.chat_id == chat_id:
+                            buf.last_message_time = time.monotonic()
                 except Exception:
                     log.exception("Plain text fallback failed for chat %s", chat_id)
                     break
@@ -733,16 +747,30 @@ class ExtensionImpl(Extension):
     # -- typing indicator ----------------------------------------------------
 
     async def _keep_typing(self, chat_id: int, session_id: str) -> None:
-        """Loop sending 'typing' chat action every 4s until cancelled."""
+        """Send 'typing' chat action periodically during processing gaps.
+
+        Runs continuously until cancelled. Only sends typing when there's been
+        a gap (>3s) since the last message was sent to the chat.
+        """
         try:
             while True:
-                try:
-                    await self.app.bot.send_chat_action(chat_id=chat_id, action="typing")
-                except Exception:
-                    log.debug("Typing action failed for chat %s", chat_id)
+                buf = self._stream_buffers.get(session_id)
+                if buf and buf.last_message_time > 0:
+                    # Buffer exists with activity — only type during gaps
+                    if time.monotonic() - buf.last_message_time > 3.0:
+                        try:
+                            await self.app.bot.send_chat_action(chat_id=chat_id, action="typing")
+                        except Exception:
+                            pass
+                else:
+                    # No buffer yet (pre-first-delivery) — always send typing
+                    try:
+                        await self.app.bot.send_chat_action(chat_id=chat_id, action="typing")
+                    except Exception:
+                        pass
                 await asyncio.sleep(4)
         except asyncio.CancelledError:
-            pass
+            return
 
     def _start_typing(self, chat_id: int, session_id: str) -> None:
         """Start the typing indicator loop for a session."""
