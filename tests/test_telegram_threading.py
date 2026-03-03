@@ -1,12 +1,11 @@
 """Tests for Telegram reply threading (Phase B1)."""
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from core.session import SessionStatus
-from telegram import ReplyParameters
 
 
 def _run(coro):

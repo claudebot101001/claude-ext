@@ -358,9 +358,12 @@ class ExtensionImpl(Extension):
         if not buf or not buf.text_parts:
             return False
         # Cancel pending flush timer (but not if we ARE the flush task)
-        if buf.flush_task and not buf.flush_task.done():
-            if buf.flush_task is not asyncio.current_task():
-                buf.flush_task.cancel()
+        if (
+            buf.flush_task
+            and not buf.flush_task.done()
+            and buf.flush_task is not asyncio.current_task()
+        ):
+            buf.flush_task.cancel()
         text = "".join(buf.text_parts)
         buf.text_parts.clear()
         buf.flush_task = None

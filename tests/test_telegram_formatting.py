@@ -1,7 +1,5 @@
 """Tests for Telegram HTML formatting utilities."""
 
-import pytest
-
 from extensions.telegram.formatting import chunk_html, escape_html, md_to_tg_html
 
 
@@ -90,7 +88,7 @@ class TestMdToTgHtml:
 
     def test_plain_text_escapes_html(self):
         result = md_to_tg_html("a < b > c & d")
-        assert "a &lt; b &gt; c &amp; d" == result
+        assert result == "a &lt; b &gt; c &amp; d"
 
     def test_multiline_mixed(self):
         md = "# Header\n\nSome **bold** text\n\n```python\nx = 1\n```\n\nDone."
