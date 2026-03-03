@@ -542,7 +542,7 @@ class ExtensionImpl(Extension):
             prefix = self._session_prefix_from_buf(buf)
             combined = f"{prefix}{buf.live_text}{separator}{tool_text}"
             if len(combined) < EDIT_CHAR_LIMIT:
-                buf.live_text += f"{separator}{tool_text}"
+                buf.live_text += f"{separator}{tool_text}\n\n"
                 display_text = f"{prefix}{buf.live_text}"
                 try:
                     html = md_to_tg_html(display_text)
@@ -558,9 +558,9 @@ class ExtensionImpl(Extension):
                     if "message is not modified" in str(e).lower():
                         return
                     # Fall through to send separately
-                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text))]
+                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text) + 2)]
                 except Exception:
-                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text))]
+                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text) + 2)]
 
         # Send as separate message (multi mode, or edit mode overflow)
         prefix = self._session_prefix_from_buf(buf)
