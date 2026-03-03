@@ -89,6 +89,7 @@ async def main():
     engine.init_sessions(
         state_dir,
         max_sessions_per_user=session_cfg.get("max_sessions_per_user", 5),
+        session_timeout=session_cfg.get("session_timeout", 7200),
     )
     await engine.session_manager.recover()
 
@@ -149,6 +150,9 @@ async def main():
         new_max = sess_cfg.get("max_sessions_per_user")
         if new_max is not None:
             engine.session_manager.max_sessions_per_user = new_max
+        new_timeout = sess_cfg.get("session_timeout")
+        if new_timeout is not None:
+            engine.session_manager.session_timeout = float(new_timeout)
 
         # Update engine (max_turns only — model/permission_mode not safe to hot-reload)
         new_eng_cfg = new_config.get("engine", {})

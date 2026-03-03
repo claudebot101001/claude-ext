@@ -40,7 +40,12 @@ class ClaudeEngine:
         self.registry = None  # set by main.py after Registry is created
         self.services: dict[str, Any] = {}
 
-    def init_sessions(self, base_dir: Path, max_sessions_per_user: int = 5) -> None:
+    def init_sessions(
+        self,
+        base_dir: Path,
+        max_sessions_per_user: int = 5,
+        session_timeout: float = 7200,
+    ) -> None:
         """Initialize the tmux-backed session manager."""
         self.events = EventLog(base_dir / "events.jsonl")
         self.session_manager = SessionManager(
@@ -54,6 +59,7 @@ class ClaudeEngine:
                 "gateway_mode": self.gateway_mode,
             },
             max_sessions_per_user=max_sessions_per_user,
+            session_timeout=session_timeout,
             events=self.events,
         )
         self.bridge = BridgeServer(base_dir / "bridge.sock")

@@ -102,11 +102,13 @@ class SessionManager:
         base_dir: Path,
         engine_config: dict,
         max_sessions_per_user: int = 5,
+        session_timeout: float = 7200,
         events=None,
     ):
         self.base_dir = base_dir
         self.engine_config = engine_config
         self.max_sessions_per_user = max_sessions_per_user
+        self.session_timeout = session_timeout
         self._events = events  # EventLog instance (optional)
         self.sessions: dict[str, Session] = {}
         self._queues: dict[str, asyncio.Queue] = {}
@@ -855,13 +857,14 @@ class SessionManager:
         self,
         session_id: str,
         sdir: Path,
-        timeout: float = 600,
+        timeout: float | None = None,
     ) -> tuple[str, dict]:
         """Read stream.jsonl incrementally, deliver events in real time.
 
         Returns ("", final_metadata) on success — text is already delivered
         via streaming callbacks.
         """
+        effective_timeout = timeout if timeout is not None else self.session_timeout
         stream_path = sdir / "stream.jsonl"
         exitcode_path = sdir / "exitcode"
         file_pos = 0
@@ -872,7 +875,7 @@ class SessionManager:
 
         while True:
             elapsed = time.monotonic() - start
-            if elapsed >= timeout:
+            if elapsed >= effective_timeout:
                 return "[Error] Claude Code timed out.", {"is_error": True, "timed_out": True}
 
             # Incremental read of stream.jsonl

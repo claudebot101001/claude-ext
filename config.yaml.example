@@ -54,6 +54,7 @@ state_dir: ~/.claude-ext
 sessions:
   max_sessions_per_user: 5       # Max concurrent sessions per user (= slot count)
                                  # Tip: increase to 8-10 when using subagent extension
+  session_timeout: 7200           # Max seconds a single prompt execution can run (default 2h)
 
 # Extensions to enable (must match directory names under extensions/)
 # Order matters: dependencies must come before dependents.
