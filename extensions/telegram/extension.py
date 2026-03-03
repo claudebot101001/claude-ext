@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -20,6 +21,7 @@ from telegram.ext import (
 from core.extension import Extension
 from core.session import Session, SessionStatus
 from core.status import format_status, get_auth_info, get_usage
+from extensions.telegram.formatting import chunk_html, escape_html, md_to_tg_html
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +53,7 @@ class ExtensionImpl(Extension):
         self._stream_buffers: dict[str, _StreamBuffer] = {}  # session_id -> buffer
         self._awaiting_text_answer: dict[str, str] = {}  # session_id -> request_id
         self._user_stream_levels: dict[str, str] = {}  # user_id -> "all"|"mcp"|"none"
+        self._typing_tasks: dict[str, asyncio.Task] = {}  # session_id -> typing loop task
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -139,6 +142,9 @@ class ExtensionImpl(Extension):
         if not chat_id:
             return
 
+        # Cancel typing indicator on first delivery for this session
+        self._cancel_typing(session_id)
+
         # --- Question from Claude (ask_user) ---
         if metadata.get("is_question"):
             request_id = metadata["request_id"]
@@ -176,8 +182,9 @@ class ExtensionImpl(Extension):
         if metadata.get("is_heartbeat"):
             elapsed_s = metadata.get("elapsed_s", 0)
             mins = elapsed_s // 60
-            text = f"[#{session.slot} {session.name}] Still working... ({mins}m elapsed)"
-            await self._send_chunked(chat_id, text)
+            prefix = f"[#{session.slot} {session.name}] "
+            text = f"{prefix}<i>Still working... ({mins}m elapsed)</i>"
+            await self._send_chunked(chat_id, text, parse_mode="HTML")
             return
 
         # --- Stream: text event (debounced) ---
@@ -208,7 +215,7 @@ class ExtensionImpl(Extension):
         if metadata.get("is_stopped"):
             await self._flush_stream_buffer(session_id)
             prefix = f"[#{session.slot} {session.name}] "
-            await self._send_chunked(chat_id, f"{prefix}Task stopped.")
+            await self._send_chunked(chat_id, f"{prefix}<b>Stopped</b>", parse_mode="HTML")
             return
 
         # --- Final result (streaming mode: text already delivered) ---
@@ -226,15 +233,23 @@ class ExtensionImpl(Extension):
                     "Stream text was not buffered for session %s, using fallback",
                     session_id[:8],
                 )
-                await self._send_chunked(chat_id, f"{prefix}{result_text}")
+                await self._send_html(chat_id, f"{prefix}{result_text}")
 
             cost = metadata.get("total_cost_usd")
             turns = metadata.get("num_turns")
             if metadata.get("is_error"):
-                err_text = result_text or "[Error]"
-                await self._send_chunked(chat_id, f"{prefix}{err_text}")
+                err_text = escape_html(result_text or "[Error]")
+                await self._send_chunked(
+                    chat_id,
+                    f"{prefix}<b>\u26a0 Error</b>\n<pre>{err_text}</pre>",
+                    parse_mode="HTML",
+                )
             elif cost is not None:
-                await self._send_chunked(chat_id, f"{prefix}--- ${cost:.4f} | {turns} turns ---")
+                await self._send_chunked(
+                    chat_id,
+                    f"{prefix}<i>--- ${cost:.4f} | {turns} turns ---</i>",
+                    parse_mode="HTML",
+                )
             return
 
         # --- Fallback (recovery with full text, backward compat) ---
@@ -244,8 +259,8 @@ class ExtensionImpl(Extension):
             turns = metadata.get("num_turns")
             footer = ""
             if cost is not None and not metadata.get("is_error"):
-                footer = f"\n\n--- ${cost:.4f} | {turns} turns ---"
-            await self._send_chunked(chat_id, f"{prefix}{result_text}{footer}")
+                footer = f"\n\n<i>--- ${cost:.4f} | {turns} turns ---</i>"
+            await self._send_html(chat_id, f"{prefix}{result_text}{footer}")
 
     # -- stream buffer helpers -----------------------------------------------
 
@@ -271,7 +286,7 @@ class ExtensionImpl(Extension):
         buf.flush_task = None
         if text.strip():
             prefix = f"[#{buf.slot} {buf.name}] "
-            await self._send_chunked(buf.chat_id, f"{prefix}{text}")
+            await self._send_html(buf.chat_id, f"{prefix}{text}")
             return True
         return False
 
@@ -300,7 +315,7 @@ class ExtensionImpl(Extension):
             return f"\U0001f527 {tool_name}: {detail}"
         return f"\U0001f527 {tool_name}"
 
-    async def _send_chunked(self, chat_id: int, text: str) -> None:
+    async def _send_chunked(self, chat_id: int, text: str, parse_mode: str | None = None) -> None:
         """Send text in chunks, splitting at newline boundaries when possible."""
         while text:
             if len(text) <= MAX_TG_MESSAGE:
@@ -314,10 +329,49 @@ class ExtensionImpl(Extension):
                 chunk = text[:cut]
                 text = text[cut:].lstrip("\n")
             try:
-                await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+                await self.app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=parse_mode)
             except Exception:
                 log.exception("Failed to deliver message to chat %s", chat_id)
                 break  # subsequent chunks will almost certainly fail too
+
+    async def _send_html(self, chat_id: int, text: str) -> None:
+        """Convert markdown to Telegram HTML and send, with plain-text fallback."""
+        html = md_to_tg_html(text)
+        chunks = chunk_html(html)
+        for chunk in chunks:
+            try:
+                await self.app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+            except BadRequest:
+                log.warning("HTML parse failed for chunk, retrying as plain text")
+                await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+            except Exception:
+                log.exception("Failed to deliver HTML message to chat %s", chat_id)
+                break
+
+    # -- typing indicator ----------------------------------------------------
+
+    async def _keep_typing(self, chat_id: int, session_id: str) -> None:
+        """Loop sending 'typing' chat action every 4s until cancelled."""
+        try:
+            while True:
+                try:
+                    await self.app.bot.send_chat_action(chat_id=chat_id, action="typing")
+                except Exception:
+                    log.debug("Typing action failed for chat %s", chat_id)
+                await asyncio.sleep(4)
+        except asyncio.CancelledError:
+            pass
+
+    def _start_typing(self, chat_id: int, session_id: str) -> None:
+        """Start the typing indicator loop for a session."""
+        self._cancel_typing(session_id)
+        self._typing_tasks[session_id] = asyncio.create_task(self._keep_typing(chat_id, session_id))
+
+    def _cancel_typing(self, session_id: str) -> None:
+        """Cancel the typing indicator loop for a session, if running."""
+        task = self._typing_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
 
     # -- ask_user callback handling ------------------------------------------
 
@@ -686,7 +740,8 @@ class ExtensionImpl(Extension):
 
         stopped, drained = await self.sm.stop_session(active_id)
 
-        # Cancel any pending ask_user questions for this session
+        # Cancel typing indicator and any pending ask_user questions
+        self._cancel_typing(active_id)
         self.engine.pending.cancel_for_session(active_id)
         self._awaiting_text_answer.pop(active_id, None)
 
@@ -735,7 +790,8 @@ class ExtensionImpl(Extension):
         name = found.name
         session_id = found.id
 
-        # Clean up stream buffer and stale ask_user state
+        # Clean up typing, stream buffer, and stale ask_user state
+        self._cancel_typing(session_id)
         buf = self._stream_buffers.pop(session_id, None)
         if buf and buf.flush_task and not buf.flush_task.done():
             buf.flush_task.cancel()
@@ -830,7 +886,10 @@ class ExtensionImpl(Extension):
         auto_note = " (auto-activated)" if auto_selected else ""
 
         if position == 0:
-            await update.message.reply_text(f"{tag}{auto_note} Processing...")
+            await update.message.reply_text(
+                f"{tag}{auto_note} <i>Processing...</i>", parse_mode="HTML"
+            )
+            self._start_typing(update.effective_chat.id, session.id)
         else:
             await update.message.reply_text(
                 f"{tag}{auto_note} Queued (position {position}). "
@@ -910,7 +969,11 @@ class ExtensionImpl(Extension):
         kind = "Image" if media_type == "image" else "File"
 
         if position == 0:
-            await update.message.reply_text(f"{tag}{auto_note} {kind} received, processing...")
+            await update.message.reply_text(
+                f"{tag}{auto_note} <i>{kind} received, processing...</i>",
+                parse_mode="HTML",
+            )
+            self._start_typing(update.effective_chat.id, session.id)
         else:
             await update.message.reply_text(
                 f"{tag}{auto_note} {kind} queued (position {position})."
@@ -975,6 +1038,12 @@ class ExtensionImpl(Extension):
         log.info("Telegram bot started polling.")
 
     async def stop(self) -> None:
+        # Cancel all typing indicator tasks
+        for task in self._typing_tasks.values():
+            if not task.done():
+                task.cancel()
+        self._typing_tasks.clear()
+
         # Cancel all pending stream flush tasks
         for buf in self._stream_buffers.values():
             if buf.flush_task and not buf.flush_task.done():
