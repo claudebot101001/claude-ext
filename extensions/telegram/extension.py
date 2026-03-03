@@ -52,6 +52,7 @@ class _StreamBuffer:
     # C2: tool call grouping
     tool_parts: list[str] = field(default_factory=list)
     tool_flush_task: asyncio.Task | None = None
+    tool_folded: bool = False  # True when tool text was folded into live_text
     # C3: cost footer integration (multi mode)
     last_sent_message_id: int | None = None
     last_sent_text: str = ""  # text of last sent message (for edit-to-append)
@@ -420,6 +421,10 @@ class ExtensionImpl(Extension):
         if not new_text.strip() and not buf.live_text:
             return False
 
+        # Add paragraph break when text follows folded tool summaries
+        if buf.tool_folded and new_text:
+            buf.live_text += "\n\n"
+            buf.tool_folded = False
         buf.live_text += new_text
         prefix = self._session_prefix_from_buf(buf)
         display_text = f"{prefix}{buf.live_text}"
@@ -536,31 +541,56 @@ class ExtensionImpl(Extension):
         if not tool_text.strip():
             return
 
-        # In edit mode: fold into the live message if possible
-        if self._stream_mode == "edit" and buf.live_message_id is not None:
-            separator = "\n\n"
+        # In edit mode: fold into live message, or create one
+        if self._stream_mode == "edit":
             prefix = self._session_prefix_from_buf(buf)
-            combined = f"{prefix}{buf.live_text}{separator}{tool_text}"
-            if len(combined) < EDIT_CHAR_LIMIT:
-                buf.live_text += f"{separator}{tool_text}\n\n"
-                display_text = f"{prefix}{buf.live_text}"
-                try:
-                    html = md_to_tg_html(display_text)
-                    await self.app.bot.edit_message_text(
-                        text=html,
-                        chat_id=buf.chat_id,
-                        message_id=buf.live_message_id,
-                        parse_mode="HTML",
-                    )
-                    buf.last_edit_time = time.monotonic()
-                    return
-                except BadRequest as e:
-                    if "message is not modified" in str(e).lower():
+
+            if buf.live_message_id is not None:
+                # Existing live message — edit in place
+                separator = "\n\n"
+                combined = f"{prefix}{buf.live_text}{separator}{tool_text}"
+                if len(combined) < EDIT_CHAR_LIMIT:
+                    buf.live_text += f"{separator}{tool_text}"
+                    buf.tool_folded = True
+                    display_text = f"{prefix}{buf.live_text}"
+                    try:
+                        html = md_to_tg_html(display_text)
+                        await self.app.bot.edit_message_text(
+                            text=html,
+                            chat_id=buf.chat_id,
+                            message_id=buf.live_message_id,
+                            parse_mode="HTML",
+                        )
+                        buf.last_edit_time = time.monotonic()
                         return
-                    # Fall through to send separately
-                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text) + 2)]
-                except Exception:
-                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text) + 2)]
+                    except BadRequest as e:
+                        if "message is not modified" in str(e).lower():
+                            return
+                        # Fall through to send separately
+                        buf.live_text = buf.live_text[: -(len(separator) + len(tool_text))]
+                        buf.tool_folded = False
+                    except Exception:
+                        buf.live_text = buf.live_text[: -(len(separator) + len(tool_text))]
+                        buf.tool_folded = False
+            else:
+                # No live message yet — create one with tool text
+                buf.live_text = tool_text
+                buf.tool_folded = True
+                display_text = f"{prefix}{buf.live_text}"
+                reply_to = None
+                if self._reply_threading and not buf.first_flush_done:
+                    reply_to = self._prompt_message_ids.get(session_id)
+                buf.first_flush_done = True
+                msg_id = await self._send_html(
+                    buf.chat_id,
+                    display_text[:MAX_TG_MESSAGE],
+                    reply_to_message_id=reply_to,
+                )
+                if msg_id is not None:
+                    buf.live_message_id = msg_id
+                    buf.last_sent_message_id = msg_id
+                    buf.last_edit_time = time.monotonic()
+                return
 
         # Send as separate message (multi mode, or edit mode overflow)
         prefix = self._session_prefix_from_buf(buf)
