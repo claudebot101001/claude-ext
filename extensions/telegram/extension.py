@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,7 +27,10 @@ from extensions.telegram.formatting import chunk_html, escape_html, md_to_tg_htm
 log = logging.getLogger(__name__)
 
 MAX_TG_MESSAGE = 4000  # Telegram limit is 4096; leave margin
+EDIT_CHAR_LIMIT = 3800  # freeze live message before hitting MAX_TG_MESSAGE
+MIN_EDIT_INTERVAL = 1.5  # seconds between edit_message_text calls
 STREAM_FLUSH_DELAY = 2.0  # seconds to wait before flushing text buffer
+TOOL_FLUSH_DELAY = 1.5  # seconds to debounce tool call grouping
 STREAM_LEVELS = ("all", "mcp", "none")  # tool_use verbosity levels
 
 
@@ -41,6 +45,16 @@ class _StreamBuffer:
     text_parts: list[str] = field(default_factory=list)
     flush_task: asyncio.Task | None = None
     first_flush_done: bool = False
+    # C1: edit-in-place streaming
+    live_message_id: int | None = None  # current editable message
+    live_text: str = ""  # full displayed text in live message
+    last_edit_time: float = 0.0  # monotonic time of last edit
+    # C2: tool call grouping
+    tool_parts: list[str] = field(default_factory=list)
+    tool_flush_task: asyncio.Task | None = None
+    # C3: cost footer integration (multi mode)
+    last_sent_message_id: int | None = None
+    last_sent_text: str = ""  # text of last sent message (for edit-to-append)
 
 
 class ExtensionImpl(Extension):
@@ -59,6 +73,7 @@ class ExtensionImpl(Extension):
         self._prompt_message_ids: dict[str, int] = {}  # session_id -> user message_id
         self._reply_threading = config.get("reply_threading", True)
         self._show_prefix = config.get("show_prefix", "auto")
+        self._stream_mode: str = config.get("stream_mode", "edit")  # "edit" or "multi"
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -219,35 +234,64 @@ class ExtensionImpl(Extension):
                     user_id=session.user_id,
                 )
                 self._stream_buffers[session_id] = buf
+            # Flush any pending tool summaries before text arrives
+            if buf.tool_parts:
+                await self._flush_tool_buffer(session_id)
             buf.text_parts.append(result_text)
             # Periodic flush: start timer once, delivers every STREAM_FLUSH_DELAY
             if not buf.flush_task or buf.flush_task.done():
                 buf.flush_task = asyncio.create_task(self._delayed_flush(session_id))
             return
 
-        # --- Stream: tool_use event (immediate, filtered by verbosity) ---
+        # --- Stream: tool_use event (grouped, filtered by verbosity) ---
         if metadata.get("is_stream") and metadata.get("stream_type") == "tool_use":
             level = self._get_stream_level(session.user_id)
             tool_name = metadata.get("tool_name") or ""
             show = level == "all" or (level == "mcp" and tool_name.startswith("mcp__"))
             if show:
-                await self._flush_stream_buffer(session_id)
+                buf = self._stream_buffers.get(session_id)
+                if not buf:
+                    buf = _StreamBuffer(
+                        chat_id=chat_id,
+                        slot=session.slot,
+                        name=session.name,
+                        user_id=session.user_id,
+                    )
+                    self._stream_buffers[session_id] = buf
                 summary = self._format_tool_use(metadata)
-                prefix = self._session_prefix(session, session.user_id)
-                await self._send_chunked(chat_id, f"{prefix}{summary}")
+                buf.tool_parts.append(summary)
+                # Start/restart debounce timer for tool flush
+                if buf.tool_flush_task and not buf.tool_flush_task.done():
+                    buf.tool_flush_task.cancel()
+                buf.tool_flush_task = asyncio.create_task(self._delayed_tool_flush(session_id))
             return
 
         # --- Stopped ---
         if metadata.get("is_stopped"):
-            await self._flush_stream_buffer(session_id)
+            buf = self._stream_buffers.get(session_id)
+            if buf and buf.tool_parts:
+                await self._flush_tool_buffer(session_id)
+            if self._stream_mode == "edit":
+                await self._stream_edit_flush(session_id)
+            else:
+                await self._flush_stream_buffer(session_id)
             prefix = self._session_prefix(session, session.user_id)
             await self._send_chunked(chat_id, f"{prefix}<b>Stopped</b>", parse_mode="HTML")
             return
 
         # --- Final result (streaming mode: text already delivered) ---
         if metadata.get("is_final"):
-            flushed = await self._flush_stream_buffer(session_id)
-            self._stream_buffers.pop(session_id, None)
+            buf = self._stream_buffers.get(session_id)
+
+            # Flush any pending tool summaries first
+            if buf and buf.tool_parts:
+                await self._flush_tool_buffer(session_id)
+
+            # Flush remaining text
+            if self._stream_mode == "edit":
+                flushed = await self._stream_edit_flush(session_id)
+            else:
+                flushed = await self._flush_stream_buffer(session_id)
 
             prefix = self._session_prefix(session, session.user_id)
             reply_to = self._prompt_message_ids.get(session_id) if self._reply_threading else None
@@ -260,9 +304,12 @@ class ExtensionImpl(Extension):
                     "Stream text was not buffered for session %s, using fallback",
                     session_id[:8],
                 )
-                await self._send_html(
+                msg_id = await self._send_html(
                     chat_id, f"{prefix}{result_text}", reply_to_message_id=reply_to
                 )
+                if buf and msg_id is not None:
+                    buf.last_sent_message_id = msg_id
+                    buf.last_sent_text = f"{prefix}{result_text}"
 
             cost = metadata.get("total_cost_usd")
             turns = metadata.get("num_turns")
@@ -274,12 +321,9 @@ class ExtensionImpl(Extension):
                     parse_mode="HTML",
                 )
             elif cost is not None:
-                await self._send_chunked(
-                    chat_id,
-                    f"{prefix}<i>--- ${cost:.4f} | {turns} turns ---</i>",
-                    parse_mode="HTML",
-                )
+                await self._send_cost_footer(session_id, chat_id, prefix, cost, turns)
 
+            self._stream_buffers.pop(session_id, None)
             self._prompt_message_ids.pop(session_id, None)
             return
 
@@ -288,20 +332,24 @@ class ExtensionImpl(Extension):
             prefix = self._session_prefix(session, session.user_id)
             cost = metadata.get("total_cost_usd")
             turns = metadata.get("num_turns")
+            body = f"{prefix}{result_text}"
             footer = ""
             if cost is not None and not metadata.get("is_error"):
                 footer = f"\n\n<i>--- ${cost:.4f} | {turns} turns ---</i>"
-            await self._send_html(chat_id, f"{prefix}{result_text}{footer}")
+            await self._send_html(chat_id, f"{body}{footer}")
 
     # -- stream buffer helpers -----------------------------------------------
 
     async def _delayed_flush(self, session_id: str) -> None:
         """Wait then flush the text buffer for a session."""
         await asyncio.sleep(STREAM_FLUSH_DELAY)
-        await self._flush_stream_buffer(session_id)
+        if self._stream_mode == "edit":
+            await self._stream_edit_flush(session_id)
+        else:
+            await self._flush_stream_buffer(session_id)
 
     async def _flush_stream_buffer(self, session_id: str) -> bool:
-        """Send accumulated text in the stream buffer, if any.
+        """Send accumulated text in the stream buffer, if any (multi mode).
 
         Returns True if text was flushed (regardless of send success).
         """
@@ -317,12 +365,16 @@ class ExtensionImpl(Extension):
         buf.flush_task = None
         if text.strip():
             prefix = self._session_prefix_from_buf(buf)
+            full_text = f"{prefix}{text}"
             # Reply threading: only on first flush for this prompt
             reply_to = None
             if self._reply_threading and not buf.first_flush_done:
                 reply_to = self._prompt_message_ids.get(session_id)
             buf.first_flush_done = True
-            await self._send_html(buf.chat_id, f"{prefix}{text}", reply_to_message_id=reply_to)
+            msg_id = await self._send_html(buf.chat_id, full_text, reply_to_message_id=reply_to)
+            if msg_id is not None:
+                buf.last_sent_message_id = msg_id
+                buf.last_sent_text = full_text
             return True
         return False
 
@@ -335,6 +387,249 @@ class ExtensionImpl(Extension):
         if len(self.sm.get_sessions_for_user(buf.user_id)) > 1:
             return f"[#{buf.slot} {buf.name}] "
         return ""
+
+    async def _stream_edit_flush(self, session_id: str) -> bool:
+        """Flush text buffer using edit-in-place mode.
+
+        Sends a new message or edits the existing live message. When the live
+        message approaches the Telegram character limit, it is frozen and a new
+        continuation message is started.
+
+        Returns True if text was flushed.
+        """
+        buf = self._stream_buffers.get(session_id)
+        if not buf or not buf.text_parts:
+            return False
+
+        # Cancel pending flush timer (but not if we ARE the flush task)
+        if (
+            buf.flush_task
+            and not buf.flush_task.done()
+            and buf.flush_task is not asyncio.current_task()
+        ):
+            buf.flush_task.cancel()
+
+        new_text = "".join(buf.text_parts)
+        buf.text_parts.clear()
+        buf.flush_task = None
+
+        if not new_text.strip() and not buf.live_text:
+            return False
+
+        buf.live_text += new_text
+        prefix = self._session_prefix_from_buf(buf)
+        display_text = f"{prefix}{buf.live_text}"
+
+        # No live message yet — send a new one
+        if buf.live_message_id is None:
+            # Reply threading: only on first flush for this prompt
+            reply_to = None
+            if self._reply_threading and not buf.first_flush_done:
+                reply_to = self._prompt_message_ids.get(session_id)
+            buf.first_flush_done = True
+            msg_id = await self._send_html(
+                buf.chat_id,
+                display_text[:MAX_TG_MESSAGE],
+                reply_to_message_id=reply_to,
+            )
+            if msg_id is not None:
+                buf.live_message_id = msg_id
+                buf.last_sent_message_id = msg_id
+                buf.last_edit_time = time.monotonic()
+            return True
+
+        # Live message exists — check if we need to freeze and start new
+        if len(display_text) >= EDIT_CHAR_LIMIT:
+            # Freeze current live message (leave it as-is), start new
+            buf.live_message_id = None
+            buf.live_text = new_text  # carry over only the new chunk
+            display_text = f"{prefix}{buf.live_text}"
+            msg_id = await self._send_html(buf.chat_id, display_text[:MAX_TG_MESSAGE])
+            if msg_id is not None:
+                buf.live_message_id = msg_id
+                buf.last_sent_message_id = msg_id
+                buf.last_edit_time = time.monotonic()
+            return True
+
+        # Rate limit: minimum interval between edits
+        now = time.monotonic()
+        if now - buf.last_edit_time < MIN_EDIT_INTERVAL:
+            # Schedule a retry after the remaining cooldown
+            if not buf.flush_task or buf.flush_task.done():
+                remaining = MIN_EDIT_INTERVAL - (now - buf.last_edit_time)
+                buf.flush_task = asyncio.create_task(
+                    self._delayed_edit_retry(session_id, remaining)
+                )
+            return True
+
+        # Edit the live message with HTML formatting
+        try:
+            html = md_to_tg_html(display_text)
+            await self.app.bot.edit_message_text(
+                text=html,
+                chat_id=buf.chat_id,
+                message_id=buf.live_message_id,
+                parse_mode="HTML",
+            )
+            buf.last_edit_time = now
+        except BadRequest as e:
+            err_msg = str(e).lower()
+            if "message is not modified" in err_msg:
+                pass  # Text unchanged, ignore
+            elif "message to edit not found" in err_msg:
+                # Message was deleted, fall back to new message
+                log.warning("Live message deleted, sending new message")
+                buf.live_message_id = None
+                msg_id = await self._send_html(buf.chat_id, display_text[:MAX_TG_MESSAGE])
+                if msg_id is not None:
+                    buf.live_message_id = msg_id
+                    buf.last_sent_message_id = msg_id
+                    buf.last_edit_time = time.monotonic()
+            else:
+                log.warning("edit_message_text failed: %s", e)
+                # Try plain text fallback
+                try:
+                    await self.app.bot.edit_message_text(
+                        text=display_text,
+                        chat_id=buf.chat_id,
+                        message_id=buf.live_message_id,
+                    )
+                    buf.last_edit_time = now
+                except Exception:
+                    log.exception("edit_message_text plain fallback failed")
+        except Exception:
+            log.exception("edit_message_text failed unexpectedly")
+
+        return True
+
+    async def _delayed_edit_retry(self, session_id: str, delay: float) -> None:
+        """Retry an edit flush after rate-limit delay."""
+        await asyncio.sleep(delay)
+        await self._stream_edit_flush(session_id)
+
+    # -- tool call grouping helpers ------------------------------------------
+
+    async def _flush_tool_buffer(self, session_id: str) -> None:
+        """Send accumulated tool call summaries as one message."""
+        buf = self._stream_buffers.get(session_id)
+        if not buf or not buf.tool_parts:
+            return
+
+        # Cancel pending tool flush timer (but not if we ARE the flush task)
+        if (
+            buf.tool_flush_task
+            and not buf.tool_flush_task.done()
+            and buf.tool_flush_task is not asyncio.current_task()
+        ):
+            buf.tool_flush_task.cancel()
+        buf.tool_flush_task = None
+
+        tool_text = "\n".join(buf.tool_parts)
+        buf.tool_parts.clear()
+
+        if not tool_text.strip():
+            return
+
+        # In edit mode: fold into the live message if possible
+        if self._stream_mode == "edit" and buf.live_message_id is not None:
+            separator = "\n\n"
+            prefix = self._session_prefix_from_buf(buf)
+            combined = f"{prefix}{buf.live_text}{separator}{tool_text}"
+            if len(combined) < EDIT_CHAR_LIMIT:
+                buf.live_text += f"{separator}{tool_text}"
+                display_text = f"{prefix}{buf.live_text}"
+                try:
+                    html = md_to_tg_html(display_text)
+                    await self.app.bot.edit_message_text(
+                        text=html,
+                        chat_id=buf.chat_id,
+                        message_id=buf.live_message_id,
+                        parse_mode="HTML",
+                    )
+                    buf.last_edit_time = time.monotonic()
+                    return
+                except BadRequest as e:
+                    if "message is not modified" in str(e).lower():
+                        return
+                    # Fall through to send separately
+                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text))]
+                except Exception:
+                    buf.live_text = buf.live_text[: -(len(separator) + len(tool_text))]
+
+        # Send as separate message (multi mode, or edit mode overflow)
+        prefix = self._session_prefix_from_buf(buf)
+        msg_id = await self._send_chunked(buf.chat_id, f"{prefix}{tool_text}")
+        if msg_id is not None:
+            buf.last_sent_message_id = msg_id
+
+    async def _delayed_tool_flush(self, session_id: str) -> None:
+        """Wait then flush the tool buffer for a session."""
+        await asyncio.sleep(TOOL_FLUSH_DELAY)
+        await self._flush_tool_buffer(session_id)
+
+    # -- cost footer integration ---------------------------------------------
+
+    async def _send_cost_footer(
+        self,
+        session_id: str,
+        chat_id: int,
+        prefix: str,
+        cost: float,
+        turns: int | None,
+    ) -> None:
+        """Append cost footer to the last message, or send as separate message.
+
+        In edit mode: final edit of the live message with cost footer appended.
+        In multi mode: edit the last sent message to append footer.
+        Falls back to sending a separate message if edit fails.
+        """
+        footer = f"\n\n<i>--- ${cost:.4f} | {turns} turns ---</i>"
+        buf = self._stream_buffers.get(session_id)
+
+        # Edit mode: append footer to live message via final edit
+        if self._stream_mode == "edit" and buf and buf.live_message_id:
+            raw_display = f"{prefix}{buf.live_text}"
+            html = md_to_tg_html(raw_display) + footer
+            if len(html) < MAX_TG_MESSAGE:
+                try:
+                    await self.app.bot.edit_message_text(
+                        text=html,
+                        chat_id=chat_id,
+                        message_id=buf.live_message_id,
+                        parse_mode="HTML",
+                    )
+                    buf.live_message_id = None
+                    return
+                except BadRequest as e:
+                    if "message is not modified" not in str(e).lower():
+                        log.warning("Cost footer edit failed: %s", e)
+                except Exception:
+                    log.exception("Cost footer edit failed unexpectedly")
+
+        # Multi mode: edit the last sent message to append footer
+        if buf and buf.last_sent_message_id and buf.last_sent_text:
+            html = md_to_tg_html(buf.last_sent_text) + footer
+            if len(html) < MAX_TG_MESSAGE:
+                try:
+                    await self.app.bot.edit_message_text(
+                        text=html,
+                        chat_id=chat_id,
+                        message_id=buf.last_sent_message_id,
+                        parse_mode="HTML",
+                    )
+                    return
+                except BadRequest as e:
+                    if "message is not modified" not in str(e).lower():
+                        log.warning("Cost footer edit (multi) failed: %s", e)
+                except Exception:
+                    log.exception("Cost footer edit (multi) failed unexpectedly")
+
+        # Fallback: send as separate message
+        await self._send_chunked(
+            chat_id,
+            f"{prefix}<i>--- ${cost:.4f} | {turns} turns ---</i>",
+            parse_mode="HTML",
+        )
 
     @staticmethod
     def _format_tool_use(metadata: dict) -> str:
@@ -367,8 +662,12 @@ class ExtensionImpl(Extension):
         text: str,
         parse_mode: str | None = None,
         reply_to_message_id: int | None = None,
-    ) -> None:
-        """Send text in chunks, splitting at newline boundaries when possible."""
+    ) -> int | None:
+        """Send text in chunks, splitting at newline boundaries when possible.
+
+        Returns the message_id of the last successfully sent message, or None.
+        """
+        last_message_id: int | None = None
         first_chunk = True
         while text:
             if len(text) <= MAX_TG_MESSAGE:
@@ -388,18 +687,24 @@ class ExtensionImpl(Extension):
                         message_id=reply_to_message_id,
                         allow_sending_without_reply=True,
                     )
-                await self.app.bot.send_message(**kwargs)
+                msg = await self.app.bot.send_message(**kwargs)
+                last_message_id = msg.message_id
             except Exception:
                 log.exception("Failed to deliver message to chat %s", chat_id)
                 break  # subsequent chunks will almost certainly fail too
             first_chunk = False
+        return last_message_id
 
     async def _send_html(
         self, chat_id: int, text: str, reply_to_message_id: int | None = None
-    ) -> None:
-        """Convert markdown to Telegram HTML and send, with plain-text fallback."""
+    ) -> int | None:
+        """Convert markdown to Telegram HTML and send, with plain-text fallback.
+
+        Returns the message_id of the last successfully sent message, or None.
+        """
         html = md_to_tg_html(text)
         chunks = chunk_html(html)
+        last_message_id: int | None = None
         first_chunk = True
         for chunk in chunks:
             try:
@@ -409,14 +714,21 @@ class ExtensionImpl(Extension):
                         message_id=reply_to_message_id,
                         allow_sending_without_reply=True,
                     )
-                await self.app.bot.send_message(**kwargs)
+                msg = await self.app.bot.send_message(**kwargs)
+                last_message_id = msg.message_id
             except BadRequest:
                 log.warning("HTML parse failed for chunk, retrying as plain text")
-                await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+                try:
+                    msg = await self.app.bot.send_message(chat_id=chat_id, text=chunk)
+                    last_message_id = msg.message_id
+                except Exception:
+                    log.exception("Plain text fallback failed for chat %s", chat_id)
+                    break
             except Exception:
                 log.exception("Failed to deliver HTML message to chat %s", chat_id)
                 break
             first_chunk = False
+        return last_message_id
 
     # -- typing indicator ----------------------------------------------------
 
@@ -863,8 +1175,11 @@ class ExtensionImpl(Extension):
         # Clean up typing, stream buffer, prompt ids, and stale ask_user state
         self._cancel_typing(session_id)
         buf = self._stream_buffers.pop(session_id, None)
-        if buf and buf.flush_task and not buf.flush_task.done():
-            buf.flush_task.cancel()
+        if buf:
+            if buf.flush_task and not buf.flush_task.done():
+                buf.flush_task.cancel()
+            if buf.tool_flush_task and not buf.tool_flush_task.done():
+                buf.tool_flush_task.cancel()
         self._awaiting_text_answer.pop(session_id, None)
         self._prompt_message_ids.pop(session_id, None)
 
@@ -1119,10 +1434,12 @@ class ExtensionImpl(Extension):
                 task.cancel()
         self._typing_tasks.clear()
 
-        # Cancel all pending stream flush tasks
+        # Cancel all pending stream flush and tool flush tasks
         for buf in self._stream_buffers.values():
             if buf.flush_task and not buf.flush_task.done():
                 buf.flush_task.cancel()
+            if buf.tool_flush_task and not buf.tool_flush_task.done():
+                buf.tool_flush_task.cancel()
         self._stream_buffers.clear()
         self._awaiting_text_answer.clear()
         self._prompt_message_ids.clear()
