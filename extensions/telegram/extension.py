@@ -1048,9 +1048,18 @@ class ExtensionImpl(Extension):
         self.engine.services.pop("telegram", None)
 
         if self.app:
-            await self.app.updater.stop()
-            await self.app.stop()
-            await self.app.shutdown()
+            try:
+                await asyncio.wait_for(self.app.updater.stop(), timeout=5.0)
+            except Exception:
+                log.warning("Telegram updater.stop() failed/timed out", exc_info=True)
+            try:
+                await self.app.stop()
+            except Exception:
+                log.warning("Telegram app.stop() failed", exc_info=True)
+            try:
+                await self.app.shutdown()
+            except Exception:
+                log.warning("Telegram app.shutdown() failed", exc_info=True)
             log.info("Telegram bot stopped.")
 
     async def health_check(self) -> dict:

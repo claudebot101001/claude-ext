@@ -159,6 +159,8 @@ async def main():
             await asyncio.wait_for(_graceful_shutdown(registry, engine), timeout=15.0)
         except TimeoutError:
             log.warning("Graceful shutdown timed out after 15s, forcing exit")
+            pid_file.unlink(missing_ok=True)
+            os._exit(1)
         pid_file.unlink(missing_ok=True)
 
 
