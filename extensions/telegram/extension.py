@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 MAX_TG_MESSAGE = 4000  # Telegram limit is 4096; leave margin
 STREAM_FLUSH_DELAY = 2.0  # seconds to wait before flushing text buffer
+DRAFT_FLUSH_DELAY = 0.5  # seconds between draft updates
 STREAM_LEVELS = ("all", "mcp", "none")  # tool_use verbosity levels
 
 
@@ -37,6 +38,9 @@ class _StreamBuffer:
     name: str
     text_parts: list[str] = field(default_factory=list)
     flush_task: asyncio.Task | None = None
+    draft_id: int = 0
+    draft_task: asyncio.Task | None = None
+    draft_failed: bool = False
 
 
 class ExtensionImpl(Extension):
@@ -51,6 +55,8 @@ class ExtensionImpl(Extension):
         self._stream_buffers: dict[str, _StreamBuffer] = {}  # session_id -> buffer
         self._awaiting_text_answer: dict[str, str] = {}  # session_id -> request_id
         self._user_stream_levels: dict[str, str] = {}  # user_id -> "all"|"mcp"|"none"
+        self._streaming_mode = config.get("streaming")  # None | "partial"
+        self._draft_counter: int = 0
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -186,11 +192,23 @@ class ExtensionImpl(Extension):
             if not buf:
                 buf = _StreamBuffer(chat_id=chat_id, slot=session.slot, name=session.name)
                 self._stream_buffers[session_id] = buf
+                if self._streaming_mode == "partial":
+                    self._draft_counter += 1
+                    buf.draft_id = self._draft_counter
             buf.text_parts.append(result_text)
-            # Reset flush timer
-            if buf.flush_task and not buf.flush_task.done():
-                buf.flush_task.cancel()
-            buf.flush_task = asyncio.create_task(self._delayed_flush(session_id))
+            if self._streaming_mode == "partial" and buf.draft_id and not buf.draft_failed:
+                # Draft mode: debounce draft updates, skip standard flush timer
+                if buf.draft_task and not buf.draft_task.done():
+                    buf.draft_task.cancel()
+                buf.draft_task = asyncio.create_task(self._delayed_draft_update(session_id))
+                if buf.flush_task and not buf.flush_task.done():
+                    buf.flush_task.cancel()
+                    buf.flush_task = None
+            else:
+                # Standard mode: 2s debounce flush
+                if buf.flush_task and not buf.flush_task.done():
+                    buf.flush_task.cancel()
+                buf.flush_task = asyncio.create_task(self._delayed_flush(session_id))
             return
 
         # --- Stream: tool_use event (immediate, filtered by verbosity) ---
@@ -203,6 +221,12 @@ class ExtensionImpl(Extension):
                 summary = self._format_tool_use(metadata)
                 prefix = f"[#{session.slot} {session.name}] "
                 await self._send_chunked(chat_id, f"{prefix}{summary}")
+            # Reset draft_id so next text segment gets a fresh draft animation
+            buf = self._stream_buffers.get(session_id)
+            if buf and buf.draft_id:
+                self._draft_counter += 1
+                buf.draft_id = self._draft_counter
+                buf.draft_failed = False
             return
 
         # --- Stopped ---
@@ -255,6 +279,38 @@ class ExtensionImpl(Extension):
         await asyncio.sleep(STREAM_FLUSH_DELAY)
         await self._flush_stream_buffer(session_id)
 
+    async def _delayed_draft_update(self, session_id: str) -> None:
+        """Wait DRAFT_FLUSH_DELAY then send current buffer as a draft update."""
+        await asyncio.sleep(DRAFT_FLUSH_DELAY)
+        await self._send_draft_update(session_id)
+
+    async def _send_draft_update(self, session_id: str) -> None:
+        """Send accumulated text as a draft preview (does NOT clear text_parts)."""
+        buf = self._stream_buffers.get(session_id)
+        if not buf or not buf.text_parts or not buf.draft_id:
+            return
+        text = "".join(buf.text_parts)
+        if not text.strip():
+            return
+        prefix = f"[#{buf.slot} {buf.name}] "
+        draft_text = f"{prefix}{text}"
+        if len(draft_text) > MAX_TG_MESSAGE:
+            draft_text = draft_text[: MAX_TG_MESSAGE - 3] + "..."
+        try:
+            await self.app.bot.send_message_draft(
+                chat_id=buf.chat_id,
+                draft_id=buf.draft_id,
+                text=draft_text,
+            )
+        except Exception:
+            log.warning(
+                "send_message_draft failed for session %s, falling back to standard mode",
+                session_id[:8],
+            )
+            buf.draft_failed = True
+            if buf.text_parts and (not buf.flush_task or buf.flush_task.done()):
+                buf.flush_task = asyncio.create_task(self._delayed_flush(session_id))
+
     async def _flush_stream_buffer(self, session_id: str) -> bool:
         """Send accumulated text in the stream buffer, if any.
 
@@ -266,9 +322,12 @@ class ExtensionImpl(Extension):
         # Cancel pending flush timer
         if buf.flush_task and not buf.flush_task.done():
             buf.flush_task.cancel()
+        if buf.draft_task and not buf.draft_task.done():
+            buf.draft_task.cancel()
         text = "".join(buf.text_parts)
         buf.text_parts.clear()
         buf.flush_task = None
+        buf.draft_task = None
         if text.strip():
             prefix = f"[#{buf.slot} {buf.name}] "
             await self._send_chunked(buf.chat_id, f"{prefix}{text}")
@@ -739,6 +798,8 @@ class ExtensionImpl(Extension):
         buf = self._stream_buffers.pop(session_id, None)
         if buf and buf.flush_task and not buf.flush_task.done():
             buf.flush_task.cancel()
+        if buf and buf.draft_task and not buf.draft_task.done():
+            buf.draft_task.cancel()
         self._awaiting_text_answer.pop(session_id, None)
 
         await self.sm.destroy_session(session_id)
@@ -979,6 +1040,8 @@ class ExtensionImpl(Extension):
         for buf in self._stream_buffers.values():
             if buf.flush_task and not buf.flush_task.done():
                 buf.flush_task.cancel()
+            if buf.draft_task and not buf.draft_task.done():
+                buf.draft_task.cancel()
         self._stream_buffers.clear()
         self._awaiting_text_answer.clear()
 
