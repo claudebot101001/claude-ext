@@ -7,7 +7,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, ReplyParameters, Update
 from telegram.error import BadRequest
 from telegram.ext import (
     Application,
@@ -37,8 +37,10 @@ class _StreamBuffer:
     chat_id: int
     slot: int
     name: str
+    user_id: str = ""
     text_parts: list[str] = field(default_factory=list)
     flush_task: asyncio.Task | None = None
+    first_flush_done: bool = False
 
 
 class ExtensionImpl(Extension):
@@ -54,6 +56,9 @@ class ExtensionImpl(Extension):
         self._awaiting_text_answer: dict[str, str] = {}  # session_id -> request_id
         self._user_stream_levels: dict[str, str] = {}  # user_id -> "all"|"mcp"|"none"
         self._typing_tasks: dict[str, asyncio.Task] = {}  # session_id -> typing loop task
+        self._prompt_message_ids: dict[str, int] = {}  # session_id -> user message_id
+        self._reply_threading = config.get("reply_threading", True)
+        self._show_prefix = config.get("show_prefix", "auto")
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -127,6 +132,22 @@ class ExtensionImpl(Extension):
     def _get_stream_level(self, user_id: str) -> str:
         return self._user_stream_levels.get(user_id, "all")
 
+    # -- smart session prefix ------------------------------------------------
+
+    def _session_prefix(self, session, user_id: str) -> str:
+        """Return session prefix based on show_prefix config.
+
+        Returns '[#slot name] ' (with trailing space) or '' (empty).
+        """
+        if self._show_prefix == "always":
+            return f"[#{session.slot} {session.name}] "
+        if self._show_prefix == "never":
+            return ""
+        # auto: only show when user has multiple sessions
+        if len(self.sm.get_sessions_for_user(user_id)) > 1:
+            return f"[#{session.slot} {session.name}] "
+        return ""
+
     # -- delivery callback (called by SessionManager) -----------------------
 
     async def _deliver_result(
@@ -149,7 +170,7 @@ class ExtensionImpl(Extension):
         if metadata.get("is_question"):
             request_id = metadata["request_id"]
             options = metadata.get("options") or []
-            prefix = f"[#{session.slot} {session.name}] "
+            prefix = self._session_prefix(session, session.user_id)
             question_text = f"{prefix}\u2753 {result_text}"
 
             if options:
@@ -182,7 +203,7 @@ class ExtensionImpl(Extension):
         if metadata.get("is_heartbeat"):
             elapsed_s = metadata.get("elapsed_s", 0)
             mins = elapsed_s // 60
-            prefix = f"[#{session.slot} {session.name}] "
+            prefix = self._session_prefix(session, session.user_id)
             text = f"{prefix}<i>Still working... ({mins}m elapsed)</i>"
             await self._send_chunked(chat_id, text, parse_mode="HTML")
             return
@@ -191,7 +212,12 @@ class ExtensionImpl(Extension):
         if metadata.get("is_stream") and metadata.get("stream_type") == "text":
             buf = self._stream_buffers.get(session_id)
             if not buf:
-                buf = _StreamBuffer(chat_id=chat_id, slot=session.slot, name=session.name)
+                buf = _StreamBuffer(
+                    chat_id=chat_id,
+                    slot=session.slot,
+                    name=session.name,
+                    user_id=session.user_id,
+                )
                 self._stream_buffers[session_id] = buf
             buf.text_parts.append(result_text)
             # Periodic flush: start timer once, delivers every STREAM_FLUSH_DELAY
@@ -207,14 +233,14 @@ class ExtensionImpl(Extension):
             if show:
                 await self._flush_stream_buffer(session_id)
                 summary = self._format_tool_use(metadata)
-                prefix = f"[#{session.slot} {session.name}] "
+                prefix = self._session_prefix(session, session.user_id)
                 await self._send_chunked(chat_id, f"{prefix}{summary}")
             return
 
         # --- Stopped ---
         if metadata.get("is_stopped"):
             await self._flush_stream_buffer(session_id)
-            prefix = f"[#{session.slot} {session.name}] "
+            prefix = self._session_prefix(session, session.user_id)
             await self._send_chunked(chat_id, f"{prefix}<b>Stopped</b>", parse_mode="HTML")
             return
 
@@ -223,7 +249,8 @@ class ExtensionImpl(Extension):
             flushed = await self._flush_stream_buffer(session_id)
             self._stream_buffers.pop(session_id, None)
 
-            prefix = f"[#{session.slot} {session.name}] "
+            prefix = self._session_prefix(session, session.user_id)
+            reply_to = self._prompt_message_ids.get(session_id) if self._reply_threading else None
 
             # Fallback: if stream buffer was empty (text events were lost
             # during debounce, or never delivered), use result_text from
@@ -233,7 +260,9 @@ class ExtensionImpl(Extension):
                     "Stream text was not buffered for session %s, using fallback",
                     session_id[:8],
                 )
-                await self._send_html(chat_id, f"{prefix}{result_text}")
+                await self._send_html(
+                    chat_id, f"{prefix}{result_text}", reply_to_message_id=reply_to
+                )
 
             cost = metadata.get("total_cost_usd")
             turns = metadata.get("num_turns")
@@ -250,11 +279,13 @@ class ExtensionImpl(Extension):
                     f"{prefix}<i>--- ${cost:.4f} | {turns} turns ---</i>",
                     parse_mode="HTML",
                 )
+
+            self._prompt_message_ids.pop(session_id, None)
             return
 
         # --- Fallback (recovery with full text, backward compat) ---
         if result_text:
-            prefix = f"[#{session.slot} {session.name}] "
+            prefix = self._session_prefix(session, session.user_id)
             cost = metadata.get("total_cost_usd")
             turns = metadata.get("num_turns")
             footer = ""
@@ -285,10 +316,25 @@ class ExtensionImpl(Extension):
         buf.text_parts.clear()
         buf.flush_task = None
         if text.strip():
-            prefix = f"[#{buf.slot} {buf.name}] "
-            await self._send_html(buf.chat_id, f"{prefix}{text}")
+            prefix = self._session_prefix_from_buf(buf)
+            # Reply threading: only on first flush for this prompt
+            reply_to = None
+            if self._reply_threading and not buf.first_flush_done:
+                reply_to = self._prompt_message_ids.get(session_id)
+            buf.first_flush_done = True
+            await self._send_html(buf.chat_id, f"{prefix}{text}", reply_to_message_id=reply_to)
             return True
         return False
+
+    def _session_prefix_from_buf(self, buf: _StreamBuffer) -> str:
+        """Build session prefix from a stream buffer (no Session object needed)."""
+        if self._show_prefix == "always":
+            return f"[#{buf.slot} {buf.name}] "
+        if self._show_prefix == "never":
+            return ""
+        if len(self.sm.get_sessions_for_user(buf.user_id)) > 1:
+            return f"[#{buf.slot} {buf.name}] "
+        return ""
 
     @staticmethod
     def _format_tool_use(metadata: dict) -> str:
@@ -315,8 +361,15 @@ class ExtensionImpl(Extension):
             return f"\U0001f527 {tool_name}: {detail}"
         return f"\U0001f527 {tool_name}"
 
-    async def _send_chunked(self, chat_id: int, text: str, parse_mode: str | None = None) -> None:
+    async def _send_chunked(
+        self,
+        chat_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        reply_to_message_id: int | None = None,
+    ) -> None:
         """Send text in chunks, splitting at newline boundaries when possible."""
+        first_chunk = True
         while text:
             if len(text) <= MAX_TG_MESSAGE:
                 chunk = text
@@ -329,24 +382,41 @@ class ExtensionImpl(Extension):
                 chunk = text[:cut]
                 text = text[cut:].lstrip("\n")
             try:
-                await self.app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode=parse_mode)
+                kwargs: dict = {"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode}
+                if first_chunk and reply_to_message_id is not None:
+                    kwargs["reply_parameters"] = ReplyParameters(
+                        message_id=reply_to_message_id,
+                        allow_sending_without_reply=True,
+                    )
+                await self.app.bot.send_message(**kwargs)
             except Exception:
                 log.exception("Failed to deliver message to chat %s", chat_id)
                 break  # subsequent chunks will almost certainly fail too
+            first_chunk = False
 
-    async def _send_html(self, chat_id: int, text: str) -> None:
+    async def _send_html(
+        self, chat_id: int, text: str, reply_to_message_id: int | None = None
+    ) -> None:
         """Convert markdown to Telegram HTML and send, with plain-text fallback."""
         html = md_to_tg_html(text)
         chunks = chunk_html(html)
+        first_chunk = True
         for chunk in chunks:
             try:
-                await self.app.bot.send_message(chat_id=chat_id, text=chunk, parse_mode="HTML")
+                kwargs: dict = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+                if first_chunk and reply_to_message_id is not None:
+                    kwargs["reply_parameters"] = ReplyParameters(
+                        message_id=reply_to_message_id,
+                        allow_sending_without_reply=True,
+                    )
+                await self.app.bot.send_message(**kwargs)
             except BadRequest:
                 log.warning("HTML parse failed for chunk, retrying as plain text")
                 await self.app.bot.send_message(chat_id=chat_id, text=chunk)
             except Exception:
                 log.exception("Failed to deliver HTML message to chat %s", chat_id)
                 break
+            first_chunk = False
 
     # -- typing indicator ----------------------------------------------------
 
@@ -790,12 +860,13 @@ class ExtensionImpl(Extension):
         name = found.name
         session_id = found.id
 
-        # Clean up typing, stream buffer, and stale ask_user state
+        # Clean up typing, stream buffer, prompt ids, and stale ask_user state
         self._cancel_typing(session_id)
         buf = self._stream_buffers.pop(session_id, None)
         if buf and buf.flush_task and not buf.flush_task.done():
             buf.flush_task.cancel()
         self._awaiting_text_answer.pop(session_id, None)
+        self._prompt_message_ids.pop(session_id, None)
 
         await self.sm.destroy_session(session_id)
 
@@ -882,19 +953,21 @@ class ExtensionImpl(Extension):
             await update.message.reply_text(str(e))
             return
 
-        tag = f"[#{session.slot} {session.name}]"
-        auto_note = " (auto-activated)" if auto_selected else ""
+        prefix = self._session_prefix(session, str(update.effective_user.id))
+        auto_note = "(auto-activated) " if auto_selected else ""
 
         if position == 0:
             await update.message.reply_text(
-                f"{tag}{auto_note} <i>Processing...</i>", parse_mode="HTML"
+                f"{prefix}{auto_note}<i>Processing...</i>", parse_mode="HTML"
             )
             self._start_typing(update.effective_chat.id, session.id)
         else:
             await update.message.reply_text(
-                f"{tag}{auto_note} Queued (position {position}). "
+                f"{prefix}{auto_note}Queued (position {position}). "
                 f"Use /new to start a parallel session."
             )
+
+        self._prompt_message_ids[session.id] = update.message.message_id
 
     # -- media handler ------------------------------------------------------
 
@@ -964,20 +1037,22 @@ class ExtensionImpl(Extension):
             await update.message.reply_text(str(e))
             return
 
-        tag = f"[#{session.slot} {session.name}]"
-        auto_note = " (auto-activated)" if auto_selected else ""
+        prefix = self._session_prefix(session, str(update.effective_user.id))
+        auto_note = "(auto-activated) " if auto_selected else ""
         kind = "Image" if media_type == "image" else "File"
 
         if position == 0:
             await update.message.reply_text(
-                f"{tag}{auto_note} <i>{kind} received, processing...</i>",
+                f"{prefix}{auto_note}<i>{kind} received, processing...</i>",
                 parse_mode="HTML",
             )
             self._start_typing(update.effective_chat.id, session.id)
         else:
             await update.message.reply_text(
-                f"{tag}{auto_note} {kind} queued (position {position})."
+                f"{prefix}{auto_note}{kind} queued (position {position})."
             )
+
+        self._prompt_message_ids[session.id] = update.message.message_id
 
     async def _handle_unsupported(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         """Reply to unsupported message types."""
@@ -1050,6 +1125,7 @@ class ExtensionImpl(Extension):
                 buf.flush_task.cancel()
         self._stream_buffers.clear()
         self._awaiting_text_answer.clear()
+        self._prompt_message_ids.clear()
 
         self.engine.services.pop("telegram", None)
 
