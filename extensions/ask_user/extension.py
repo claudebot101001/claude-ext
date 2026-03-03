@@ -57,13 +57,6 @@ class ExtensionImpl(Extension):
         # Disable built-in AskUserQuestion — our MCP ask_user replaces it
         self.sm.register_disallowed_tool("AskUserQuestion")
 
-        # Minimal guidance — tool routing is enforced by --disallowedTools
-        self.sm.add_system_prompt(
-            "When you need to ask the user a question or present choices, "
-            "use the ask_user MCP tool.",
-            mcp_server="ask_user",
-        )
-
         log.info("ask_user extension started (timeout=%ss)", self._timeout)
 
     async def stop(self) -> None:

@@ -89,7 +89,7 @@ class TestSubagentStart:
         _run(ext.start())
         ext.engine.session_manager.add_system_prompt.assert_called_once()
         prompt = ext.engine.session_manager.add_system_prompt.call_args[0][0]
-        assert "subagent_spawn" in prompt
+        assert "sub-agent" in prompt
 
     def test_start_registers_service(self, ext):
         _run(ext.start())

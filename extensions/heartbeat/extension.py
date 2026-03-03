@@ -54,13 +54,7 @@ This file defines what the autonomous heartbeat agent checks periodically.
 
 _SYSTEM_PROMPT = """\
 You have an autonomous heartbeat that periodically checks standing tasks. \
-Manage via MCP: heartbeat_instructions (read/write HEARTBEAT.md), \
-heartbeat_status (view scheduler state; set enabled=false to pause, true to resume). \
-Two ways to trigger the heartbeat on-demand: \
-heartbeat_trigger (in-session MCP call — works only while you are running), \
-heartbeat_get_trigger_command (returns a standalone shell command for external/background processes \
-where MCP tools are unavailable — e.g., 'nohup bash -c "rsync ... && <trigger_cmd>" &' \
-to be woken the instant a background task completes). \
+Manage via MCP: heartbeat_instructions, heartbeat_status. \
 When asked to monitor something periodically, consider adding to heartbeat instructions."""
 
 _TIER2_PROMPT_TEMPLATE = """\

@@ -28,12 +28,7 @@ class MemoryMCPServer(MCPServerBase):
         # -- Layer 1-3 + Knowledge Store: direct file I/O tools --
         {
             "name": "memory_read",
-            "description": (
-                "Read a memory file. Use 'TOPICS_INDEX.md' for topic catalog, "
-                "'topics/<name>.md' for topic files, "
-                "'constitution.md' for constitutional rules, "
-                "'users/<user_id>/profile.md' for user profiles."
-            ),
+            "description": "Read a memory file by relative path.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -133,10 +128,7 @@ class MemoryMCPServer(MCPServerBase):
         # -- Layer 2: Personality tools (bridge RPC for encryption) --
         {
             "name": "personality_read",
-            "description": (
-                "Read the AI's personality principles. These are self-developed rules "
-                "with hyperlinked formative events. Encrypted at rest, decrypted via bridge."
-            ),
+            "description": "Read the AI's personality principles. Encrypted at rest.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -144,10 +136,7 @@ class MemoryMCPServer(MCPServerBase):
         },
         {
             "name": "personality_write",
-            "description": (
-                "Overwrite the AI's personality principles. Content should be structured as "
-                "one principle per line with a hyperlinked formative event. Encrypted at rest."
-            ),
+            "description": "Overwrite the AI's personality principles. Encrypted at rest.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -164,10 +153,7 @@ class MemoryMCPServer(MCPServerBase):
         },
         {
             "name": "personality_append",
-            "description": (
-                "Append a new personality principle. Must include a formative event "
-                "explaining why this principle was developed. Encrypted at rest."
-            ),
+            "description": "Append a new personality principle. Encrypted at rest.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

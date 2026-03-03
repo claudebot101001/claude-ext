@@ -54,17 +54,9 @@ def _check_all_completed(results: dict) -> bool:
 
 
 _SYSTEM_PROMPT = """\
-You have sub-agent orchestration tools available. Use them to delegate tasks \
-to independent worker sessions that run in parallel.
-
-Tools: subagent_spawn, subagent_wait, subagent_status, \
-subagent_send, subagent_stop, subagent_diff, subagent_merge, subagent_delete.
-
-Workflow: spawn workers → wait for completion → review diffs → merge → commit.
-
-IMPORTANT: subagent_wait is BLOCKING — your session will be fully blocked \
-until all specified agents complete or timeout. Spawn all workers before calling wait. \
-You can also skip wait and poll with subagent_status instead."""
+You have sub-agent orchestration tools available. \
+Workflow: spawn workers → wait for completion → review diffs → merge → commit. \
+You can skip wait and poll with subagent_status instead."""
 
 
 @dataclass

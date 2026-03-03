@@ -104,13 +104,8 @@ class ExtensionImpl(Extension):
         # Register bridge handler for MCP → main process calls
         self.engine.bridge.add_handler(self._bridge_handler)
 
-        # System prompt: instruct Claude on vault usage and key naming
+        # System prompt: security constraints only (tool descriptions cover usage)
         self.sm.add_system_prompt(
-            "You have access to an encrypted credential vault via MCP tools "
-            "(vault_store, vault_list, vault_retrieve, vault_delete). "
-            "Key naming convention: use 'category/service/name' namespaced "
-            "format, e.g. 'email/smtp/password', 'wallet/eth/privkey', "
-            "'api/github/token'. "
             "CRITICAL: Never echo or display secret values to the user. "
             "When you retrieve a secret, use it directly in subsequent tool "
             "calls (e.g. as an API key in a curl command, as a password in "

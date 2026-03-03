@@ -65,11 +65,7 @@ class VaultMCPServer(MCPServerBase):
         },
         {
             "name": "vault_retrieve",
-            "description": (
-                "Retrieve a secret value from the vault. "
-                "IMPORTANT: The returned value will be visible in this conversation context. "
-                "Use the value directly in tool calls — never echo it to the user."
-            ),
+            "description": "Retrieve a secret value from the vault.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

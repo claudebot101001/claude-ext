@@ -24,11 +24,8 @@ from core.session import SessionStatus
 log = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """\
-You have cross-session communication tools available. \
-Use session_ask to send a question to another session and wait for a reply. \
 If you receive an inter-session question, you MUST respond using session_reply \
-with the request_id from the question. \
-Use session_list to discover available sessions."""
+with the request_id from the question."""
 
 
 class ExtensionImpl(Extension):
