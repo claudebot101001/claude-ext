@@ -731,22 +731,35 @@ class SessionManager:
         if overrides.extra_system_prompt:
             all_prompt_parts.extend(overrides.extra_system_prompt)
 
-        sys_prompt_file = ""
-        if all_prompt_parts:
-            sys_prompt_path = sdir / "system_prompt.txt"
-            sys_prompt_path.write_text(
-                "\n\n".join(all_prompt_parts),
-                encoding="utf-8",
-            )
-            sys_prompt_file = shlex.quote(str(sys_prompt_path))
+        # System prompt injection — two modes:
+        # Mode A (default): append extension prompts to built-in prompt
+        # Mode B (system_prompt_file set): replace built-in + append extensions via file
+        base_prompt_file = self.engine_config.get("system_prompt_file")
 
-        cmd_str = " ".join(cmd_parts)
-
-        # Build append-system-prompt via file read (same safe pattern as PROMPT)
         sys_prompt_line = ""
-        if sys_prompt_file:
-            sys_prompt_line = f"SYS_PROMPT=$(cat {sys_prompt_file})\n"
-            cmd_str += ' --append-system-prompt "$SYS_PROMPT"'
+        if base_prompt_file:
+            # Mode B: replace built-in prompt + append extension prompts via file
+            cmd_str = " ".join(cmd_parts)
+            cmd_str += f" --system-prompt-file {shlex.quote(base_prompt_file)}"
+            if all_prompt_parts:
+                ext_prompt_path = sdir / "system_prompt.txt"
+                ext_prompt_path.write_text(
+                    "\n\n".join(all_prompt_parts),
+                    encoding="utf-8",
+                )
+                cmd_str += f" --append-system-prompt-file {shlex.quote(str(ext_prompt_path))}"
+        else:
+            # Mode A: default behavior (append to built-in prompt)
+            cmd_str = " ".join(cmd_parts)
+            if all_prompt_parts:
+                ext_prompt_path = sdir / "system_prompt.txt"
+                ext_prompt_path.write_text(
+                    "\n\n".join(all_prompt_parts),
+                    encoding="utf-8",
+                )
+                quoted_ext = shlex.quote(str(ext_prompt_path))
+                sys_prompt_line = f"SYS_PROMPT=$(cat {quoted_ext})\n"
+                cmd_str += ' --append-system-prompt "$SYS_PROMPT"'
 
         # Env unset (global + per-session overrides)
         env_unset_list = ["CLAUDECODE", *self._env_unset]

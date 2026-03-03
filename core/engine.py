@@ -25,6 +25,7 @@ class ClaudeEngine:
         allowed_tools: list[str] | None = None,
         disallowed_tools: list[str] | None = None,
         gateway_mode: bool = False,
+        system_prompt_file: str | None = None,
     ):
         self.model = model
         self.max_turns = max_turns  # 0 = unlimited
@@ -32,6 +33,7 @@ class ClaudeEngine:
         self.allowed_tools = allowed_tools
         self.disallowed_tools = disallowed_tools
         self.gateway_mode = gateway_mode
+        self.system_prompt_file = system_prompt_file
         self.last_session: dict = {}  # metadata from last JSON response
         self.session_manager: SessionManager | None = None
         self.bridge: BridgeServer | None = None
@@ -52,6 +54,7 @@ class ClaudeEngine:
                 "allowed_tools": self.allowed_tools,
                 "disallowed_tools": self.disallowed_tools,
                 "gateway_mode": self.gateway_mode,
+                "system_prompt_file": self.system_prompt_file,
             },
             max_sessions_per_user=max_sessions_per_user,
             events=self.events,

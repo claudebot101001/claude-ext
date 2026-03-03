@@ -47,6 +47,20 @@ engine:
   # disallowed_tools: ["TodoWrite", "TodoRead"]
   disallowed_tools: null
 
+  # Replace Claude Code's built-in system prompt (~4500 tokens) with a compact
+  # version (~500 tokens), saving ~4000 tokens per API call.
+  # Tool JSON schemas are unaffected — tools remain fully functional.
+  #
+  # Values:
+  #   null      - default, keeps built-in prompt unchanged
+  #   "compact" - bundled minimal prompt (core/compact_prompt.md)
+  #   "/path"   - custom file path (absolute or ~ expansion)
+  #
+  # TRADE-OFF: CLAUDE.md auto-loading is lost when replacing the built-in prompt.
+  # Extension-injected prompts (memory, heartbeat, etc.) are still appended.
+  # system_prompt_file: "compact"
+  system_prompt_file: null
+
 # Persistent state directory for sessions (supports ~ expansion)
 state_dir: ~/.claude-ext
 
