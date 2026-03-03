@@ -20,6 +20,7 @@ from core.mcp_base import MCPServerBase  # noqa: E402
 class SessionAskMCPServer(MCPServerBase):
     name = "session_ask"
     version = "1.0.0"
+    gateway_description = "Cross-session communication (ask/reply/list). action='help' for details."
     tools = [
         {
             "name": "session_ask",

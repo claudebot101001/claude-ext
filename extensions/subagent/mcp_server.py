@@ -21,6 +21,7 @@ from core.mcp_base import MCPServerBase  # noqa: E402
 class SubAgentMCPServer(MCPServerBase):
     name = "subagent"
     version = "1.0.0"
+    gateway_description = "Multi-agent orchestration (spawn/wait/status/send/stop/diff/merge/delete). action='help' for details."
     tools = [
         {
             "name": "subagent_spawn",

@@ -658,6 +658,8 @@ class SessionManager:
             # Always set bridge socket path — MCP servers connect on demand,
             # not at startup.  The socket will exist by the time they call it.
             env["CLAUDE_EXT_BRIDGE_SOCKET"] = str(self.base_dir / "bridge.sock")
+            if self.engine_config.get("gateway_mode"):
+                env["CLAUDE_EXT_GATEWAY_MODE"] = "1"
             entry["env"] = env
             servers[name] = entry
         return {"mcpServers": servers}

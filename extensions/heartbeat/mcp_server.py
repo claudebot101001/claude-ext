@@ -22,6 +22,7 @@ from extensions.heartbeat.store import HeartbeatStore  # noqa: E402
 
 class HeartbeatMCPServer(MCPServerBase):
     name = "heartbeat"
+    gateway_description = "Autonomous heartbeat scheduler (instructions/status/trigger/dry_run). action='help' for details."
     tools = [
         {
             "name": "heartbeat_instructions",

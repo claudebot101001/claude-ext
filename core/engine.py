@@ -23,11 +23,15 @@ class ClaudeEngine:
         max_turns: int = 0,
         permission_mode: str = "bypassPermissions",
         allowed_tools: list[str] | None = None,
+        disallowed_tools: list[str] | None = None,
+        gateway_mode: bool = False,
     ):
         self.model = model
         self.max_turns = max_turns  # 0 = unlimited
         self.permission_mode = permission_mode
         self.allowed_tools = allowed_tools
+        self.disallowed_tools = disallowed_tools
+        self.gateway_mode = gateway_mode
         self.last_session: dict = {}  # metadata from last JSON response
         self.session_manager: SessionManager | None = None
         self.bridge: BridgeServer | None = None
@@ -46,6 +50,8 @@ class ClaudeEngine:
                 "max_turns": self.max_turns,
                 "permission_mode": self.permission_mode,
                 "allowed_tools": self.allowed_tools,
+                "disallowed_tools": self.disallowed_tools,
+                "gateway_mode": self.gateway_mode,
             },
             max_sessions_per_user=max_sessions_per_user,
             events=self.events,

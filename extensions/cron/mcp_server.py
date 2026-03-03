@@ -20,6 +20,9 @@ from extensions.cron.store import JobStore, parse_relative_time  # noqa: E402
 
 class CronMCPServer(MCPServerBase):
     name = "cron"
+    gateway_description = (
+        "Scheduled task management (create/delete/status). action='help' for details."
+    )
     tools = [
         {
             "name": "cron_create",

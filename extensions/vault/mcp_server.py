@@ -19,6 +19,9 @@ from core.mcp_base import MCPServerBase  # noqa: E402
 
 class VaultMCPServer(MCPServerBase):
     name = "vault"
+    gateway_description = (
+        "Encrypted credential store (store/list/retrieve/delete). action='help' for details."
+    )
     tools = [
         {
             "name": "vault_store",

@@ -15,9 +15,35 @@ engine:
   # allowed_tools: ["Read", "Grep", "Glob", "Bash", "Edit", "Write"]
   allowed_tools: null
 
-  # Optional: disable specific built-in tools (merged with extension-registered ones).
-  # Extensions auto-register replacements (e.g. ask_user disables AskUserQuestion).
-  # Add here for additional user-level overrides.
+  # Gateway mode: consolidate each extension's MCP tools into a single gateway tool.
+  # Reduces ~6,000 tokens of MCP tool schemas to ~1,000 per API call.
+  # Claude calls action='help' to discover commands, then action='<cmd>' with params.
+  # Servers with only 1 tool (e.g. ask_user) are exempt automatically.
+  # gateway_mode: true
+  gateway_mode: false
+
+  # Optional: disable specific built-in Claude Code tools.
+  # Merged with extension-registered ones (e.g. ask_user auto-disables AskUserQuestion).
+  #
+  # Built-in tools reference:
+  #   ESSENTIAL (do not disable):
+  #     Read, Edit, Write, Bash, Glob, Grep  — core file/shell operations
+  #
+  #   SAFE TO DISABLE (saves ~500-1000 tokens each):
+  #     TodoWrite, TodoRead     — task tracking (MCP extensions can replace)
+  #     WebFetch                — URL fetching (if not needed)
+  #     WebSearch               — web search (if not needed)
+  #     NotebookEdit            — Jupyter notebook editing
+  #     AskUserQuestion         — auto-disabled when ask_user extension is enabled
+  #
+  #   CAUTION:
+  #     Agent                   — sub-agent spawning (disable if using subagent extension only)
+  #     EnterPlanMode, ExitPlanMode — planning workflow
+  #
+  # Example profiles:
+  #   Conservative: ["TodoWrite", "TodoRead"]
+  #   Minimal:      ["TodoWrite", "TodoRead", "WebFetch", "WebSearch", "NotebookEdit"]
+  #
   # disallowed_tools: ["TodoWrite", "TodoRead"]
   disallowed_tools: null
 

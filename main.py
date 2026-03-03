@@ -64,11 +64,22 @@ async def main():
     config = load_config()
 
     eng_cfg = config.get("engine", {})
+    disallowed_tools = eng_cfg.get("disallowed_tools") or []
+    essential_tools = {"Read", "Edit", "Write", "Bash", "Glob", "Grep"}
+    blocked_essential = essential_tools & set(disallowed_tools)
+    if blocked_essential:
+        log.warning(
+            "disallowed_tools contains essential tools: %s — sessions may not function correctly",
+            ", ".join(sorted(blocked_essential)),
+        )
+
     engine = ClaudeEngine(
         model=eng_cfg.get("model"),
         max_turns=eng_cfg.get("max_turns", 0),
         permission_mode=eng_cfg.get("permission_mode", "bypassPermissions"),
         allowed_tools=eng_cfg.get("allowed_tools"),
+        disallowed_tools=disallowed_tools or None,
+        gateway_mode=bool(eng_cfg.get("gateway_mode")),
     )
 
     # Initialize tmux-backed session manager
@@ -105,6 +116,15 @@ async def main():
 
     registry.load(to_load)
     await registry.start_all()
+
+    # Gateway mode system prompt
+    if engine.gateway_mode:
+        engine.session_manager.add_system_prompt(
+            "MCP tools use a gateway pattern: each extension is one tool. "
+            "Call with action='help' to discover commands, then "
+            "action='<command>' with params={...}."
+        )
+        log.info("Gateway mode enabled — MCP tools consolidated")
 
     log.info("claude-ext running. Press Ctrl+C to stop.")
 

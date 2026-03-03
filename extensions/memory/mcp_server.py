@@ -24,6 +24,7 @@ _READONLY_PATHS = {"constitution.md"}
 
 class MemoryMCPServer(MCPServerBase):
     name = "memory"
+    gateway_description = "Cross-session memory and identity (read/write/search files, personality). action='help' for details."
     tools = [
         # -- Layer 1-3 + Knowledge Store: direct file I/O tools --
         {
