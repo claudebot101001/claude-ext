@@ -96,6 +96,33 @@ Policy visibility: Extensions self-report current policies via the `policies` fi
 
 ---
 
+## Explored / Deferred
+
+### System Prompt Replacement via `--system-prompt-file`
+
+**Date**: 2026-03-03
+**Status**: Reverted (commit `6fc4235`, reverted in `0ccfe6b`)
+**Goal**: Replace Claude Code's built-in ~4500 token behavioral system prompt with a compact ~500 token version, saving ~4000 tokens per API call.
+
+**What was built**:
+- Config option `system_prompt_file` with three modes: `null` (default), `"compact"` (bundled `core/compact_prompt.md`), or custom file path
+- `--system-prompt-file` CLI flag passed to `claude -p` invocations
+- Extension-injected prompts still appended via `--append-system-prompt-file` (unaffected)
+- Tests covering all three modes + path validation
+
+**Why reverted**:
+- `--system-prompt-file` **replaces** the entire built-in system prompt, including critical behavioral instructions (tool usage patterns, safety guardrails, output formatting). Writing a reliable compact replacement that preserves all necessary behaviors is fragile and hard to validate.
+- The token savings (~4000/call) are modest relative to the risk of subtle behavioral regressions in agent sessions.
+- Claude Code's built-in prompt evolves across CLI versions; maintaining a parallel compact version creates an ongoing maintenance burden.
+- For our use case (headless `-p` mode), the built-in prompt's overhead is acceptable — the real cost drivers are conversation context and tool schemas, not the system prompt.
+
+**Lessons learned**:
+- `--system-prompt-file` is a valid CLI option (confirmed working), useful if Claude Code ever offers a more surgical prompt override mechanism (e.g., section-level replacement).
+- `--append-system-prompt-file` (already used by extensions) is the safe path for injecting additional instructions without disrupting built-in behavior.
+- Token optimization efforts are better directed at conversation compression and MCP tool schema pruning.
+
+---
+
 ## Planned
 
 ### Phase 4: Wallet — Crypto Wallet Management
