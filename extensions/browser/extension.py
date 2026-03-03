@@ -1,13 +1,20 @@
-"""Browser extension — agent-browser CLI integration.
+"""Browser extension — web automation + scraping.
 
-Thin CLI extension: system prompt + health check. No MCP server.
+Two integration tiers:
+- agent-browser CLI: interactive browser automation via Bash (system prompt)
+- Scrapling MCP: anti-bot web scraping via gateway tool (MCPServerBase)
+
 Uses agent-browser (https://github.com/vercel-labs/agent-browser) for
-AI-optimized web interaction via Bash.
+AI-optimized interactive web browsing, and Scrapling
+(https://github.com/D4Vinci/Scrapling) for data fetching with TLS
+fingerprint impersonation and anti-bot bypass.
 """
 
 import asyncio
 import logging
 import shutil
+import sys
+from pathlib import Path
 
 from core.extension import Extension
 
@@ -48,8 +55,36 @@ class ExtensionImpl(Extension):
                 "Install: npm install -g agent-browser && agent-browser install",
                 self._binary,
             )
+
+        # System prompt for agent-browser CLI (interactive browsing)
         self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="browser")
-        log.info("Browser extension started (binary=%s)", self._binary)
+
+        # MCP server for Scrapling (web scraping with anti-bot bypass)
+        mcp_script = str(Path(__file__).with_name("mcp_server.py"))
+        self.sm.register_mcp_server(
+            "browser",
+            {
+                "command": sys.executable,
+                "args": [mcp_script],
+                "env": {},
+            },
+            tools=[
+                {
+                    "name": "scrape",
+                    "description": "HTTP fetch with TLS fingerprint impersonation (fast, no browser)",
+                },
+                {
+                    "name": "scrape_stealth",
+                    "description": "Stealth browser fetch with anti-bot bypass (Cloudflare etc.)",
+                },
+                {
+                    "name": "scrape_extract",
+                    "description": "Extract structured data via CSS selectors",
+                },
+            ],
+        )
+
+        log.info("Browser extension started (binary=%s, scraping=enabled)", self._binary)
 
     async def stop(self) -> None:
         log.info("Browser extension stopped.")

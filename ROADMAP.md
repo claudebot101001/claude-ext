@@ -175,25 +175,26 @@ extensions/email/
 **Status**: Implemented
 **Goal**: Agent can browse web pages, fill forms, click elements, take screenshots, extract data.
 
-**Architecture**: Thin CLI extension pattern (no MCP wrapper).
+**Architecture**: Hybrid — CLI system prompt (agent-browser) + MCP gateway (Scrapling).
 
 ```
 extensions/browser/
-    extension.py      # System prompt + health check (no MCP server)
+    extension.py      # System prompt + MCP registration + health check
+    mcp_server.py     # MCPServerBase: 3 scraping tools (gateway-compatible)
 ```
 
+**Two integration tiers**:
+1. **agent-browser** (CLI via Bash) — interactive web automation: navigate, click, fill forms, screenshots. System prompt (~130 tokens) teaches ref-based workflow. 30+ AI-optimized commands.
+2. **Scrapling** (MCP gateway) — data scraping with anti-bot bypass: HTTP fetch with TLS fingerprint impersonation, stealth browser for Cloudflare/DataDome, CSS selector extraction. 3 tools consolidated to 1 gateway tool (~120 tokens).
+
 **Key design**:
-- Uses [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs) — Rust native binary + Node.js daemon + Playwright
-- NO MCP server — Claude calls `agent-browser` directly via Bash (30+ commands, AI-optimized ref system)
-- Compact system prompt (~130 tokens): ref-based workflow hint + `--help` pointer for full docs
+- [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs): Rust native binary + Node.js daemon + Playwright
+- [Scrapling](https://github.com/D4Vinci/Scrapling): Python library with TLS fingerprinting, anti-bot stealth, adaptive parsing
+- Gateway mode: 3 MCP tools (`scrape`, `scrape_stealth`, `scrape_extract`) → 1 gateway tool. Scrapling's native MCP server has 6 tools with 19-25 params each (~5,640 tokens); our MCPServerBase wrapper with gateway reduces this to ~120 tokens
 - Tagged system prompt for per-session exclusion (`mcp_server="browser"`)
-- Health check verifies binary installation + daemon status
-- **Prerequisite**: `npm install -g agent-browser && agent-browser install`
-- No hard dependencies on other extensions
+- **Prerequisites**: `npm install -g agent-browser && agent-browser install` + `pip install "scrapling[all]"`
 
-**Change from original plan**: Originally planned as a custom Playwright MCP wrapper (5 MCP tools, bridge RPC, single Chromium instance). agent-browser replaces this entirely — maintained by Vercel, 30+ AI-optimized commands, ref-based element targeting, session isolation, built-in auth vault. Wrapping it in MCP would only add token overhead with no functional benefit.
-
-**Establishes**: "Thin CLI Extension" pattern — reusable template for future CLI tool integrations where the tool is self-documenting (`--help`) and best invoked directly via Bash rather than wrapped in MCP
+**Establishes**: "Thin CLI Extension" pattern for agent-browser + gateway MCP pattern for heavy-API tools like Scrapling
 
 ---
 

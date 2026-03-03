@@ -147,8 +147,11 @@ extensions:
     max_question_length: 2000      # Max characters for question text
 
   browser:
-    # Thin CLI extension: agent-browser (https://github.com/vercel-labs/agent-browser)
-    # Prerequisites: npm install -g agent-browser && agent-browser install
-    # On Linux: agent-browser install --with-deps (for system Chromium dependencies)
-    # binary: agent-browser         # Override path to binary if not in PATH
+    # Web automation + scraping extension
+    # agent-browser: interactive browser (CLI via Bash)
+    #   Prerequisites: npm install -g agent-browser && agent-browser install
+    #   On Linux: agent-browser install --with-deps (for system Chromium dependencies)
+    # Scrapling: anti-bot web scraping (MCP gateway)
+    #   Prerequisites: pip install "scrapling[all]"
+    # binary: agent-browser         # Override path to agent-browser binary
     {}

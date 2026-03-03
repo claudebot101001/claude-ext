@@ -1,4 +1,4 @@
-"""Tests for browser extension (thin CLI extension pattern)."""
+"""Tests for browser extension (CLI + scraping MCP)."""
 
 import asyncio
 from unittest.mock import MagicMock, patch
@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from extensions.browser.extension import ExtensionImpl, _SYSTEM_PROMPT
+from extensions.browser.mcp_server import BrowserMCPServer
 
 
 def _run(coro):
@@ -25,6 +26,9 @@ def ext(engine):
     e = ExtensionImpl()
     e.configure(engine, {})
     return e
+
+
+# -- Extension tests -----------------------------------------------------------
 
 
 class TestConfigure:
@@ -50,12 +54,23 @@ class TestStart:
             _SYSTEM_PROMPT, mcp_server="browser"
         )
 
+    def test_registers_mcp_server(self, ext):
+        _run(ext.start())
+        ext.engine.session_manager.register_mcp_server.assert_called_once()
+        call_args = ext.engine.session_manager.register_mcp_server.call_args
+        assert call_args[0][0] == "browser"  # server name
+        tools = call_args[1].get("tools") or call_args[0][2]
+        assert len(tools) == 3
+        tool_names = {t["name"] for t in tools}
+        assert tool_names == {"scrape", "scrape_stealth", "scrape_extract"}
+
     @patch("shutil.which", return_value=None)
     def test_warns_when_binary_missing(self, mock_which, ext):
         """Extension starts successfully even if binary is not found."""
         _run(ext.start())
-        # System prompt is still registered (graceful degradation)
+        # System prompt and MCP server are still registered (graceful degradation)
         ext.engine.session_manager.add_system_prompt.assert_called_once()
+        ext.engine.session_manager.register_mcp_server.assert_called_once()
 
     @patch("shutil.which", return_value="/usr/bin/agent-browser")
     def test_starts_when_binary_found(self, mock_which, ext):
@@ -75,7 +90,6 @@ class TestHealthCheck:
         with patch("asyncio.create_subprocess_exec") as mock_exec:
             proc = MagicMock()
             proc.returncode = 0
-            proc.communicate = MagicMock(return_value=(b"", b""))
 
             async def fake_communicate():
                 return b"", b""
@@ -111,3 +125,63 @@ class TestSystemPrompt:
 
     def test_prompt_mentions_ref_invalidation(self):
         assert "invalidate" in _SYSTEM_PROMPT.lower()
+
+
+# -- MCP Server tests ----------------------------------------------------------
+
+
+class TestMCPServerSchema:
+    def test_server_name(self):
+        server = BrowserMCPServer()
+        assert server.name == "browser"
+
+    def test_gateway_description(self):
+        server = BrowserMCPServer()
+        assert server.gateway_description
+        assert (
+            "scraping" in server.gateway_description.lower()
+            or "fetch" in server.gateway_description.lower()
+        )
+
+    def test_has_three_tools(self):
+        server = BrowserMCPServer()
+        assert len(server.tools) == 3
+
+    def test_tool_names(self):
+        server = BrowserMCPServer()
+        names = {t["name"] for t in server.tools}
+        assert names == {"scrape", "scrape_stealth", "scrape_extract"}
+
+    def test_all_tools_require_url(self):
+        server = BrowserMCPServer()
+        for tool in server.tools:
+            required = tool["inputSchema"].get("required", [])
+            assert "url" in required or "selectors" in required
+
+    def test_handlers_match_tools(self):
+        server = BrowserMCPServer()
+        tool_names = {t["name"] for t in server.tools}
+        handler_names = set(server.handlers.keys())
+        assert tool_names == handler_names
+
+
+class TestMCPServerHandlers:
+    def test_scrape_missing_url(self):
+        server = BrowserMCPServer()
+        result = server._handle_scrape({})
+        assert "Error" in result
+
+    def test_scrape_stealth_missing_url(self):
+        server = BrowserMCPServer()
+        result = server._handle_scrape_stealth({})
+        assert "Error" in result
+
+    def test_scrape_extract_missing_url(self):
+        server = BrowserMCPServer()
+        result = server._handle_scrape_extract({})
+        assert "Error" in result
+
+    def test_scrape_extract_missing_selectors(self):
+        server = BrowserMCPServer()
+        result = server._handle_scrape_extract({"url": "http://example.com"})
+        assert "Error" in result
