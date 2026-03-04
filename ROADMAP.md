@@ -121,6 +121,22 @@ Policy visibility: Extensions self-report current policies via the `policies` fi
 - `--append-system-prompt-file` (already used by extensions) is the safe path for injecting additional instructions without disrupting built-in behavior.
 - Token optimization efforts are better directed at conversation compression and MCP tool schema pruning.
 
+### Phase 5b: Browser — agent-browser CLI Integration
+
+`extensions/browser/` — Hybrid web automation + anti-bot scraping.
+
+- **extension.py**: System prompt injection (`mcp_server="browser"` tag for per-session exclusion) + MCP server registration + binary availability check + health check (daemon probe)
+- **mcp_server.py**: MCPServerBase with 3 scraping tools (`scrape`, `scrape_stealth`, `scrape_extract`), gateway-compatible (3 tools → 1 gateway tool, ~120 tokens)
+- **Two integration tiers**:
+  1. **agent-browser** (CLI via Bash) — interactive web automation: navigate, click, fill forms, screenshots. System prompt (~130 tokens) teaches ref-based workflow. 30+ AI-optimized commands.
+  2. **Scrapling** (MCP gateway) — data scraping with anti-bot bypass: HTTP fetch with TLS fingerprint impersonation, stealth browser for Cloudflare/DataDome, CSS selector extraction.
+- **Key design**:
+  - [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs): Rust native binary + Node.js daemon + Playwright
+  - [Scrapling](https://github.com/D4Vinci/Scrapling): Python library with TLS fingerprinting, anti-bot stealth, adaptive parsing
+  - Gateway mode: Scrapling's native MCP server has 6 tools with 19-25 params each (~5,640 tokens); our MCPServerBase wrapper with gateway reduces this to ~120 tokens (98% reduction)
+  - Tagged system prompt for per-session exclusion (`mcp_server="browser"`)
+- **Establishes**: "Thin CLI Extension" pattern for agent-browser + gateway MCP pattern for heavy-API tools
+
 ---
 
 ## Planned
@@ -167,34 +183,6 @@ extensions/email/
 - IMAP IDLE real-time monitoring for new emails, notifies active session via delivery callback
 - Send rate limiting (default 10/hour), prevents Agent runaway
 - Exponential backoff reconnect + polling fallback
-
----
-
-### Phase 5b: Browser — agent-browser CLI Integration
-
-**Status**: Implemented
-**Goal**: Agent can browse web pages, fill forms, click elements, take screenshots, extract data.
-
-**Architecture**: Hybrid — CLI system prompt (agent-browser) + MCP gateway (Scrapling).
-
-```
-extensions/browser/
-    extension.py      # System prompt + MCP registration + health check
-    mcp_server.py     # MCPServerBase: 3 scraping tools (gateway-compatible)
-```
-
-**Two integration tiers**:
-1. **agent-browser** (CLI via Bash) — interactive web automation: navigate, click, fill forms, screenshots. System prompt (~130 tokens) teaches ref-based workflow. 30+ AI-optimized commands.
-2. **Scrapling** (MCP gateway) — data scraping with anti-bot bypass: HTTP fetch with TLS fingerprint impersonation, stealth browser for Cloudflare/DataDome, CSS selector extraction. 3 tools consolidated to 1 gateway tool (~120 tokens).
-
-**Key design**:
-- [agent-browser](https://github.com/vercel-labs/agent-browser) (Vercel Labs): Rust native binary + Node.js daemon + Playwright
-- [Scrapling](https://github.com/D4Vinci/Scrapling): Python library with TLS fingerprinting, anti-bot stealth, adaptive parsing
-- Gateway mode: 3 MCP tools (`scrape`, `scrape_stealth`, `scrape_extract`) → 1 gateway tool. Scrapling's native MCP server has 6 tools with 19-25 params each (~5,640 tokens); our MCPServerBase wrapper with gateway reduces this to ~120 tokens
-- Tagged system prompt for per-session exclusion (`mcp_server="browser"`)
-- **Prerequisites**: `npm install -g agent-browser && agent-browser install` + `pip install "scrapling[all]"`
-
-**Establishes**: "Thin CLI Extension" pattern for agent-browser + gateway MCP pattern for heavy-API tools like Scrapling
 
 ---
 

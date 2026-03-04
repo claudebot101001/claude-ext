@@ -136,7 +136,7 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 |-----------|-----------|---------------|
 | **vault** | `vault_store`, `vault_list`, `vault_retrieve`, `vault_delete` | Bridge RPC (passphrase never in MCP process) |
 | **memory** | `memory_read`, `memory_write`, `memory_append`, `memory_search`, `memory_list`, `personality_read`, `personality_write`, `personality_append` | Direct file I/O + Bridge RPC (personality encryption via vault) |
-| **heartbeat** | `heartbeat_instructions`, `heartbeat_status`, `heartbeat_trigger`, `heartbeat_get_trigger_command`, `heartbeat_dry_run`, `heartbeat_set_verification` | Mixed (file I/O + bridge for trigger) |
+| **heartbeat** | `heartbeat_instructions`, `heartbeat_status`, `heartbeat_trigger`, `heartbeat_get_trigger_command`, `heartbeat_dry_run`, `heartbeat_set_verification`, `heartbeat_safe_reload` | Mixed (file I/O + bridge for trigger) |
 | **cron** | `cron_create`, `cron_delete`, `cron_status` | Bridge RPC |
 | **ask_user** | `ask_user` | Bridge RPC → PendingStore |
 | **subagent** | `subagent_spawn`, `subagent_wait`, `subagent_status`, `subagent_send`, `subagent_stop`, `subagent_diff`, `subagent_merge`, `subagent_delete`, `subagent_reclaim_respond`, `session_info` | Bridge RPC → PendingStore + SessionManager |

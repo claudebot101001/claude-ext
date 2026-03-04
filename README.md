@@ -8,6 +8,8 @@ English | [中文](README.zh-CN.md)
 
 Server-side framework that turns [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) into a programmable, always-on, multi-session agent platform. It wraps the official `claude` binary and manages independent extensions — nothing more.
 
+> **21k LoC** | **9 extensions** | **654 tests** | **Pure Python, zero framework dependencies**
+
 ## Why claude-ext
 
 ### Subscription-based agent platform
@@ -23,13 +25,14 @@ Most Claude Code extension projects focus on a single concern — session manage
 | Capability | What it does |
 |---|---|
 | **Multi-session management** | tmux-backed sessions with per-user slots, prompt queuing, crash recovery |
-| **MCP server injection** | Per-session MCP servers with dynamic tool registration |
+| **MCP server injection** | Per-session MCP servers with dynamic tool registration and session customizers |
 | **Bridge RPC** | Bidirectional Unix socket IPC between MCP child processes and main process |
+| **Gateway mode** | Multi-tool MCP servers consolidated to 1 gateway tool (98% token reduction) |
 | **Extension lifecycle** | Dynamic discovery, hot-reload (SIGHUP), health checks, strict decoupling |
 | **Delivery callbacks** | Real-time streaming with structured metadata (cost, status, tool use) |
 | **Pending store** | Generic async request/response registry for cross-process coordination |
 
-These core primitives power 8 independent extensions that can be enabled/disabled via config.
+These core primitives power 9 independent extensions that can be enabled/disabled via config.
 
 ### How it stays compliant
 
@@ -51,7 +54,7 @@ User / Frontend (Telegram, CLI, ...)
    EventLog         Service Registry
         │
         ▼
-   tmux sessions ──── MCP servers (per-session)
+   tmux sessions ──── MCP servers (per-session, gateway mode)
         │
         ▼
    claude -p ──── file IPC (prompt → stream.jsonl → result)
@@ -62,6 +65,7 @@ User / Frontend (Telegram, CLI, ...)
 - **Crash-resilient** — tmux sessions survive main process restarts; automatic recovery on startup
 - **Multi-user** — per-user session slots with independent prompt queues
 - **Dynamic extensions** — add/remove via `config.yaml`; no core or cross-extension changes
+- **Session customizers** — per-prompt MCP/system-prompt/tool modification via `SessionOverrides`
 - **SIGHUP reload** — update config without restart; extensions receive `reconfigure()` callback
 - **Usage-aware** — query auth status and API usage quotas for cost control
 - **Structured events** — JSONL event log with rotation for observability
@@ -71,17 +75,46 @@ User / Frontend (Telegram, CLI, ...)
 | Extension | MCP Tools | Description |
 |-----------|:---------:|-------------|
 | **vault** | 4 | Encrypted credential store (Fernet + PBKDF2). Passphrase never leaves main process |
-| **memory** | 5 | Cross-session persistent memory. Markdown files with FTS5 search |
-| **heartbeat** | 6 | Autonomous periodic agent. 3-tier execution (gate → LLM decision → session) with 5 safety valves |
+| **memory** | 8 | Three-layer identity (constitution + encrypted personality + per-user profiles) + knowledge store with FTS5 search |
+| **heartbeat** | 7 | Autonomous periodic agent. 3-tier execution (gate → LLM decision → session) with 5 safety valves |
 | **cron** | 3 | Scheduled task execution. Cron expressions + one-time delays, static or MCP-created |
 | **ask_user** | 1 | Interactive questions from Claude to user, with optional choice buttons |
 | **subagent** | 10 | Multi-agent orchestration. PM spawns worker sessions with paradigms + git worktree isolation |
 | **session_ask** | 3 | Cross-session RPC. Sessions ask questions to each other and wait for replies |
+| **browser** | 3 | Web automation (agent-browser CLI) + anti-bot scraping (Scrapling MCP gateway) |
 | **telegram** | 0 | Telegram bot frontend. Multi-session, streaming output, inline commands |
 
 All extensions are fully independent — delete the directory + remove from `enabled` = zero impact.
 
 ## Comparison
+
+### vs. OpenClaw / NanoClaw
+
+These are the two major open-source "Claw" frameworks. claude-ext takes a fundamentally different architectural approach:
+
+| | claude-ext | [OpenClaw](https://github.com/openclaw/openclaw) (257k stars) | [NanoClaw](https://github.com/qwibitai/nanoclaw) (18k stars) |
+|---|---|---|---|
+| **Codebase** | ~21k LoC (Python) | ~800k LoC (TypeScript) | ~3.9k LoC (TypeScript) |
+| **Architecture** | Plugin-based core + extensions | Monolithic Gateway | Minimal host + containers |
+| **CLI wrapping** | `claude -p` via tmux | SDK-native (no CLI) | Claude Agent SDK in containers |
+| **IPC** | Unix socket bridge RPC (0.06ms) | WebSocket RPC | Filesystem polling (1s interval) |
+| **MCP integration** | Per-session injection + gateway mode | MCP Registry + skill injection | Single MCP server per container |
+| **Session customization** | Per-prompt `SessionOverrides` | Per-agent config files | Per-group CLAUDE.md |
+| **Memory** | 3-layer encrypted + FTS5 | File-based (MEMORY.md) | 2-level CLAUDE.md |
+| **Secrets** | Fernet vault + bridge isolation | SecretRef in config | Mount validation filtering |
+| **Extension model** | `start()/stop()` lifecycle + engine services | Skills + Channel + Provider plugins | Skills (Markdown) + channel registry |
+| **Messaging** | Telegram (via extension) | 22+ platforms (built-in) | 5 platforms (built-in) |
+| **Isolation** | tmux + env unset + tool disallow | Loopback + optional Docker | Container-first (Docker) |
+
+**Key differentiators**:
+
+- **CLI wrapping vs SDK integration**: claude-ext wraps `claude -p`, inheriting the full Claude Code feature set (permission modes, built-in tools, MCP client). OpenClaw and NanoClaw use SDK-native integration, requiring them to reimplement features that Claude Code provides for free.
+- **Per-session MCP injection**: claude-ext registers different MCP server configurations per session, with customizers that dynamically include/exclude servers per prompt. Neither Claw project offers this granularity.
+- **Gateway mode**: 98% token reduction for multi-tool MCP servers (e.g. Scrapling: 5,640 → 120 tokens). No equivalent in either Claw project.
+- **Bridge RPC**: Unix socket with 0.06ms latency, purpose-built for MCP↔main-process communication. OpenClaw uses a general-purpose WebSocket; NanoClaw polls filesystem at 1s intervals.
+- **Encrypted vault with process isolation**: Passphrase held only in main process memory; MCP servers access via bridge RPC. Neither Claw project has comparable credential isolation.
+
+**Trade-offs**: OpenClaw has vastly more messaging platform coverage (22+ vs 1) and a community skill marketplace (13k+ skills). NanoClaw provides stronger container-level isolation. claude-ext is designed for depth of infrastructure, not breadth of integrations.
 
 ### vs. Agent SDK / API-based tools
 
@@ -94,22 +127,22 @@ All extensions are fully independent — delete the directory + remove from `ena
 | **Crash recovery** | Automatic (tmux survives) | Application-level | Application-level |
 | **Model support** | Claude only (via CLI) | Claude only (via API) | Often multi-provider |
 
-### vs. Multi-agent orchestrators (Ruflo, Claude Squad, Overstory, etc.)
+### vs. Multi-agent orchestrators
 
-Most orchestrators focus on coordinating multiple agents for development tasks. claude-ext is different — it provides the **infrastructure layer** beneath orchestration:
+Orchestrators like [CrewAI](https://github.com/crewAIInc/crewAI) (45k stars), [AutoGen](https://github.com/microsoft/autogen) (55k stars), and [LangGraph](https://github.com/langchain-ai/langgraph) (25k stars) coordinate agents at the API/SDK level. claude-ext provides the **infrastructure layer** beneath orchestration:
 
 | Capability | claude-ext | Typical orchestrators |
 |---|---|---|
 | **Session lifecycle** | Managed (create → queue → execute → recover) | Spawn and forget |
-| **MCP injection** | Per-session, dynamic | None or static |
+| **MCP injection** | Per-session, dynamic, with gateway consolidation | None or static |
 | **Bridge RPC** | Bidirectional (MCP ↔ main process) | None |
 | **Credential vault** | Built-in (encrypted, bridge-isolated) | None |
 | **Autonomous heartbeat** | 3-tier with usage throttling | Basic cron at best |
 | **Extension system** | Decoupled lifecycle with health checks | Often monolithic |
 
-### vs. Official Claude Code plugins
+### vs. Claude Code plugins
 
-The [Claude Code plugin system](https://docs.anthropic.com/en/docs/claude-code) extends Claude Code from within a single session. claude-ext operates at a different level — it manages **multiple concurrent sessions** with server-side infrastructure (persistent state, credential vault, autonomous scheduling, cross-session coordination). They are complementary: claude-ext sessions can use Claude Code plugins.
+[Claude Code plugins](https://docs.anthropic.com/en/docs/claude-code) extend a single session. claude-ext manages **multiple concurrent sessions** with server-side infrastructure (persistent state, credential vault, autonomous scheduling, cross-session coordination). They are complementary: claude-ext sessions can use Claude Code plugins.
 
 **When to use what:**
 

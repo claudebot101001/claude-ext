@@ -921,6 +921,40 @@ Session A → MCP tool(session_ask) → bridge.call("session_ask") → BridgeSer
 - Default timeout: 300s, configurable
 - Fail-closed validation: if the target session doesn't exist or is stopped, the request fails immediately
 
+### Existing Extension: browser
+
+Web automation + anti-bot scraping. Hybrid architecture: CLI system prompt (agent-browser) + MCP gateway (Scrapling).
+
+**Two integration tiers**:
+
+1. **agent-browser** (CLI via Bash) — Interactive browser automation. System prompt (~130 tokens) teaches ref-based workflow (`@e1`, `@e2` element references). 30+ AI-optimized commands (open, snapshot, click, fill, select, type, press, wait, screenshot, pdf).
+2. **Scrapling** (MCP gateway) — Data scraping with anti-bot bypass. 3 tools consolidated to 1 gateway tool via `MCPServerBase` gateway mode.
+
+**Data flow**:
+```
+Interactive browsing:  Agent → Bash(agent-browser open <url>) → agent-browser daemon → Playwright → browser
+                       Agent → Bash(agent-browser snapshot -i) → @e1,@e2... element refs
+                       Agent → Bash(agent-browser click @e1) → page interaction
+
+Data scraping:         Agent → MCP tool(browser) → gateway dispatch → scrape/scrape_stealth/scrape_extract
+                       → Scrapling Fetcher/StealthyFetcher → HTTP with TLS impersonation → response
+```
+
+**MCP Tools** (3, gateway-consolidated to 1):
+- `scrape(url, selector?, format?, impersonate?)` — HTTP fetch with TLS fingerprint impersonation (fast, no browser)
+- `scrape_stealth(url, selector?, format?, solve_cloudflare?, wait?)` — Stealth browser with anti-bot bypass (Cloudflare, DataDome)
+- `scrape_extract(url, selectors)` — Extract structured data via named CSS selectors
+
+**Design**:
+- System prompt registered with `mcp_server="browser"` tag, enabling per-session exclusion via session customizers
+- Zero bridge RPC — all Scrapling operations are self-contained in the MCP server process
+- Health check probes both binary availability and daemon status
+- Configurable binary name via `config.browser.binary` (default: `agent-browser`)
+
+**Gateway Mode** (established pattern):
+
+`MCPServerBase` supports gateway mode (`CLAUDE_EXT_GATEWAY_MODE=1`): servers with >1 tool consolidate into a single gateway tool. The agent calls `tool(action="scrape", params={...})` instead of three separate tools. Token savings: Scrapling's native MCP server has 6 tools with 19-25 params each (~5,640 tokens); gateway mode reduces to ~120 tokens (98% reduction). Gateway dispatch adds an `action='help'` command that returns available actions and their parameters.
+
 ---
 
 ## Configuration: config.yaml
@@ -941,6 +975,7 @@ sessions:
 enabled:                          # Enabled extension names (correspond to directories under extensions/)
   - vault                         # Encrypted credential store (zero-config, passphrase auto-generated)
   - memory                        # Cross-session memory (zero-config)
+  - browser                       # Web automation + scraping (zero-config if agent-browser installed)
   - telegram
   # - heartbeat                   # Autonomous heartbeat (periodic check + LLM decision + execution)
   # - ask_user                    # Interactive questioning
