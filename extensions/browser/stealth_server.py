@@ -75,9 +75,10 @@ class StealthBrowserManager:
         self._idle_handle: asyncio.TimerHandle | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._xvfb_proc: subprocess.Popen | None = None
-        self._proxy_server = (
-            config.get("proxy", {}).get("server") if isinstance(config.get("proxy"), dict) else None
-        )
+        # Proxy server URL is NOT passed via env (may contain credentials).
+        # It will be fetched via bridge RPC at browser launch time.
+        self._proxy_server = None
+        self._proxy_vault_key = None
         self._auth_skip_domains: set[str] = set(
             config.get(
                 "auth_skip_domains",
@@ -158,9 +159,16 @@ class StealthBrowserManager:
         if not headless_val and not os.environ.get("DISPLAY"):
             self._ensure_xvfb()
 
-        # Proxy configuration (per-call override > config default)
+        # Proxy configuration (per-call override > bridge RPC > none)
         proxy_config = None
-        proxy_server = proxy_override or self._proxy_server
+        proxy_server = proxy_override
+        if not proxy_server and self._bridge:
+            try:
+                proxy_data = self._bridge.call("stealth_get_proxy", {})
+                if isinstance(proxy_data, dict) and proxy_data.get("server"):
+                    proxy_server = proxy_data["server"]
+            except Exception as exc:
+                log.debug("Failed to fetch proxy config via bridge: %s", exc)
         if proxy_server:
             proxy_config = {"server": proxy_server}
 
@@ -342,10 +350,14 @@ class StealthBrowserManager:
         _auth_prefixes = ("login.", "auth.", "signin.", "sso.", "accounts.", "id.")
         if any(hostname.startswith(p) for p in _auth_prefixes):
             return True
-        # 3. Path pattern heuristic
+        # 3. Path pattern heuristic — segment-boundary matching
+        # Only match at path segment boundaries (/ delimited) to avoid false
+        # positives like "/blogindex" matching "/login"
         if path:
-            _auth_paths = ("/oauth/", "/authorize", "/login", "/signin", "/saml/")
-            if any(seg in path for seg in _auth_paths):
+            _auth_path_re = re.compile(
+                r"(?:^|/)(?:oauth|authorize|login|signin|saml|sso)(?:/|$|\?)"
+            )
+            if _auth_path_re.search(path):
                 return True
         return False
 
@@ -528,11 +540,24 @@ class StealthBrowserManager:
         info = self._refs.get(ref)
         if not info:
             return f"Error: ref '{ref}' not found. Run snapshot first."
+        # Validate save_dir: restrict to /tmp or session state dir
+        resolved_dir = str(Path(save_dir).resolve())
+        state_dir = os.environ.get("CLAUDE_EXT_STATE_DIR", "")
+        safe_prefix = state_dir.rstrip("/") + "/" if state_dir else ""
+        if not (
+            resolved_dir.startswith("/tmp")
+            or (safe_prefix and resolved_dir.startswith(safe_prefix))
+        ):
+            return "Error: save_dir must be under /tmp/ or session state dir."
         self._reset_idle()
         async with self._page.expect_download() as download_info:
             await self._locator(info["selector"]).click()
         download = await download_info.value
-        save_path = str(Path(save_dir) / download.suggested_filename)
+        # Sanitize filename: strip path components to prevent traversal
+        safe_name = Path(download.suggested_filename).name
+        if not safe_name:
+            safe_name = "download"
+        save_path = str(Path(resolved_dir) / safe_name)
         await download.save_as(save_path)
         return f"Downloaded to {save_path}"
 
