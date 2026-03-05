@@ -56,10 +56,12 @@ class TestStart:
 
     def test_registers_mcp_server(self, ext):
         _run(ext.start())
-        ext.engine.session_manager.register_mcp_server.assert_called_once()
-        call_args = ext.engine.session_manager.register_mcp_server.call_args
-        assert call_args[0][0] == "browser"  # server name
-        tools = call_args[1].get("tools") or call_args[0][2]
+        calls = ext.engine.session_manager.register_mcp_server.call_args_list
+        # Should register both browser (scraping) and stealth_browser
+        server_names = [c[0][0] for c in calls]
+        assert "browser" in server_names
+        browser_call = [c for c in calls if c[0][0] == "browser"][0]
+        tools = browser_call[1].get("tools") or browser_call[0][2]
         assert len(tools) == 3
         tool_names = {t["name"] for t in tools}
         assert tool_names == {"scrape", "scrape_stealth", "scrape_extract"}
@@ -70,7 +72,7 @@ class TestStart:
         _run(ext.start())
         # System prompt and MCP server are still registered (graceful degradation)
         ext.engine.session_manager.add_system_prompt.assert_called_once()
-        ext.engine.session_manager.register_mcp_server.assert_called_once()
+        assert ext.engine.session_manager.register_mcp_server.call_count >= 1
 
     @patch("shutil.which", return_value="/usr/bin/agent-browser")
     def test_starts_when_binary_found(self, mock_which, ext):

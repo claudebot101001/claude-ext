@@ -27,7 +27,7 @@ claude-ext/
 │   ├── subagent/            # Multi-agent orchestration (PM → worker sessions)
 │   ├── session_ask/         # Cross-session RPC (bridge + PendingStore)
 │   ├── context/             # Context window monitoring + compaction control
-│   ├── browser/             # Web automation (agent-browser CLI) + scraping (Scrapling MCP)
+│   ├── browser/             # Web automation (agent-browser CLI) + scraping (Scrapling) + stealth (Patchright)
 │   └── telegram/            # Telegram bot bridge (multi-session + streaming)
 ├── config.yaml              # Runtime config (.gitignored)
 ├── config.yaml.example      # Config template
@@ -144,6 +144,7 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 | **session_ask** | `session_ask`, `session_reply`, `session_list` | Bridge RPC → PendingStore + SessionManager |
 | **context** | `context_status`, `context_compact`, `context_configure` (gateway) | Bridge RPC + delivery callback (token tracking) |
 | **browser** | `scrape`, `scrape_stealth`, `scrape_extract` (gateway) | System prompt (agent-browser CLI) + MCP (Scrapling scraping) |
+| **stealth_browser** | `open`, `goto`, `snapshot`, `click`, `fill`, `select`, `type`, `press`, `wait`, `evaluate`, `screenshot`, `get_url`, `get_title`, `get_text`, `close` (gateway) | MCP (Patchright anti-detect + NopeCHA CAPTCHA) |
 | **telegram** | (none — frontend only) | Delivery callbacks |
 
 ## Memory Extension: Three-Layer Identity System

@@ -154,11 +154,20 @@ extensions:
       cooldown_prompts: 3          # Skip N prompts after compaction before re-checking
 
   browser:
-    # Web automation + scraping extension
-    # agent-browser: interactive browser (CLI via Bash)
+    # Web automation + scraping + stealth browsing extension
+    # Tier 1 - agent-browser: interactive browser (CLI via Bash)
     #   Prerequisites: npm install -g agent-browser && agent-browser install
     #   On Linux: agent-browser install --with-deps (for system Chromium dependencies)
-    # Scrapling: anti-bot web scraping (MCP gateway)
+    # Tier 2 - Scrapling: anti-bot web scraping (MCP gateway)
     #   Prerequisites: pip install "scrapling[all]"
+    # Tier 3 - Patchright stealth: anti-detect interactive browser (MCP gateway)
+    #   Prerequisites: pip install patchright && python -m patchright install chromium
+    #   For CAPTCHA solving: download NopeCHA extension to extensions/browser/vendor/
+    #   For headless+extensions on Linux: apt-get install xvfb
     # binary: agent-browser         # Override path to agent-browser binary
-    {}
+    stealth:
+      enabled: true
+      captcha_solver: none           # "nopecha" or "none"
+      idle_timeout: 300              # Seconds before auto-closing idle browser
+      chromium_args: []              # Additional Chromium launch flags
+      # nopecha_api_key: ""          # Optional, for NopeCHA paid tier
