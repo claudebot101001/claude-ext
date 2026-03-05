@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+pytest.importorskip("eth_abi")
+
 from extensions.crypto.chains.evm import (
     EVMAdapter,
     _encode_address,

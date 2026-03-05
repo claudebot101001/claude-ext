@@ -1,6 +1,5 @@
 """Tests for crypto portfolio store."""
 
-
 import pytest
 
 from extensions.crypto.portfolio import PortfolioStore

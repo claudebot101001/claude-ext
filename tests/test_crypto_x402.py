@@ -7,6 +7,8 @@ from unittest.mock import patch
 import httpx
 import pytest
 
+pytest.importorskip("eth_account")
+
 from extensions.crypto.x402_handler import X402Handler
 
 

@@ -5,6 +5,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+pytest.importorskip("eth_abi")
+pytest.importorskip("eth_account")
+
 from extensions.crypto.extension import ExtensionImpl
 from extensions.crypto.portfolio import PortfolioStore
 
