@@ -60,7 +60,7 @@ class TestStart:
         # Should register both browser (scraping) and stealth_browser
         server_names = [c[0][0] for c in calls]
         assert "browser" in server_names
-        browser_call = [c for c in calls if c[0][0] == "browser"][0]
+        browser_call = next(c for c in calls if c[0][0] == "browser")
         tools = browser_call[1].get("tools") or browser_call[0][2]
         assert len(tools) == 3
         tool_names = {t["name"] for t in tools}

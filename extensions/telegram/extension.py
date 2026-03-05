@@ -1382,9 +1382,9 @@ class ExtensionImpl(Extension):
 
         lines = [
             f"<b>Context: {session.name}</b> (slot {session.slot})",
-            f"",
+            "",
             f"<code>[{bar}] {fill_pct:.1f}%</code>",
-            f"",
+            "",
             f"Tokens: {data['last_context_fill']:,} / {data['context_window']:,}",
             f"Prompts: {data['prompt_count']}",
             f"Compactions: {data['compaction_count']}",

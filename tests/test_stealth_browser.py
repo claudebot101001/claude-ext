@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -69,14 +68,14 @@ class TestStealthRegistration:
     def test_stealth_server_has_25_tools(self, ext):
         _run(ext.start())
         calls = ext.engine.session_manager.register_mcp_server.call_args_list
-        stealth_call = [c for c in calls if c[0][0] == "stealth_browser"][0]
+        stealth_call = next(c for c in calls if c[0][0] == "stealth_browser")
         tools = stealth_call[1].get("tools") or stealth_call[0][2]
         assert len(tools) == 25
 
     def test_stealth_tool_names(self, ext):
         _run(ext.start())
         calls = ext.engine.session_manager.register_mcp_server.call_args_list
-        stealth_call = [c for c in calls if c[0][0] == "stealth_browser"][0]
+        stealth_call = next(c for c in calls if c[0][0] == "stealth_browser")
         tools = stealth_call[1].get("tools") or stealth_call[0][2]
         names = {t["name"] for t in tools}
         expected = {
@@ -111,7 +110,7 @@ class TestStealthRegistration:
     def test_stealth_config_passed_as_env(self, ext_stealth_nopecha):
         _run(ext_stealth_nopecha.start())
         calls = ext_stealth_nopecha.engine.session_manager.register_mcp_server.call_args_list
-        stealth_call = [c for c in calls if c[0][0] == "stealth_browser"][0]
+        stealth_call = next(c for c in calls if c[0][0] == "stealth_browser")
         server_config = stealth_call[0][1]
         env = server_config["env"]
         config = json.loads(env["STEALTH_BROWSER_CONFIG"])

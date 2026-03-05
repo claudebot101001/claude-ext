@@ -129,7 +129,7 @@ class StealthBrowserManager:
         except ImportError:
             raise RuntimeError(
                 "patchright not installed. Run: pip install patchright && python -m patchright install chromium"
-            )
+            ) from None
 
         # Load profile if specified
         if profile:
@@ -245,6 +245,24 @@ class StealthBrowserManager:
                     await route.fallback()
                     return
 
+                # Never inject evasions into third-party CAPTCHA iframes —
+                # modifying their HTML breaks challenge rendering.
+                if any(
+                    req_host.endswith(d)
+                    for d in (
+                        "arkoselabs.com",
+                        "funcaptcha.com",
+                        "google.com",
+                        "gstatic.com",
+                        "recaptcha.net",
+                        "hcaptcha.com",
+                        "cloudflare.com",
+                        "challenges.cloudflare.com",
+                    )
+                ):
+                    await route.fallback()
+                    return
+
                 if route.request.resource_type not in ("document", "iframe"):
                     await route.fallback()
                     return
@@ -341,7 +359,7 @@ class StealthBrowserManager:
         except RuntimeError:
             raise
         except Exception as e:
-            raise RuntimeError(f"Failed to start Xvfb: {e}")
+            raise RuntimeError(f"Failed to start Xvfb: {e}") from e
 
     def _resolve_nopecha(self) -> str | None:
         """Find NopeCHA extension directory if configured."""
@@ -522,10 +540,7 @@ class StealthBrowserManager:
         # 3. Path pattern heuristic — segment-boundary matching
         # Only match at path segment boundaries (/ delimited) to avoid false
         # positives like "/blogindex" matching "/login"
-        if path:
-            if _AUTH_PATH_RE.search(path):
-                return True
-        return False
+        return bool(path and _AUTH_PATH_RE.search(path))
 
     def add_auth_domain(self, domain: str) -> str:
         """Add a domain to the auth skip list at runtime."""
@@ -658,7 +673,7 @@ class StealthBrowserManager:
         state_dir = os.environ.get("CLAUDE_EXT_STATE_DIR", "")
         safe_prefix = state_dir.rstrip("/") + "/" if state_dir else ""
         if not (resolved.startswith("/tmp/") or (safe_prefix and resolved.startswith(safe_prefix))):
-            return f"Error: screenshot path must be under /tmp/ or session state dir."
+            return "Error: screenshot path must be under /tmp/ or session state dir."
         await self._page.screenshot(path=resolved)
         return f"Screenshot saved to {resolved}"
 
