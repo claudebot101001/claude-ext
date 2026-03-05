@@ -57,26 +57,60 @@ _EVASION_JS = (Path(__file__).with_name("stealth_evasions.js")).read_text(encodi
 # Idle timeout before auto-closing browser (seconds)
 _DEFAULT_IDLE_TIMEOUT = 300
 
+# Pre-compiled regex for auth path segment-boundary matching
+_AUTH_PATH_RE = re.compile(r"(?:^|/)(?:oauth|authorize|login|signin|saml|sso)(?:/|$|\?)")
+
 
 class StealthBrowserManager:
     """Manages a long-lived Patchright browser instance."""
 
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, bridge=None):
         self._config = config
+        self._bridge = bridge
         self._pw = None
         self._context = None
         self._page = None
+        self._frame = None  # Active frame locator (None = main frame)
         self._refs: dict[str, dict] = {}  # ref_id -> {selector, role, name}
+        self._last_dialog: dict | None = None
+        self._pages: list = []  # Track all pages (tabs/popups)
         self._idle_timeout = config.get("idle_timeout", _DEFAULT_IDLE_TIMEOUT)
         self._idle_handle: asyncio.TimerHandle | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._xvfb_proc: subprocess.Popen | None = None
+        # Proxy server URL is NOT passed via env (may contain credentials).
+        # It will be fetched via bridge RPC at browser launch time.
+        self._proxy_server = None
+        self._proxy_vault_key = None
+        self._auth_skip_domains: set[str] = set(
+            config.get(
+                "auth_skip_domains",
+                [
+                    "accounts.google.com",
+                    "accounts.youtube.com",
+                    "github.com",
+                    "api.github.com",
+                    "appleid.apple.com",
+                    "login.microsoftonline.com",
+                    "login.live.com",
+                    "www.facebook.com",
+                    "m.facebook.com",
+                    "login.yahoo.com",
+                    "id.atlassian.com",
+                ],
+            )
+        )
 
     @property
     def is_running(self) -> bool:
         return self._page is not None
 
-    async def ensure_browser(self, url: str | None = None) -> None:
+    async def ensure_browser(
+        self,
+        url: str | None = None,
+        profile: str | None = None,
+        proxy_override: str | None = None,
+    ) -> None:
         """Lazy-launch browser on first use."""
         if self._page is not None:
             if url:
@@ -104,11 +138,20 @@ class StealthBrowserManager:
                 ]
             )
 
-        # Session-specific user data dir to avoid collisions
+        # Persistent profile directory for browser data
+        profiles_dir = Path(
+            self._config.get("profiles_dir", "")
+            or os.path.expanduser("~/.claude-ext/browser_profiles")
+        )
         session_id = re.sub(
             r"[^a-zA-Z0-9_-]", "", os.environ.get("CLAUDE_EXT_SESSION_ID", "default")
         )
-        user_data_dir = f"/tmp/patchright-{session_id}"
+        if profile:
+            profile_name = re.sub(r"[^a-zA-Z0-9_-]", "", profile)
+            user_data_dir = str(profiles_dir / profile_name)
+        else:
+            user_data_dir = str(profiles_dir / session_id)
+        Path(user_data_dir).mkdir(parents=True, exist_ok=True)
 
         # headless=False needed for extension loading; Xvfb provides virtual display
         # If no extensions, headless=True is fine (Patchright expects boolean)
@@ -119,12 +162,26 @@ class StealthBrowserManager:
         if not headless_val and not os.environ.get("DISPLAY"):
             self._ensure_xvfb()
 
+        # Proxy configuration (per-call override > bridge RPC > none)
+        proxy_config = None
+        proxy_server = proxy_override
+        if not proxy_server and self._bridge:
+            try:
+                proxy_data = self._bridge.call("stealth_get_proxy", {})
+                if isinstance(proxy_data, dict) and proxy_data.get("server"):
+                    proxy_server = proxy_data["server"]
+            except Exception as exc:
+                log.debug("Failed to fetch proxy config via bridge: %s", exc)
+        if proxy_server:
+            proxy_config = {"server": proxy_server}
+
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             headless=headless_val,
             args=args,
             viewport={"width": 1280, "height": 720},
             ignore_https_errors=True,
+            proxy=proxy_config,
         )
 
         # Use existing page (persistent context always has one)
@@ -137,32 +194,23 @@ class StealthBrowserManager:
         # (Patchright blocks addInitScript and CDP Page.addScriptToEvaluateOnNewDocument)
         _evasion_tag = f"<script>{_EVASION_JS}</script>".encode()
 
-        # Domains where route interception must be skipped entirely.
-        # Google GAIA sign-in uses XHR calls that break under ANY route
-        # interception (even route.continue_()). Skip the whole domain.
-        _skip_domains = {
-            "accounts.google.com",
-            "accounts.youtube.com",
-            "github.com",
-            "api.github.com",
-            "appleid.apple.com",
-        }
-
-        _page_ref = self._page  # capture for closure
+        _mgr_ref = self  # capture for closure (access _is_auth_url)
 
         async def _inject_evasions(route):
             try:
-                # Skip if current page is on an auth domain — Google GAIA
-                # breaks under any route interception including continue_()
+                # Skip if current page or request is on an auth domain —
+                # Google GAIA breaks under any route interception including continue_()
                 from urllib.parse import urlparse
 
-                page_host = urlparse(_page_ref.url).hostname or ""
-                if any(page_host == d or page_host.endswith("." + d) for d in _skip_domains):
+                page_parsed = urlparse(_mgr_ref._page.url if _mgr_ref._page else "")
+                page_host = page_parsed.hostname or ""
+                if _mgr_ref._is_auth_url(page_host, page_parsed.path):
                     await route.fallback()
                     return
 
-                req_host = urlparse(route.request.url).hostname or ""
-                if any(req_host == d or req_host.endswith("." + d) for d in _skip_domains):
+                req_parsed = urlparse(route.request.url)
+                req_host = req_parsed.hostname or ""
+                if _mgr_ref._is_auth_url(req_host, req_parsed.path):
                     await route.fallback()
                     return
 
@@ -191,7 +239,28 @@ class StealthBrowserManager:
                 except Exception:
                     pass
 
+        self._inject_evasions = _inject_evasions
         await self._page.route("**/*", _inject_evasions)
+
+        # Track pages list
+        self._pages = list(self._context.pages)
+
+        # Dialog handler: auto-accept and store last dialog info
+        def _on_dialog(dialog):
+            self._last_dialog = {
+                "type": dialog.type,
+                "message": dialog.message,
+            }
+            asyncio.ensure_future(dialog.accept())
+
+        self._page.on("dialog", _on_dialog)
+
+        # Popup handler: track new pages/tabs
+        def _on_page(page):
+            if page not in self._pages:
+                self._pages.append(page)
+
+        self._context.on("page", _on_page)
 
         if url:
             await self._page.goto(url, wait_until="domcontentloaded")
@@ -272,6 +341,47 @@ class StealthBrowserManager:
         except Exception:
             pass
 
+    def _is_auth_url(self, hostname: str, path: str = "") -> bool:
+        """Check if a URL is an authentication-related URL."""
+        if not hostname:
+            return False
+        # 1. Exact or subdomain match in config list
+        for d in self._auth_skip_domains:
+            if hostname == d or hostname.endswith("." + d):
+                return True
+        # 2. Hostname prefix heuristic
+        _auth_prefixes = ("login.", "auth.", "signin.", "sso.", "accounts.", "id.")
+        if any(hostname.startswith(p) for p in _auth_prefixes):
+            return True
+        # 3. Path pattern heuristic — segment-boundary matching
+        # Only match at path segment boundaries (/ delimited) to avoid false
+        # positives like "/blogindex" matching "/login"
+        if path:
+            if _AUTH_PATH_RE.search(path):
+                return True
+        return False
+
+    def add_auth_domain(self, domain: str) -> str:
+        """Add a domain to the auth skip list at runtime."""
+        domain = domain.strip().lower()
+        if not domain:
+            return "Error: domain is required."
+        self._auth_skip_domains.add(domain)
+        return f"Added '{domain}' to auth skip list."
+
+    def _fetch_credential(self, key: str) -> str | None:
+        """Retrieve a credential from the vault via bridge RPC."""
+        if not self._bridge:
+            return None
+        try:
+            result = self._bridge.call("stealth_vault_retrieve", {"key": key})
+            if isinstance(result, dict) and "value" in result:
+                return result["value"]
+            return None
+        except Exception as exc:
+            log.debug("Failed to fetch credential '%s': %s", key, exc)
+            return None
+
     def _reset_idle(self) -> None:
         """Reset the idle auto-close timer."""
         if self._idle_handle:
@@ -298,6 +408,12 @@ class StealthBrowserManager:
         header = f"{title}\n  {url}" if title else url
         return f"{header}\n{text}" if text else header
 
+    def _locator(self, selector: str):
+        """Return a locator scoped to active frame or page."""
+        if self._frame:
+            return self._frame.locator(selector)
+        return self._page.locator(selector)
+
     async def click(self, ref: str = "", x: int = 0, y: int = 0) -> str:
         if not self._page:
             return "Error: no browser open."
@@ -310,7 +426,7 @@ class StealthBrowserManager:
         info = self._refs.get(ref)
         if not info:
             return f"Error: ref '{ref}' not found. Run snapshot first."
-        await self._page.click(info["selector"])
+        await self._locator(info["selector"]).click()
         return "Done"
 
     async def fill(self, ref: str, value: str) -> str:
@@ -320,7 +436,7 @@ class StealthBrowserManager:
         if not info:
             return f"Error: ref '{ref}' not found. Run snapshot first."
         self._reset_idle()
-        await self._page.fill(info["selector"], value)
+        await self._locator(info["selector"]).fill(value)
         return "Done"
 
     async def select_option(self, ref: str, value: str) -> str:
@@ -330,7 +446,7 @@ class StealthBrowserManager:
         if not info:
             return f"Error: ref '{ref}' not found. Run snapshot first."
         self._reset_idle()
-        await self._page.select_option(info["selector"], label=value)
+        await self._locator(info["selector"]).select_option(label=value)
         return "Done"
 
     async def type_text(self, text: str) -> str:
@@ -401,6 +517,75 @@ class StealthBrowserManager:
             return await el.inner_text()
         return await self._page.inner_text("body")
 
+    async def upload(self, ref: str, path: str) -> str:
+        if not self._page:
+            return "Error: no browser open."
+        info = self._refs.get(ref)
+        if not info:
+            return f"Error: ref '{ref}' not found. Run snapshot first."
+        resolved = str(Path(path).resolve())
+        state_dir = os.environ.get("CLAUDE_EXT_STATE_DIR", "")
+        safe_prefix = state_dir.rstrip("/") + "/" if state_dir else ""
+        if not (resolved.startswith("/tmp/") or (safe_prefix and resolved.startswith(safe_prefix))):
+            return "Error: upload path must be under /tmp/ or session state dir."
+        if not Path(resolved).is_file():
+            return f"Error: file not found: {resolved}"
+        self._reset_idle()
+        await self._page.set_input_files(info["selector"], resolved)
+        return f"Uploaded {resolved}"
+
+    async def download(self, ref: str, save_dir: str = "/tmp") -> str:
+        if not self._page:
+            return "Error: no browser open."
+        info = self._refs.get(ref)
+        if not info:
+            return f"Error: ref '{ref}' not found. Run snapshot first."
+        # Validate save_dir: restrict to /tmp or session state dir
+        resolved_dir = str(Path(save_dir).resolve())
+        state_dir = os.environ.get("CLAUDE_EXT_STATE_DIR", "")
+        safe_prefix = state_dir.rstrip("/") + "/" if state_dir else ""
+        if not (
+            resolved_dir.startswith("/tmp/")
+            or resolved_dir == "/tmp"
+            or (safe_prefix and resolved_dir.startswith(safe_prefix))
+        ):
+            return "Error: save_dir must be under /tmp/ or session state dir."
+        self._reset_idle()
+        async with self._page.expect_download() as download_info:
+            await self._locator(info["selector"]).click()
+        download = await download_info.value
+        # Sanitize filename: strip path components to prevent traversal
+        safe_name = Path(download.suggested_filename).name
+        if not safe_name:
+            safe_name = "download"
+        save_path = str(Path(resolved_dir) / safe_name)
+        await download.save_as(save_path)
+        return f"Downloaded to {save_path}"
+
+    async def switch_tab(self, index: int) -> str:
+        if not self._context:
+            return "Error: no browser open."
+        pages = self._context.pages
+        if index < 0 or index >= len(pages):
+            return f"Error: tab index {index} out of range (0-{len(pages) - 1})."
+        self._page = pages[index]
+        self._frame = None
+        self._refs = {}
+        if hasattr(self, "_inject_evasions"):
+            await self._page.route("**/*", self._inject_evasions)
+        self._reset_idle()
+        title = await self._page.title()
+        return f"Switched to tab {index}: {title}\n  {self._page.url}"
+
+    async def switch_frame(self, selector: str | None = None) -> str:
+        if not self._page:
+            return "Error: no browser open."
+        if not selector:
+            self._frame = None
+            return "Switched to main frame."
+        self._frame = self._page.frame_locator(selector)
+        return f"Switched to frame: {selector}"
+
     async def goto(self, url: str) -> str:
         if not self._page:
             return "Error: no browser open. Use open first."
@@ -447,6 +632,14 @@ class StealthBrowserMCPServer(MCPServerBase):
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "URL to open"},
+                    "profile": {
+                        "type": "string",
+                        "description": "Reusable browser profile name (shares state across sessions)",
+                    },
+                    "proxy": {
+                        "type": "string",
+                        "description": "Proxy URL (e.g. socks5://host:port, http://host:port)",
+                    },
                 },
                 "required": ["url"],
             },
@@ -603,6 +796,83 @@ class StealthBrowserMCPServer(MCPServerBase):
             },
         },
         {
+            "name": "upload",
+            "description": "Upload a file to a file input element by ref.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "Element ref from snapshot (file input)",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File path to upload (must be under /tmp/ or state dir)",
+                    },
+                },
+                "required": ["ref", "path"],
+            },
+        },
+        {
+            "name": "download",
+            "description": "Click a download link/button by ref and save the file.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "Element ref from snapshot",
+                    },
+                    "save_dir": {
+                        "type": "string",
+                        "description": "Directory to save to (default: /tmp)",
+                    },
+                },
+                "required": ["ref"],
+            },
+        },
+        {
+            "name": "switch_tab",
+            "description": "Switch to a browser tab by index.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "index": {
+                        "type": "integer",
+                        "description": "Tab index (0-based)",
+                    },
+                },
+                "required": ["index"],
+            },
+        },
+        {
+            "name": "switch_frame",
+            "description": "Switch to an iframe by CSS selector, or reset to main frame.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "selector": {
+                        "type": "string",
+                        "description": "CSS selector for iframe (omit to reset to main frame)",
+                    },
+                },
+            },
+        },
+        {
+            "name": "add_auth_domain",
+            "description": "Add a domain to the auth skip list (skips evasion injection on auth sites).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "description": "Domain to add (e.g. 'login.example.com')",
+                    },
+                },
+                "required": ["domain"],
+            },
+        },
+        {
             "name": "close",
             "description": "Close the stealth browser and release resources.",
             "inputSchema": {"type": "object", "properties": {}},
@@ -612,7 +882,7 @@ class StealthBrowserMCPServer(MCPServerBase):
     def __init__(self):
         super().__init__()
         self._config = self._load_config()
-        self._manager = StealthBrowserManager(self._config)
+        self._manager = StealthBrowserManager(self._config, bridge=self.bridge)
 
         # Background event loop for async Patchright operations
         self._loop = asyncio.new_event_loop()
@@ -640,6 +910,11 @@ class StealthBrowserMCPServer(MCPServerBase):
             "get_url": self._handle_get_url,
             "get_title": self._handle_get_title,
             "get_text": self._handle_get_text,
+            "upload": self._handle_upload,
+            "download": self._handle_download,
+            "switch_tab": self._handle_switch_tab,
+            "switch_frame": self._handle_switch_frame,
+            "add_auth_domain": self._handle_add_auth_domain,
             "close": self._handle_close,
         }
 
@@ -679,7 +954,9 @@ class StealthBrowserMCPServer(MCPServerBase):
         url = args.get("url", "")
         if not url:
             return "Error: 'url' is required."
-        self._run_async(self._manager.ensure_browser(url))
+        profile = args.get("profile")
+        proxy = args.get("proxy")
+        self._run_async(self._manager.ensure_browser(url, profile=profile, proxy_override=proxy))
         return self._run_async(self._manager.snapshot())
 
     def _handle_goto(self, args: dict) -> str:
@@ -756,6 +1033,38 @@ class StealthBrowserMCPServer(MCPServerBase):
     def _handle_get_text(self, args: dict) -> str:
         selector = args.get("selector")
         return self._run_async(self._manager.get_text(selector))
+
+    def _handle_upload(self, args: dict) -> str:
+        ref = args.get("ref", "")
+        path = args.get("path", "")
+        if not ref:
+            return "Error: 'ref' is required."
+        if not path:
+            return "Error: 'path' is required."
+        return self._run_async(self._manager.upload(ref, path))
+
+    def _handle_download(self, args: dict) -> str:
+        ref = args.get("ref", "")
+        if not ref:
+            return "Error: 'ref' is required."
+        save_dir = args.get("save_dir", "/tmp")
+        return self._run_async(self._manager.download(ref, save_dir))
+
+    def _handle_switch_tab(self, args: dict) -> str:
+        index = args.get("index")
+        if index is None:
+            return "Error: 'index' is required."
+        return self._run_async(self._manager.switch_tab(int(index)))
+
+    def _handle_switch_frame(self, args: dict) -> str:
+        selector = args.get("selector")
+        return self._run_async(self._manager.switch_frame(selector))
+
+    def _handle_add_auth_domain(self, args: dict) -> str:
+        domain = args.get("domain", "")
+        if not domain:
+            return "Error: 'domain' is required."
+        return self._manager.add_auth_domain(domain)
 
     def _handle_close(self, args: dict) -> str:
         self._run_async(self._manager.cleanup())

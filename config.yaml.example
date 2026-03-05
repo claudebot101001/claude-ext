@@ -171,3 +171,19 @@ extensions:
       idle_timeout: 300              # Seconds before auto-closing idle browser
       chromium_args: []              # Additional Chromium launch flags
       # nopecha_api_key: ""          # Optional, for NopeCHA paid tier
+      profiles_dir: null             # Default: ~/.claude-ext/browser_profiles
+      # auth_skip_domains:           # Domains where evasion injection is skipped
+      #   - accounts.google.com
+      #   - accounts.youtube.com
+      #   - github.com
+      #   - api.github.com
+      #   - appleid.apple.com
+      #   - login.microsoftonline.com
+      #   - login.live.com
+      #   - www.facebook.com
+      #   - m.facebook.com
+      #   - login.yahoo.com
+      #   - id.atlassian.com
+      proxy:
+        server: null                 # e.g. socks5://proxy:1080, http://proxy:8080
+        # vault_key: null            # For authenticated proxies (future: bridge RPC)
