@@ -66,7 +66,7 @@ class TestStealthRegistration:
         assert "stealth_browser" not in server_names
         assert "browser" in server_names  # scraping still registered
 
-    def test_stealth_server_has_23_tools(self, ext):
+    def test_stealth_server_has_25_tools(self, ext):
         _run(ext.start())
         calls = ext.engine.session_manager.register_mcp_server.call_args_list
         stealth_call = [c for c in calls if c[0][0] == "stealth_browser"][0]

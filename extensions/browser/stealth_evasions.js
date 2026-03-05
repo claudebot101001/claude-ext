@@ -122,6 +122,8 @@
     const d = imageData.data;
     for (let i = 0; i < d.length; i += 4) {
       d[i] = (d[i] + Math.floor(canvasRng() * 3) - 1) & 0xff;
+      d[i + 1] = (d[i + 1] + Math.floor(canvasRng() * 3) - 1) & 0xff;
+      d[i + 2] = (d[i + 2] + Math.floor(canvasRng() * 3) - 1) & 0xff;
     }
     return imageData;
   };

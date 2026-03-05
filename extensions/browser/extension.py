@@ -370,6 +370,11 @@ class ExtensionImpl(Extension):
             key = params.get("key", "")
             if not key:
                 return {"error": "Missing 'key' parameter"}
+            # Restrict vault access to browser/ prefix to prevent cross-extension leakage
+            if not key.startswith("browser/"):
+                return {
+                    "error": "Access denied: stealth browser can only access browser/* vault keys"
+                }
             result = vault.get(key)
             if result is None:
                 return {"error": f"Key not found: {key}"}
