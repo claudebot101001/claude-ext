@@ -66,12 +66,12 @@ class TestStealthRegistration:
         assert "stealth_browser" not in server_names
         assert "browser" in server_names  # scraping still registered
 
-    def test_stealth_server_has_20_tools(self, ext):
+    def test_stealth_server_has_23_tools(self, ext):
         _run(ext.start())
         calls = ext.engine.session_manager.register_mcp_server.call_args_list
         stealth_call = [c for c in calls if c[0][0] == "stealth_browser"][0]
         tools = stealth_call[1].get("tools") or stealth_call[0][2]
-        assert len(tools) == 20
+        assert len(tools) == 25
 
     def test_stealth_tool_names(self, ext):
         _run(ext.start())
@@ -99,7 +99,12 @@ class TestStealthRegistration:
             "switch_tab",
             "switch_frame",
             "add_auth_domain",
+            "create_profile",
+            "list_profiles",
+            "delete_profile",
             "close",
+            "check_email",
+            "read_email",
         }
         assert names == expected
 
@@ -171,11 +176,11 @@ class TestStealthMCPServerSchema:
         server._loop.call_soon_threadsafe(server._loop.stop)
         server._thread.join(timeout=2)
 
-    def test_has_20_tools(self):
+    def test_has_25_tools(self):
         from extensions.browser.stealth_server import StealthBrowserMCPServer
 
         server = StealthBrowserMCPServer()
-        assert len(server.tools) == 20
+        assert len(server.tools) == 25
         server._loop.call_soon_threadsafe(server._loop.stop)
         server._thread.join(timeout=2)
 
@@ -374,3 +379,236 @@ class TestNopeCHAResolution:
 
         mgr = StealthBrowserManager({})
         assert mgr._resolve_nopecha() is None
+
+
+class TestStealthConfig:
+    """Test _get_stealth_config and config injection."""
+
+    def test_default_config(self):
+        from extensions.browser.stealth_server import StealthBrowserManager
+
+        mgr = StealthBrowserManager({})
+        config = mgr._get_stealth_config()
+        assert config["canvas_seed"] == 42
+        assert config["hardware_concurrency"] == 8
+        assert config["screen_width"] == 1920
+        assert config["timezone"] == "America/New_York"
+
+    def test_config_with_profile(self):
+        from extensions.browser.stealth_server import StealthBrowserManager
+
+        mgr = StealthBrowserManager({})
+        mgr._active_profile = {
+            "fingerprint": {
+                "canvas_seed": 99999,
+                "screen_width": 2560,
+                "timezone": "Europe/London",
+            }
+        }
+        config = mgr._get_stealth_config()
+        assert config["canvas_seed"] == 99999
+        assert config["screen_width"] == 2560
+        assert config["timezone"] == "Europe/London"
+        # Unset values use defaults
+        assert config["hardware_concurrency"] == 8
+
+
+class TestProfileManagement:
+    """Test profile CRUD operations."""
+
+    @pytest.fixture(autouse=True)
+    def setup_mgr(self, tmp_path):
+        from extensions.browser.stealth_server import StealthBrowserManager
+
+        self.mgr = StealthBrowserManager({"profiles_dir": str(tmp_path)})
+        self.tmp_path = tmp_path
+
+    def test_create_profile(self):
+        result = self.mgr.create_profile("test-profile")
+        assert "created" in result
+        profile_path = self.tmp_path / "test-profile" / "profile.json"
+        assert profile_path.exists()
+        data = json.loads(profile_path.read_text())
+        assert data["name"] == "test-profile"
+        assert "canvas_seed" in data["fingerprint"]
+
+    def test_create_profile_deterministic(self):
+        self.mgr.create_profile("alpha")
+        p1 = json.loads((self.tmp_path / "alpha" / "profile.json").read_text())
+        # Delete and recreate
+        import shutil
+
+        shutil.rmtree(self.tmp_path / "alpha")
+        self.mgr.create_profile("alpha")
+        p2 = json.loads((self.tmp_path / "alpha" / "profile.json").read_text())
+        assert p1["fingerprint"] == p2["fingerprint"]
+
+    def test_create_profile_with_overrides(self):
+        result = self.mgr.create_profile(
+            "custom", overrides={"canvas_seed": 12345, "timezone": "Asia/Tokyo"}
+        )
+        assert "created" in result
+        data = json.loads((self.tmp_path / "custom" / "profile.json").read_text())
+        assert data["fingerprint"]["canvas_seed"] == 12345
+        assert data["fingerprint"]["timezone"] == "Asia/Tokyo"
+
+    def test_create_profile_rejects_proxy_credentials(self):
+        result = self.mgr.create_profile(
+            "bad-proxy", overrides={"proxy_server": "http://user:pass@host:8080"}
+        )
+        assert "Error" in result
+
+    def test_create_profile_allows_clean_proxy(self):
+        result = self.mgr.create_profile(
+            "good-proxy", overrides={"proxy_server": "socks5://host:1080"}
+        )
+        assert "created" in result
+        data = json.loads((self.tmp_path / "good-proxy" / "profile.json").read_text())
+        assert data["proxy_server"] == "socks5://host:1080"
+
+    def test_list_profiles_empty(self):
+        assert self.mgr.list_profiles() == []
+
+    def test_list_profiles(self):
+        self.mgr.create_profile("alpha")
+        self.mgr.create_profile("beta")
+        profiles = self.mgr.list_profiles()
+        assert profiles == ["alpha", "beta"]
+
+    def test_delete_profile(self):
+        self.mgr.create_profile("to-delete")
+        assert (self.tmp_path / "to-delete" / "profile.json").exists()
+        result = self.mgr.delete_profile("to-delete")
+        assert "deleted" in result
+        assert not (self.tmp_path / "to-delete").exists()
+
+    def test_delete_nonexistent_profile(self):
+        result = self.mgr.delete_profile("nonexistent")
+        assert "Error" in result
+
+    def test_load_profile(self):
+        self.mgr.create_profile("loadme")
+        loaded = self.mgr._load_profile("loadme")
+        assert loaded is not None
+        assert loaded["name"] == "loadme"
+
+    def test_load_nonexistent_profile(self):
+        assert self.mgr._load_profile("nope") is None
+
+    def test_invalid_profile_name(self):
+        result = self.mgr.create_profile("../../etc/passwd")
+        # Name gets sanitized to "etcpasswd"
+        assert "created" in result
+
+    def test_empty_profile_name(self):
+        result = self.mgr.create_profile("")
+        assert "Error" in result
+
+
+class TestProfileMCPHandlers:
+    """Test MCP handler wrappers for profile management."""
+
+    @pytest.fixture(autouse=True)
+    def server(self, tmp_path):
+        from extensions.browser.stealth_server import StealthBrowserMCPServer
+
+        self.server = StealthBrowserMCPServer()
+        # Override profiles dir to tmp
+        self.server._manager._profiles_base = tmp_path
+        self.tmp_path = tmp_path
+        yield
+        self.server._loop.call_soon_threadsafe(self.server._loop.stop)
+        self.server._thread.join(timeout=2)
+
+    def test_create_profile_handler(self):
+        result = self.server._handle_create_profile({"name": "test-prof"})
+        assert "created" in result
+
+    def test_create_profile_missing_name(self):
+        result = self.server._handle_create_profile({})
+        assert "Error" in result
+
+    def test_list_profiles_handler(self):
+        self.server._handle_create_profile({"name": "a"})
+        self.server._handle_create_profile({"name": "b"})
+        result = self.server._handle_list_profiles({})
+        assert "a" in result
+        assert "b" in result
+
+    def test_list_profiles_empty(self):
+        result = self.server._handle_list_profiles({})
+        assert "No profiles" in result
+
+    def test_delete_profile_handler(self):
+        self.server._handle_create_profile({"name": "del-me"})
+        result = self.server._handle_delete_profile({"name": "del-me"})
+        assert "deleted" in result
+
+    def test_delete_profile_missing_name(self):
+        result = self.server._handle_delete_profile({})
+        assert "Error" in result
+
+    def test_check_email_missing_message_id(self):
+        result = self.server._handle_read_email({})
+        assert "Error" in result
+
+
+# ---------------------------------------------------------------------------
+# Verification extraction tests
+# ---------------------------------------------------------------------------
+
+
+class TestExtractVerification:
+    def test_code_after_keyword(self):
+        from extensions.browser.extension import _extract_verification
+
+        body = "Your verification code is 482910. Please enter it."
+        result = _extract_verification(body)
+        assert "482910" in result["codes"]
+
+    def test_otp_keyword(self):
+        from extensions.browser.extension import _extract_verification
+
+        body = "Your OTP: 7291"
+        result = _extract_verification(body)
+        assert "7291" in result["codes"]
+
+    def test_fallback_standalone_digits(self):
+        from extensions.browser.extension import _extract_verification
+
+        body = "Enter 83721 to continue"
+        result = _extract_verification(body)
+        assert "83721" in result["codes"]
+
+    def test_filters_years(self):
+        from extensions.browser.extension import _extract_verification
+
+        body = "Copyright 2025. Enter 83721 to continue"
+        result = _extract_verification(body)
+        assert "2025" not in result["codes"]
+        assert "83721" in result["codes"]
+
+    def test_verification_links(self):
+        from extensions.browser.extension import _extract_verification
+
+        body = (
+            "Click here: https://example.com/verify?token=abc123 or visit https://example.com/home"
+        )
+        result = _extract_verification(body)
+        assert len(result["links"]) == 1
+        assert "verify" in result["links"][0]
+
+    def test_confirm_link(self):
+        from extensions.browser.extension import _extract_verification
+
+        body = "Please confirm: https://example.com/confirm/email/abc"
+        result = _extract_verification(body)
+        assert len(result["links"]) == 1
+
+    def test_no_codes_or_links(self):
+        from extensions.browser.extension import _extract_verification
+
+        body = "Hello, welcome to our service."
+        result = _extract_verification(body)
+        assert result["codes"] == []
+        assert result["links"] == []

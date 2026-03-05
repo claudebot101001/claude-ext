@@ -14,9 +14,12 @@ automation with optional NopeCHA CAPTCHA solving.
 """
 
 import asyncio
+import email
+import imaplib
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -36,6 +39,22 @@ Use `agent-browser` via Bash for web interaction. Core workflow:
 Chain with `&&` when intermediate output isn't needed.
 Key commands: open, snapshot, click, fill, select, type, press, wait, screenshot, pdf, get text/url/title
 Run `agent-browser --help` for full command list and options."""
+
+
+def _extract_verification(body: str) -> dict:
+    """Extract verification codes and links from an email body."""
+    # Find verification codes (4-8 digits near code-related keywords)
+    codes = re.findall(r"(?:code|pin|otp|verification)[^\d]{0,20}(\d{4,8})", body, re.IGNORECASE)
+    if not codes:
+        # Fallback: standalone 4-8 digit numbers
+        codes = re.findall(r"\b(\d{4,8})\b", body)
+        # Filter likely non-codes (years)
+        codes = [c for c in codes if not (1900 <= int(c) <= 2100)]
+    # Find verification links
+    urls = re.findall(r"https?://[^\s<>\"]+", body)
+    verify_keywords = ("verify", "confirm", "activate", "token", "validate", "auth")
+    links = [u for u in urls if any(kw in u.lower() for kw in verify_keywords)]
+    return {"codes": codes[:5], "links": links[:10]}
 
 
 class ExtensionImpl(Extension):
@@ -209,11 +228,135 @@ class ExtensionImpl(Extension):
                     "description": "Add domain to auth skip list",
                 },
                 {
+                    "name": "create_profile",
+                    "description": "Create a fingerprint profile",
+                },
+                {
+                    "name": "list_profiles",
+                    "description": "List fingerprint profiles",
+                },
+                {
+                    "name": "delete_profile",
+                    "description": "Delete a fingerprint profile",
+                },
+                {
                     "name": "close",
                     "description": "Close stealth browser",
                 },
+                {
+                    "name": "check_email",
+                    "description": "Search INBOX for verification emails",
+                },
+                {
+                    "name": "read_email",
+                    "description": "Read email and extract verification codes/links",
+                },
             ],
         )
+
+    def _imap_connect(self) -> tuple[imaplib.IMAP4_SSL, dict]:
+        """Connect to IMAP using credentials from vault. Returns (conn, creds_dict)."""
+        vault_key = self._stealth_config.get("email", {}).get("vault_key", "browser/email/imap")
+        vault = self.engine.services.get("vault")
+        if not vault:
+            raise RuntimeError("Vault not enabled — cannot retrieve email credentials")
+        raw = vault.get(vault_key)
+        if not raw:
+            raise RuntimeError(f"Email credentials not found in vault key: {vault_key}")
+        creds = json.loads(raw)
+        conn = imaplib.IMAP4_SSL(creds["host"], int(creds.get("port", 993)))
+        conn.login(creds["username"], creds["password"])
+        return conn, creds
+
+    def _imap_search(
+        self,
+        sender: str | None,
+        subject: str | None,
+        after: str | None,
+        limit: int,
+    ) -> list[dict]:
+        """Search INBOX and return message summaries (blocking)."""
+        conn = None
+        try:
+            conn, _ = self._imap_connect()
+            conn.select("INBOX", readonly=True)
+            criteria = []
+            if sender:
+                criteria.append(f'FROM "{sender}"')
+            if subject:
+                criteria.append(f'SUBJECT "{subject}"')
+            if after:
+                from datetime import datetime
+
+                dt = datetime.fromisoformat(after)
+                criteria.append(f'SINCE "{dt.strftime("%d-%b-%Y")}"')
+            search_str = " ".join(criteria) if criteria else "ALL"
+            _, data = conn.search(None, search_str)
+            msg_ids = data[0].split()
+            msg_ids = msg_ids[-limit:]  # Most recent N
+            results = []
+            for mid in reversed(msg_ids):
+                _, msg_data = conn.fetch(mid, "(RFC822.HEADER BODY.PEEK[TEXT]<0.500>)")
+                if not msg_data or not msg_data[0]:
+                    continue
+                header_bytes = msg_data[0][1] if msg_data[0] else b""
+                snippet = ""
+                if len(msg_data) > 2 and msg_data[1]:
+                    snippet = msg_data[1][1].decode("utf-8", errors="replace")[:200]
+                msg = email.message_from_bytes(header_bytes)
+                results.append(
+                    {
+                        "id": mid.decode(),
+                        "subject": str(msg.get("Subject", "")),
+                        "sender": str(msg.get("From", "")),
+                        "date": str(msg.get("Date", "")),
+                        "snippet": snippet.strip(),
+                    }
+                )
+            return results
+        finally:
+            if conn:
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
+
+    def _imap_read(self, message_id: str) -> dict:
+        """Read a full message by sequence number (blocking)."""
+        conn = None
+        try:
+            conn, _ = self._imap_connect()
+            conn.select("INBOX", readonly=True)
+            _, msg_data = conn.fetch(message_id.encode(), "(RFC822)")
+            if not msg_data or not msg_data[0]:
+                return {"error": f"Message {message_id} not found"}
+            raw = msg_data[0][1]
+            msg = email.message_from_bytes(raw)
+            body = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    ct = part.get_content_type()
+                    if ct == "text/plain":
+                        body = part.get_payload(decode=True).decode("utf-8", errors="replace")
+                        break
+                    elif ct == "text/html" and not body:
+                        body = part.get_payload(decode=True).decode("utf-8", errors="replace")
+            else:
+                body = msg.get_payload(decode=True).decode("utf-8", errors="replace")
+            verification = _extract_verification(body)
+            return {
+                "subject": str(msg.get("Subject", "")),
+                "sender": str(msg.get("From", "")),
+                "body": body,
+                "codes": verification["codes"],
+                "links": verification["links"],
+            }
+        finally:
+            if conn:
+                try:
+                    conn.logout()
+                except Exception:
+                    pass
 
     async def _bridge_handler(self, method: str, params: dict):
         """Handle bridge RPC calls from stealth browser MCP server."""
@@ -242,6 +385,29 @@ class ExtensionImpl(Extension):
                     if creds:
                         return {"server": server, "credentials": creds}
             return {"server": server}
+        if method == "stealth_email_search":
+            sender = params.get("sender")
+            subject = params.get("subject")
+            after = params.get("after")
+            limit = params.get("limit", 5)
+            try:
+                loop = asyncio.get_event_loop()
+                results = await loop.run_in_executor(
+                    None, self._imap_search, sender, subject, after, limit
+                )
+                return {"messages": results}
+            except Exception as exc:
+                return {"error": str(exc)}
+        if method == "stealth_email_read":
+            message_id = params.get("message_id")
+            if not message_id:
+                return {"error": "Missing 'message_id' parameter"}
+            try:
+                loop = asyncio.get_event_loop()
+                result = await loop.run_in_executor(None, self._imap_read, str(message_id))
+                return result
+            except Exception as exc:
+                return {"error": str(exc)}
         return None  # Not our method — let other handlers try
 
     async def stop(self) -> None:

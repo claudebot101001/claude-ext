@@ -17,6 +17,7 @@ Gateway-compatible: in gateway mode, all tools consolidate into a single
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -82,6 +83,10 @@ class StealthBrowserManager:
         # It will be fetched via bridge RPC at browser launch time.
         self._proxy_server = None
         self._proxy_vault_key = None
+        self._active_profile: dict | None = None  # Loaded profile fingerprint config
+        self._profiles_base = Path(
+            config.get("profiles_dir", "") or os.path.expanduser("~/.claude-ext/browser_profiles")
+        )
         self._auth_skip_domains: set[str] = set(
             config.get(
                 "auth_skip_domains",
@@ -124,6 +129,12 @@ class StealthBrowserManager:
             raise RuntimeError(
                 "patchright not installed. Run: pip install patchright && python -m patchright install chromium"
             )
+
+        # Load profile if specified
+        if profile:
+            loaded = self._load_profile(profile)
+            if loaded:
+                self._active_profile = loaded
 
         self._pw = await async_playwright().start()
 
@@ -192,7 +203,9 @@ class StealthBrowserManager:
 
         # Inject fingerprint evasions via route interception
         # (Patchright blocks addInitScript and CDP Page.addScriptToEvaluateOnNewDocument)
-        _evasion_tag = f"<script>{_EVASION_JS}</script>".encode()
+        config_json = json.dumps(self._get_stealth_config())
+        config_tag = f"<script>window.__STEALTH_CONFIG__={config_json};</script>"
+        _evasion_tag = f"{config_tag}<script>{_EVASION_JS}</script>".encode()
 
         _mgr_ref = self  # capture for closure (access _is_auth_url)
 
@@ -340,6 +353,134 @@ class StealthBrowserManager:
                 manifest_path.write_text(json.dumps(data, indent="\t"))
         except Exception:
             pass
+
+    def _get_stealth_config(self) -> dict:
+        """Build stealth config dict from active profile or defaults."""
+        defaults = {
+            "canvas_seed": 42,
+            "audio_seed": 42,
+            "webgl_vendor": "Intel Inc.",
+            "webgl_renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630 (0x00003E92), OpenGL 4.6)",
+            "hardware_concurrency": 8,
+            "device_memory": 8,
+            "screen_width": 1920,
+            "screen_height": 1080,
+            "timezone": "America/New_York",
+            "locale": "en-US",
+        }
+        if self._active_profile and "fingerprint" in self._active_profile:
+            fp = self._active_profile["fingerprint"]
+            for key in defaults:
+                if key in fp:
+                    defaults[key] = fp[key]
+        return defaults
+
+    def _load_profile(self, name: str) -> dict | None:
+        """Load a profile JSON from disk."""
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+        profile_path = self._profiles_base / safe_name / "profile.json"
+        if not profile_path.exists():
+            return None
+        try:
+            return json.loads(profile_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+
+    def create_profile(self, name: str, overrides: dict | None = None) -> str:
+        """Create a new fingerprint profile with deterministic defaults."""
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+        if not safe_name:
+            return "Error: invalid profile name."
+        profile_dir = self._profiles_base / safe_name
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
+        # Seed from profile name for deterministic fingerprint generation
+        name_hash = int(hashlib.sha256(safe_name.encode()).hexdigest()[:8], 16)
+        rng_seed = name_hash & 0xFFFFFFFF
+
+        # Generate deterministic values from seed
+        import random
+
+        rng = random.Random(rng_seed)
+        concurrency_options = [4, 8, 12, 16]
+        memory_options = [4, 8, 16]
+        screen_options = [
+            (1920, 1080),
+            (2560, 1440),
+            (1366, 768),
+            (1536, 864),
+            (1440, 900),
+        ]
+        screen = rng.choice(screen_options)
+        tz_options = [
+            "America/New_York",
+            "America/Chicago",
+            "America/Denver",
+            "America/Los_Angeles",
+            "Europe/London",
+            "Europe/Paris",
+        ]
+
+        profile = {
+            "name": safe_name,
+            "fingerprint": {
+                "canvas_seed": rng.randint(1, 2**31),
+                "audio_seed": rng.randint(1, 2**31),
+                "webgl_vendor": "Intel Inc.",
+                "webgl_renderer": "ANGLE (Intel, Intel(R) UHD Graphics 630 (0x00003E92), OpenGL 4.6)",
+                "hardware_concurrency": rng.choice(concurrency_options),
+                "device_memory": rng.choice(memory_options),
+                "screen_width": screen[0],
+                "screen_height": screen[1],
+                "timezone": rng.choice(tz_options),
+                "locale": "en-US",
+            },
+            "proxy_server": None,
+            "proxy_vault_key": None,
+        }
+
+        # Apply overrides
+        if overrides:
+            for key, val in overrides.items():
+                if key in profile["fingerprint"]:
+                    profile["fingerprint"][key] = val
+                elif key in ("proxy_vault_key",):
+                    profile[key] = val
+                elif key == "proxy_server":
+                    # SECURITY: strip credentials from proxy_server
+                    from urllib.parse import urlparse
+
+                    parsed = urlparse(val)
+                    if parsed.username or parsed.password:
+                        return "Error: proxy_server must not contain credentials. Use proxy_vault_key instead."
+                    profile["proxy_server"] = val
+
+        profile_path = profile_dir / "profile.json"
+        profile_path.write_text(json.dumps(profile, indent=2), encoding="utf-8")
+        return f"Profile '{safe_name}' created."
+
+    def list_profiles(self) -> list[str]:
+        """List all profile names."""
+        if not self._profiles_base.exists():
+            return []
+        return sorted(
+            d.name
+            for d in self._profiles_base.iterdir()
+            if d.is_dir() and (d / "profile.json").exists()
+        )
+
+    def delete_profile(self, name: str) -> str:
+        """Delete a profile directory."""
+        safe_name = re.sub(r"[^a-zA-Z0-9_-]", "", name)
+        if not safe_name:
+            return "Error: invalid profile name."
+        profile_dir = self._profiles_base / safe_name
+        if not profile_dir.exists():
+            return f"Error: profile '{safe_name}' not found."
+        import shutil
+
+        shutil.rmtree(profile_dir)
+        return f"Profile '{safe_name}' deleted."
 
     def _is_auth_url(self, hostname: str, path: str = "") -> bool:
         """Check if a URL is an authentication-related URL."""
@@ -873,9 +1014,85 @@ class StealthBrowserMCPServer(MCPServerBase):
             },
         },
         {
+            "name": "create_profile",
+            "description": "Create a fingerprint profile with deterministic random values.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Profile name (alphanumeric, hyphens, underscores)",
+                    },
+                    "overrides": {
+                        "type": "object",
+                        "description": "Override specific fingerprint values (canvas_seed, screen_width, timezone, etc.)",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+        {
+            "name": "list_profiles",
+            "description": "List all available fingerprint profiles.",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "delete_profile",
+            "description": "Delete a fingerprint profile.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Profile name to delete",
+                    },
+                },
+                "required": ["name"],
+            },
+        },
+        {
             "name": "close",
             "description": "Close the stealth browser and release resources.",
             "inputSchema": {"type": "object", "properties": {}},
+        },
+        {
+            "name": "check_email",
+            "description": "Search INBOX for emails (e.g. verification emails). Credentials from vault.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "sender": {
+                        "type": "string",
+                        "description": "Filter by sender address",
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Filter by subject keyword",
+                    },
+                    "after": {
+                        "type": "string",
+                        "description": "Only emails after this ISO date (e.g. 2026-03-05)",
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "Max messages to return (default: 5)",
+                    },
+                },
+            },
+        },
+        {
+            "name": "read_email",
+            "description": "Read full email by message ID. Extracts verification codes and links.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "message_id": {
+                        "type": "string",
+                        "description": "Message ID from check_email results",
+                    },
+                },
+                "required": ["message_id"],
+            },
         },
     ]
 
@@ -915,7 +1132,12 @@ class StealthBrowserMCPServer(MCPServerBase):
             "switch_tab": self._handle_switch_tab,
             "switch_frame": self._handle_switch_frame,
             "add_auth_domain": self._handle_add_auth_domain,
+            "create_profile": self._handle_create_profile,
+            "list_profiles": self._handle_list_profiles,
+            "delete_profile": self._handle_delete_profile,
             "close": self._handle_close,
+            "check_email": self._handle_check_email,
+            "read_email": self._handle_read_email,
         }
 
     def _load_config(self) -> dict:
@@ -1066,9 +1288,72 @@ class StealthBrowserMCPServer(MCPServerBase):
             return "Error: 'domain' is required."
         return self._manager.add_auth_domain(domain)
 
+    def _handle_create_profile(self, args: dict) -> str:
+        name = args.get("name", "")
+        if not name:
+            return "Error: 'name' is required."
+        overrides = args.get("overrides")
+        return self._manager.create_profile(name, overrides)
+
+    def _handle_list_profiles(self, args: dict) -> str:
+        profiles = self._manager.list_profiles()
+        if not profiles:
+            return "No profiles found."
+        return "\n".join(profiles)
+
+    def _handle_delete_profile(self, args: dict) -> str:
+        name = args.get("name", "")
+        if not name:
+            return "Error: 'name' is required."
+        return self._manager.delete_profile(name)
+
     def _handle_close(self, args: dict) -> str:
         self._run_async(self._manager.cleanup())
         return "Browser closed."
+
+    def _handle_check_email(self, args: dict) -> str:
+        params = {
+            "sender": args.get("sender"),
+            "subject": args.get("subject"),
+            "after": args.get("after"),
+            "limit": args.get("max_results", 5),
+        }
+        result = self.bridge.call("stealth_email_search", params)
+        if isinstance(result, dict) and "error" in result:
+            return f"Error: {result['error']}"
+        messages = result.get("messages", []) if isinstance(result, dict) else []
+        if not messages:
+            return "No messages found."
+        lines = []
+        for m in messages:
+            lines.append(
+                f"[{m['id']}] {m['date']}\n  From: {m['sender']}\n  Subject: {m['subject']}"
+            )
+            if m.get("snippet"):
+                lines.append(f"  Preview: {m['snippet'][:100]}")
+        return "\n".join(lines)
+
+    def _handle_read_email(self, args: dict) -> str:
+        message_id = args.get("message_id", "")
+        if not message_id:
+            return "Error: 'message_id' is required."
+        result = self.bridge.call("stealth_email_read", {"message_id": message_id})
+        if isinstance(result, dict) and "error" in result:
+            return f"Error: {result['error']}"
+        parts = [
+            f"From: {result.get('sender', '')}",
+            f"Subject: {result.get('subject', '')}",
+        ]
+        codes = result.get("codes", [])
+        links = result.get("links", [])
+        if codes:
+            parts.append(f"Verification codes: {', '.join(codes)}")
+        if links:
+            parts.append("Verification links:")
+            for link in links:
+                parts.append(f"  {link}")
+        parts.append(f"\n--- Body ---\n{result.get('body', '')}")
+        return "\n".join(parts)
 
 
 if __name__ == "__main__":
