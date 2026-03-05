@@ -26,3 +26,4 @@ Thumbs.db
 # Environment
 .env
 .claude-ext-uploads/
+extensions/browser/vendor/

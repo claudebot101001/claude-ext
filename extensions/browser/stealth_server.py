@@ -20,6 +20,7 @@ import asyncio
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -49,6 +50,7 @@ class StealthBrowserManager:
         self._idle_timeout = config.get("idle_timeout", _DEFAULT_IDLE_TIMEOUT)
         self._idle_handle: asyncio.TimerHandle | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._xvfb_proc: subprocess.Popen | None = None
 
     @property
     def is_running(self) -> bool:
@@ -91,6 +93,10 @@ class StealthBrowserManager:
         use_headless = nopecha_path is None
         headless_val = use_headless
 
+        # Auto-start Xvfb if headless=False and no DISPLAY set
+        if not headless_val and not os.environ.get("DISPLAY"):
+            self._ensure_xvfb()
+
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             headless=headless_val,
@@ -110,6 +116,24 @@ class StealthBrowserManager:
 
         self._reset_idle()
 
+    def _ensure_xvfb(self) -> None:
+        """Start Xvfb virtual display if not already running."""
+        import shutil
+
+        if not shutil.which("Xvfb"):
+            raise RuntimeError("Xvfb not installed. Run: sudo apt install xvfb")
+        # Pick a display number unlikely to collide
+        display = ":99"
+        try:
+            self._xvfb_proc = subprocess.Popen(
+                ["Xvfb", display, "-screen", "0", "1280x720x24", "-nolisten", "tcp"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            os.environ["DISPLAY"] = display
+        except Exception as e:
+            raise RuntimeError(f"Failed to start Xvfb: {e}")
+
     def _resolve_nopecha(self) -> str | None:
         """Find NopeCHA extension directory if configured."""
         solver = self._config.get("captcha_solver", "none")
@@ -124,8 +148,23 @@ class StealthBrowserManager:
             if d.is_dir() and d.name.startswith("nopecha"):
                 manifest = d / "manifest.json"
                 if manifest.exists():
+                    # Inject API key if configured
+                    api_key = self._config.get("nopecha_api_key", "")
+                    if api_key:
+                        self._set_nopecha_key(manifest, api_key)
                     return str(d)
         return None
+
+    @staticmethod
+    def _set_nopecha_key(manifest_path: Path, api_key: str) -> None:
+        """Inject API key into NopeCHA manifest.json nopecha.key field."""
+        try:
+            data = json.loads(manifest_path.read_text())
+            if data.get("nopecha", {}).get("key") != api_key:
+                data["nopecha"]["key"] = api_key
+                manifest_path.write_text(json.dumps(data, indent="\t"))
+        except Exception:
+            pass
 
     def _reset_idle(self) -> None:
         """Reset the idle auto-close timer."""
@@ -153,13 +192,18 @@ class StealthBrowserManager:
         header = f"{title}\n  {url}" if title else url
         return f"{header}\n{text}" if text else header
 
-    async def click(self, ref: str) -> str:
+    async def click(self, ref: str = "", x: int = 0, y: int = 0) -> str:
         if not self._page:
             return "Error: no browser open."
+        self._reset_idle()
+        if x and y:
+            await self._page.mouse.click(x, y)
+            return "Done"
+        if not ref:
+            return "Error: provide 'ref' or 'x'+'y' coordinates."
         info = self._refs.get(ref)
         if not info:
             return f"Error: ref '{ref}' not found. Run snapshot first."
-        self._reset_idle()
         await self._page.click(info["selector"])
         return "Done"
 
@@ -272,6 +316,9 @@ class StealthBrowserManager:
             self._pw = None
         self._page = None
         self._refs = {}
+        if self._xvfb_proc:
+            self._xvfb_proc.terminate()
+            self._xvfb_proc = None
 
 
 class StealthBrowserMCPServer(MCPServerBase):
@@ -312,13 +359,14 @@ class StealthBrowserMCPServer(MCPServerBase):
         },
         {
             "name": "click",
-            "description": "Click an element by ref (e.g. 'e1').",
+            "description": "Click an element by ref (e.g. 'e1') or by x,y pixel coordinates.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "ref": {"type": "string", "description": "Element ref from snapshot"},
+                    "x": {"type": "integer", "description": "X pixel coordinate"},
+                    "y": {"type": "integer", "description": "Y pixel coordinate"},
                 },
-                "required": ["ref"],
             },
         },
         {
@@ -532,9 +580,11 @@ class StealthBrowserMCPServer(MCPServerBase):
 
     def _handle_click(self, args: dict) -> str:
         ref = args.get("ref", "")
-        if not ref:
-            return "Error: 'ref' is required."
-        return self._run_async(self._manager.click(ref))
+        x = args.get("x", 0)
+        y = args.get("y", 0)
+        if not ref and not (x and y):
+            return "Error: 'ref' or 'x'+'y' coordinates required."
+        return self._run_async(self._manager.click(ref, x, y))
 
     def _handle_fill(self, args: dict) -> str:
         ref = args.get("ref", "")
