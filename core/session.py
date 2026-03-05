@@ -796,6 +796,8 @@ class SessionManager:
                 "model": event.get("model"),
                 "_is_result": True,  # internal flag
             }
+            if event.get("modelUsage"):
+                meta["model_usage"] = event["modelUsage"]
             return "", meta
 
         # Assistant message — inspect content blocks
@@ -828,6 +830,10 @@ class SessionManager:
                     )
                 # thinking, tool_result in assistant blocks — skip
             if deliveries:
+                # Attach per-turn token usage to the first delivery
+                usage = message.get("usage")
+                if usage:
+                    deliveries[0][1]["usage"] = usage
                 # Return only the first delivery; caller will get others
                 # by re-parsing.  In practice assistant events have one block.
                 return deliveries[0]
