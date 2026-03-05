@@ -118,12 +118,10 @@ class X402Handler:
             del acct
 
     def _find_compatible_option(self, accepts: list[dict]) -> dict | None:
-        """Find a payment option matching our configured network."""
+        """Find a payment option matching our configured network (exact match only)."""
         cfg_network = self._config.get("network", "")
         for option in accepts:
-            net = option.get("network", "")
-            # Match by network name (e.g., "base-sepolia", "base", "ethereum")
-            if net == cfg_network or net.startswith(cfg_network):
+            if option.get("network", "") == cfg_network:
                 return option
         return None
 

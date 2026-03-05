@@ -13,6 +13,7 @@ from extensions.crypto.chains.evm import (
     _sanitize_error,
     _secure_wipe,
     _to_wei,
+    _validate_address,
 )
 
 
@@ -29,6 +30,28 @@ class TestHelpers:
 
     def test_to_wei_small(self):
         assert _to_wei("0.000000000000000001") == 1
+
+    def test_to_wei_custom_decimals(self):
+        assert _to_wei("100", decimals=6) == 100_000_000
+
+    def test_to_wei_rejects_excess_decimals(self):
+        with pytest.raises(ValueError, match="decimal places"):
+            _to_wei("0.0000000000000000001")  # 19 decimals
+
+    def test_to_wei_rejects_excess_decimals_custom(self):
+        with pytest.raises(ValueError, match="decimal places"):
+            _to_wei("0.1234567", decimals=6)  # 7 > 6
+
+    def test_validate_address_valid(self):
+        _validate_address("0xABCDef0123456789abcdef0123456789ABCDef01")
+
+    def test_validate_address_invalid(self):
+        with pytest.raises(ValueError, match="Invalid Ethereum address"):
+            _validate_address("not-an-address")
+
+    def test_validate_address_too_short(self):
+        with pytest.raises(ValueError, match="Invalid Ethereum address"):
+            _validate_address("0xABCD")
 
     def test_encode_address(self):
         addr = "0xABCDef0123456789abcdef0123456789ABCDef01"
@@ -64,6 +87,12 @@ class TestHelpers:
         result = _sanitize_error("Error message", "notpresent")
         assert result == "Error message"
 
+    def test_sanitize_error_0x_prefix(self):
+        key = "ab" * 32
+        result = _sanitize_error(f"Error with 0x{key}", key)
+        assert key not in result
+        assert "0xab" not in result
+
     def test_secure_wipe_none(self):
         _secure_wipe(None)  # should not raise
 
@@ -93,22 +122,36 @@ class TestEVMAdapter:
         assert result["symbol"] == "ETH"
 
     def test_get_token_balance(self, adapter):
-        mock_rpc = AsyncMock(return_value="0x" + "0" * 48 + "de0b6b3a7640000")
-        with patch.object(adapter, "_rpc", mock_rpc):
+        call_count = 0
+
+        async def mock_rpc(method, params=None):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # decimals() call → 18
+                return "0x" + "0" * 62 + "12"
+            # balanceOf() call → 1 ETH
+            return "0x" + "0" * 48 + "de0b6b3a7640000"
+
+        with patch.object(adapter, "_rpc", side_effect=mock_rpc):
             result = _run(adapter.get_token_balance("0x" + "ab" * 20, "0x" + "cd" * 20))
         assert "balance" in result
+        assert result["decimals"] == 18
 
     def test_send_native(self, adapter):
         from eth_account import Account
 
         acct = Account.create()
         key = acct.key.hex()
+        to = "0x" + "cd" * 20
 
         async def mock_rpc(method, params=None):
             if method == "eth_getTransactionCount":
                 return "0x0"
             if method == "eth_gasPrice":
                 return "0x3b9aca00"
+            if method == "eth_estimateGas":
+                return "0x5208"
             raise ValueError(f"Unexpected RPC: {method}")
 
         mock_sign = AsyncMock(return_value="0x" + "ab" * 32)
@@ -116,7 +159,7 @@ class TestEVMAdapter:
             patch.object(adapter, "_rpc", side_effect=mock_rpc),
             patch.object(adapter, "_sign_and_send", mock_sign),
         ):
-            tx_hash = _run(adapter.send_native(key, "0x" + "cd" * 20, "0.1"))
+            tx_hash = _run(adapter.send_native(key, to, "0.1"))
         assert tx_hash.startswith("0x")
 
     def test_read_contract(self, adapter):

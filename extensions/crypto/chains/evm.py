@@ -22,16 +22,32 @@ _ERC20_TRANSFER_SELECTOR = keccak(b"transfer(address,uint256)")[:4]
 
 
 def _sanitize_error(msg: str, *sensitive: str | None) -> str:
-    """Strip sensitive values from error messages."""
+    """Strip sensitive values from error messages.
+
+    Handles both raw hex and 0x-prefixed variants to prevent partial leaks.
+    """
     result = str(msg)
     for val in sensitive:
-        if val and val in result:
-            result = result.replace(val, "[REDACTED]")
+        if not val:
+            continue
+        result = result.replace(val, "[REDACTED]")
+        # Also strip without/with 0x prefix
+        stripped = val.removeprefix("0x")
+        if stripped != val:
+            result = result.replace(stripped, "[REDACTED]")
+        else:
+            result = result.replace("0x" + val, "[REDACTED]")
     return result
 
 
 def _secure_wipe(key: str | None) -> None:
-    """Best-effort wipe of key material from memory."""
+    """Best-effort wipe of key material from memory.
+
+    LIMITATION: Python strings are immutable. This wipes a copy (bytearray),
+    not the original str object's internal buffer. The original bytes persist
+    in the CPython heap until freed and overwritten by unrelated allocations.
+    The primary mitigation is minimizing key lifetime via try/finally scope.
+    """
     if key is None:
         return
     try:
@@ -43,14 +59,32 @@ def _secure_wipe(key: str | None) -> None:
         pass
 
 
-def _to_wei(amount: str) -> int:
-    """Convert human-readable ETH amount to wei."""
+def _to_wei(amount: str, decimals: int = 18) -> int:
+    """Convert human-readable token amount to smallest unit.
+
+    Args:
+        amount: Human-readable amount (e.g. '0.1').
+        decimals: Token decimals (18 for ETH, 6 for USDC, etc.).
+
+    Raises ValueError if more decimal places than supported.
+    """
     parts = amount.split(".")
     if len(parts) == 1:
-        return int(parts[0]) * 10**18
-    integer_part = int(parts[0]) * 10**18
-    decimal_str = parts[1][:18].ljust(18, "0")
-    return integer_part + int(decimal_str)
+        return int(parts[0]) * 10**decimals
+    frac = parts[1]
+    if len(frac) > decimals:
+        raise ValueError(f"Amount has {len(frac)} decimal places, max {decimals} for this token")
+    decimal_str = frac.ljust(decimals, "0")
+    return int(parts[0]) * 10**decimals + int(decimal_str)
+
+
+_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+
+def _validate_address(addr: str) -> None:
+    """Validate Ethereum address format."""
+    if not _ADDR_RE.match(addr):
+        raise ValueError(f"Invalid Ethereum address: {addr}")
 
 
 def _encode_address(addr: str) -> bytes:
@@ -174,28 +208,47 @@ class EVMAdapter(ChainAdapter):
         balance = str(wei / 10**18)
         return {"balance": balance, "symbol": self.native_symbol, "wei": str(wei)}
 
+    async def _get_token_decimals(self, token: str) -> int:
+        """Query ERC-20 decimals() from the token contract."""
+        selector = keccak(b"decimals()")[:4]
+        data = "0x" + selector.hex()
+        try:
+            result = await self._rpc("eth_call", [{"to": token, "data": data}, "latest"])
+            return int(result, 16)
+        except Exception:
+            return 18  # fallback
+
     async def get_token_balance(self, address: str, token: str) -> dict:
+        decimals = await self._get_token_decimals(token)
         # balanceOf(address)
         selector = keccak(b"balanceOf(address)")[:4]
         data = "0x" + selector.hex() + _encode_address(address).hex()
         result = await self._rpc("eth_call", [{"to": token, "data": data}, "latest"])
         raw_balance = int(result, 16)
-        # Assume 18 decimals (documented limitation)
-        balance = str(raw_balance / 10**18)
-        return {"balance": balance, "raw_balance": str(raw_balance), "decimals": 18}
+        balance = str(raw_balance / 10**decimals)
+        return {"balance": balance, "raw_balance": str(raw_balance), "decimals": decimals}
 
     async def send_native(self, private_key: str, to: str, amount: str) -> str:
+        _validate_address(to)
         key = private_key
         acct = None
         try:
             acct = Account.from_key(key)
             nonce = await self._get_nonce(acct.address)
             gas_price = await self._get_gas_price()
+            value = _to_wei(amount)
+            tx_for_estimate = {
+                "from": acct.address,
+                "to": to,
+                "value": hex(value),
+            }
+            gas = await self._estimate_gas(tx_for_estimate)
+            gas = int(gas * self._gas_multiplier)
             tx = {
                 "nonce": nonce,
                 "to": to,
-                "value": _to_wei(amount),
-                "gas": 21000,
+                "value": value,
+                "gas": gas,
                 "gasPrice": gas_price,
                 "chainId": self.chain_id,
             }
@@ -206,15 +259,18 @@ class EVMAdapter(ChainAdapter):
             del acct
 
     async def send_token(self, private_key: str, to: str, token: str, amount: str) -> str:
+        _validate_address(to)
+        _validate_address(token)
         key = private_key
         acct = None
         try:
             acct = Account.from_key(key)
             nonce = await self._get_nonce(acct.address)
             gas_price = await self._get_gas_price()
-            # ERC-20 transfer calldata
-            value_wei = _to_wei(amount)
-            calldata = _ERC20_TRANSFER_SELECTOR + _encode_address(to) + _encode_uint256(value_wei)
+            # Query token decimals for correct amount encoding
+            decimals = await self._get_token_decimals(token)
+            value_raw = _to_wei(amount, decimals)
+            calldata = _ERC20_TRANSFER_SELECTOR + _encode_address(to) + _encode_uint256(value_raw)
             tx_for_estimate = {
                 "from": acct.address,
                 "to": token,
@@ -245,6 +301,7 @@ class EVMAdapter(ChainAdapter):
         args: list,
         value: str,
     ) -> str:
+        _validate_address(contract)
         key = private_key
         acct = None
         try:

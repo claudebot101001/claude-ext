@@ -72,9 +72,10 @@ class ExtensionImpl(Extension):
         return adapter
 
     async def start(self) -> None:
-        # Install log redaction filter
-        crypto_logger = logging.getLogger("extensions.crypto")
-        crypto_logger.addFilter(_KeyRedactionFilter())
+        # Install log redaction filter on crypto and dependency loggers
+        redaction_filter = _KeyRedactionFilter()
+        for logger_name in ("extensions.crypto", "eth_account", "eth_abi"):
+            logging.getLogger(logger_name).addFilter(redaction_filter)
 
         # Load chain configs
         self._chain_configs = self.config.get("chains", {})
@@ -178,7 +179,9 @@ class ExtensionImpl(Extension):
             return await handler(params, session_id)
         except Exception as e:
             log.exception("Crypto bridge handler error: %s", method)
-            return {"error": f"Internal error: {e}"}
+            # Redact any 64-char hex strings that could be private keys
+            sanitized = re.sub(r"(?:0x)?[0-9a-fA-F]{64}", "[REDACTED]", str(e))
+            return {"error": f"Internal error: {sanitized}"}
 
     # -- Wallet handlers -------------------------------------------------------
 
