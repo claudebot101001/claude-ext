@@ -57,6 +57,9 @@ _EVASION_JS = (Path(__file__).with_name("stealth_evasions.js")).read_text(encodi
 # Idle timeout before auto-closing browser (seconds)
 _DEFAULT_IDLE_TIMEOUT = 300
 
+# Pre-compiled regex for auth path segment-boundary matching
+_AUTH_PATH_RE = re.compile(r"(?:^|/)(?:oauth|authorize|login|signin|saml|sso)(?:/|$|\?)")
+
 
 class StealthBrowserManager:
     """Manages a long-lived Patchright browser instance."""
@@ -354,10 +357,7 @@ class StealthBrowserManager:
         # Only match at path segment boundaries (/ delimited) to avoid false
         # positives like "/blogindex" matching "/login"
         if path:
-            _auth_path_re = re.compile(
-                r"(?:^|/)(?:oauth|authorize|login|signin|saml|sso)(?:/|$|\?)"
-            )
-            if _auth_path_re.search(path):
+            if _AUTH_PATH_RE.search(path):
                 return True
         return False
 
@@ -545,7 +545,8 @@ class StealthBrowserManager:
         state_dir = os.environ.get("CLAUDE_EXT_STATE_DIR", "")
         safe_prefix = state_dir.rstrip("/") + "/" if state_dir else ""
         if not (
-            resolved_dir.startswith("/tmp")
+            resolved_dir.startswith("/tmp/")
+            or resolved_dir == "/tmp"
             or (safe_prefix and resolved_dir.startswith(safe_prefix))
         ):
             return "Error: save_dir must be under /tmp/ or session state dir."
