@@ -54,6 +54,15 @@
     });
   }
 
+  // --- User-Agent Override (hide HeadlessChrome) ---
+  if (CFG.user_agent) {
+    const spoofedUA = CFG.user_agent;
+    Object.defineProperty(navigator, "userAgent", { get: () => spoofedUA });
+    // appVersion mirrors userAgent minus "Mozilla/"
+    const appVer = spoofedUA.replace(/^Mozilla\//, "");
+    Object.defineProperty(navigator, "appVersion", { get: () => appVer });
+  }
+
   // --- Hardware Concurrency ---
   Object.defineProperty(navigator, "hardwareConcurrency", {
     get: () => CFG.hardware_concurrency || 8,

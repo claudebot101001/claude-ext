@@ -26,6 +26,7 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -189,14 +190,16 @@ class StealthBrowserManager:
         # Get stealth config for browser-level settings (timezone, locale, UA)
         stealth_cfg = self._get_stealth_config()
         tz_id = stealth_cfg.get("timezone", "America/New_York")
-        locale = stealth_cfg.get("locale", "en-US")
+        browser_locale = stealth_cfg.get("locale", "en-US")
+        ua = stealth_cfg["user_agent"]
 
-        # Override UA to hide HeadlessChrome; configurable via profile/stealth config
-        _default_ua = (
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        )
-        ua = stealth_cfg.get("user_agent", _default_ua)
+        # Validate and apply locale via --lang flag (Chromium ignores locale param in headless)
+        if re.match(r"^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8})*$", browser_locale):
+            args.append(f"--lang={browser_locale}")
+
+        # Set TZ env var so Chromium's Date objects use the correct timezone
+        os.environ["TZ"] = tz_id
+        time.tzset()
 
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
@@ -207,7 +210,7 @@ class StealthBrowserManager:
             proxy=proxy_config,
             user_agent=ua,
             timezone_id=tz_id,
-            locale=locale,
+            locale=browser_locale,
         )
 
         # Use existing page (persistent context always has one)
@@ -386,6 +389,10 @@ class StealthBrowserManager:
             "screen_height": 1080,
             "timezone": "America/New_York",
             "locale": "en-US",
+            "user_agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+            ),
         }
         if self._active_profile and "fingerprint" in self._active_profile:
             fp = self._active_profile["fingerprint"]
