@@ -155,9 +155,9 @@ The memory extension implements an autonomous agent identity model with encrypte
 
 ```
 ~/.claude-ext/memory/
+├── general.md               # Agent identity, assets, vault keys, topic index (force-read at session start)
 ├── constitution.md          # Layer 1: human-authored, AI read-only
 ├── personality.md.enc       # Layer 2: Fernet-encrypted, AI-managed
-├── TOPICS_INDEX.md          # Topic catalog (searched via FTS5, not force-loaded)
 ├── topics/                  # Deep knowledge per subject
 │   └── backlog.md           # Self-improvement backlog
 ├── users/                   # Layer 3: per-user profiles
@@ -196,19 +196,18 @@ The memory extension implements an autonomous agent identity model with encrypte
 
 ### Knowledge Store
 
-- **TOPICS_INDEX.md**: Catalog of topic files. Enables FTS5/BM25 search via `memory_search`.
-- **topics/\<name\>.md**: Deep knowledge files. Update `TOPICS_INDEX.md` when creating or modifying.
+- **general.md**: Agent identity, assets, vault credentials, topic index. Force-read at session start.
+- **topics/\<name\>.md**: Deep knowledge files. Update the topic index in `general.md` when creating or removing topics.
 - **events/\<date\>-\<slug\>.md**: Verifiable experiences referenced from personality principles.
 
-Knowledge is accessed on-demand via `memory_search`, not force-loaded at session start.
+Topics are searchable via FTS5/BM25 (`memory_search`). The FTS5 index covers all `.md` files automatically.
 
 ### Migration
 
 On first start after upgrade, auto-migrates v1 format:
-1. Generates `TOPICS_INDEX.md` from existing topic files
-2. Archives `daily/` logs into `topics/daily-archive.md`
-3. Seeds `constitution.md`, creates `users/` and `events/` directories
-4. Writes `.migrated_v2` marker (idempotent)
+1. Archives `daily/` logs into `topics/daily-archive.md`
+2. Seeds `constitution.md`, creates `users/` and `events/` directories
+3. Writes `.migrated_v2` marker (idempotent)
 
 ## Adding a New Extension
 

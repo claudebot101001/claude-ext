@@ -292,7 +292,10 @@ class StealthBrowserManager:
                     pass
 
         self._inject_evasions = _inject_evasions
-        await self._page.route("**/*", _inject_evasions)
+        # Route interception disabled: breaks X.com login/signup (Arkose silent
+        # enforcement rejects modified responses). Evasions now rely solely on
+        # browser-level params (headed mode, user_agent, timezone, locale).
+        # await self._page.route("**/*", _inject_evasions)
 
         # Track pages list
         self._pages = list(self._context.pages)

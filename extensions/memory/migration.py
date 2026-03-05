@@ -1,11 +1,10 @@
 """One-time migration from old memory format (v1) to three-layer identity (v2).
 
 Migration steps:
-1. Generate TOPICS_INDEX.md from existing topic files
-2. Archive daily/ logs into topics/daily-archive.md, remove daily/
-3. Seed constitution.md (human-editable, AI read-only)
-4. Create users/ and events/ directories
-5. Write .migrated_v2 marker
+1. Archive daily/ logs into topics/daily-archive.md, remove daily/
+2. Seed constitution.md (human-editable, AI read-only)
+3. Create users/ and events/ directories
+4. Write .migrated_v2 marker
 """
 
 import logging
@@ -29,61 +28,19 @@ def migrate(memory_dir: Path) -> None:
 
     log.info("Running memory v1 -> v2 migration...")
 
-    # 1. Generate TOPICS_INDEX.md from existing topics/
-    _generate_topics_index(memory_dir)
-
-    # 2. Archive daily logs
+    # 1. Archive daily logs
     _archive_daily_logs(memory_dir)
 
-    # 3. Seed constitution.md
+    # 2. Seed constitution.md
     _seed_constitution(memory_dir)
 
-    # 4. Create directories
+    # 3. Create directories
     (memory_dir / "users").mkdir(exist_ok=True)
     (memory_dir / "events").mkdir(exist_ok=True)
 
-    # 5. Write marker
+    # 4. Write marker
     (memory_dir / _MIGRATION_MARKER).write_text("v2\n", encoding="utf-8")
     log.info("Memory migration v1 -> v2 complete")
-
-
-def _generate_topics_index(memory_dir: Path) -> None:
-    """Generate TOPICS_INDEX.md from existing topic files."""
-    index_path = memory_dir / "TOPICS_INDEX.md"
-    if index_path.exists():
-        return  # don't overwrite manually created index
-
-    topics_dir = memory_dir / "topics"
-    lines = [
-        "# Topics Index\n",
-        "Detailed descriptions of topic files for search matching.\n",
-        "Update this file whenever you create or significantly modify a topic.\n",
-        "",
-    ]
-
-    if topics_dir.exists():
-        for md_file in sorted(topics_dir.rglob("*.md")):
-            rel = md_file.relative_to(memory_dir)
-            try:
-                text = md_file.read_text(encoding="utf-8")
-                # Extract first meaningful lines as description
-                desc_parts = []
-                for line in text.splitlines():
-                    stripped = line.strip().lstrip("#").strip("- ").strip()
-                    if stripped and not stripped.startswith("<!--"):
-                        desc_parts.append(stripped)
-                    if len(desc_parts) >= 3:
-                        break
-                desc = " | ".join(desc_parts)[:200] if desc_parts else "(empty)"
-                lines.append(f"- **{rel}**: {desc}")
-            except (OSError, UnicodeDecodeError):
-                lines.append(f"- **{rel}**: (unreadable)")
-
-    index_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    log.info(
-        "Created TOPICS_INDEX.md with %d topic entries",
-        sum(1 for line in lines if line.startswith("- **")),
-    )
 
 
 def _archive_daily_logs(memory_dir: Path) -> None:

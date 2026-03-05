@@ -5,8 +5,8 @@ Layers:
 2. Personality: AI self-developed principles, Fernet-encrypted, AI-managed via MCP
 3. User Profile: per-user aspirations, injected per-session via customizer
 
-Knowledge store: TOPICS_INDEX.md (topic catalog), topics/<name>.md (deep
-knowledge), searchable via FTS5. Personality encryption uses Vault-managed
+Knowledge store: general.md (identity + topic index, force-read at session start),
+topics/<name>.md (deep knowledge), searchable via FTS5. Personality encryption uses Vault-managed
 key via bridge RPC; all other memory ops use direct file I/O.
 """
 
@@ -26,15 +26,6 @@ log = logging.getLogger(__name__)
 # Seed content for first-run file creation
 # ---------------------------------------------------------------------------
 
-_SEED_TOPICS_INDEX = """\
-# Topics Index
-
-Detailed descriptions of topic files for search matching.
-Update this file whenever you create or significantly modify a topic.
-
-## Entries
-<!-- Add entries as topic files are created -->
-"""
 
 # ---------------------------------------------------------------------------
 # System prompt — three-layer identity + knowledge store guidance
@@ -63,7 +54,8 @@ Persistent knowledge is stored in topic files (topics/<name>.md). \
 Use memory_search to find relevant knowledge when needed. \
 Use memory_read/memory_write/memory_append to manage files directly.
 
-SESSION START: call personality_read() to load your personality principles."""
+SESSION START: call personality_read() to load your personality principles.
+ALSO: call memory_read('general.md') — it contains your identity, assets, vault keys, and topic index."""
 
 
 class ExtensionImpl(Extension):
@@ -295,9 +287,6 @@ class ExtensionImpl(Extension):
 
     def _seed_files(self, memory_dir: Path) -> None:
         """Create seed files on first run."""
-        assert self._store is not None
-        if not (memory_dir / "TOPICS_INDEX.md").exists():
-            self._store.write("TOPICS_INDEX.md", _SEED_TOPICS_INDEX)
-            log.info("Created seed TOPICS_INDEX.md")
         # constitution.md is seeded by migration.py
         # users/ and events/ directories are created by migration.py
+        pass
