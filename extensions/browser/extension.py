@@ -264,7 +264,7 @@ class ExtensionImpl(Extension):
         if not raw:
             raise RuntimeError(f"Email credentials not found in vault key: {vault_key}")
         creds = json.loads(raw)
-        conn = imaplib.IMAP4_SSL(creds["host"], int(creds.get("port", 993)))
+        conn = imaplib.IMAP4_SSL(creds["host"], int(creds.get("port", 993)), timeout=30)
         conn.login(creds["username"], creds["password"])
         return conn, creds
 
@@ -282,9 +282,12 @@ class ExtensionImpl(Extension):
             conn.select("INBOX", readonly=True)
             criteria = []
             if sender:
-                criteria.append(f'FROM "{sender}"')
+                # Strip double quotes to prevent IMAP search injection
+                safe_sender = sender.replace('"', "")
+                criteria.append(f'FROM "{safe_sender}"')
             if subject:
-                criteria.append(f'SUBJECT "{subject}"')
+                safe_subject = subject.replace('"', "")
+                criteria.append(f'SUBJECT "{safe_subject}"')
             if after:
                 from datetime import datetime
 

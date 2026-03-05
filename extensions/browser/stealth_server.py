@@ -203,7 +203,7 @@ class StealthBrowserManager:
 
         # Inject fingerprint evasions via route interception
         # (Patchright blocks addInitScript and CDP Page.addScriptToEvaluateOnNewDocument)
-        config_json = json.dumps(self._get_stealth_config())
+        config_json = json.dumps(self._get_stealth_config()).replace("</", "<\\/")
         config_tag = f"<script>window.__STEALTH_CONFIG__={config_json};</script>"
         _evasion_tag = f"{config_tag}<script>{_EVASION_JS}</script>".encode()
 

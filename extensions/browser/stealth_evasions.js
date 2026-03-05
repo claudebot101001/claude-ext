@@ -79,6 +79,8 @@
           const d = imageData.data;
           for (let i = 0; i < d.length; i += 4) {
             d[i] = (d[i] + Math.floor(canvasRng() * 3) - 1) & 0xff;
+            d[i + 1] = (d[i + 1] + Math.floor(canvasRng() * 3) - 1) & 0xff;
+            d[i + 2] = (d[i + 2] + Math.floor(canvasRng() * 3) - 1) & 0xff;
           }
           ctx.putImageData(imageData, 0, 0);
         } catch (e) {
@@ -101,6 +103,8 @@
           const d = imageData.data;
           for (let i = 0; i < d.length; i += 4) {
             d[i] = (d[i] + Math.floor(canvasRng() * 3) - 1) & 0xff;
+            d[i + 1] = (d[i + 1] + Math.floor(canvasRng() * 3) - 1) & 0xff;
+            d[i + 2] = (d[i + 2] + Math.floor(canvasRng() * 3) - 1) & 0xff;
           }
           ctx.putImageData(imageData, 0, 0);
         } catch (e) {
@@ -144,9 +148,7 @@
     width: CFG.screen_width || 1920,
     height: CFG.screen_height || 1080,
     availWidth: CFG.screen_avail_width || CFG.screen_width || 1920,
-    availHeight: CFG.screen_avail_height || CFG.screen_height
-      ? (CFG.screen_height || 1080) - 40
-      : 1040,
+    availHeight: CFG.screen_avail_height || (CFG.screen_height ? (CFG.screen_height - 40) : 1040),
     colorDepth: CFG.screen_color_depth || 24,
   };
   for (const [prop, val] of Object.entries(screenProps)) {
@@ -211,16 +213,21 @@
       };
       const name = desc && desc.name;
       if (name && name in permDefaults) {
-        return Promise.resolve({
-          state: permDefaults[name],
-          status: permDefaults[name],
-          onchange: null,
-          addEventListener: function () {},
-          removeEventListener: function () {},
-          dispatchEvent: function () {
-            return true;
-          },
+        const proto =
+          typeof PermissionStatus !== "undefined"
+            ? PermissionStatus.prototype
+            : Object.prototype;
+        const result = Object.create(proto, {
+          state: { get: () => permDefaults[name], enumerable: true },
+          status: { get: () => permDefaults[name], enumerable: true },
+          onchange: { value: null, writable: true, enumerable: true },
         });
+        result.addEventListener = function () {};
+        result.removeEventListener = function () {};
+        result.dispatchEvent = function () {
+          return true;
+        };
+        return Promise.resolve(result);
       }
       return origQuery.call(this, desc);
     };
