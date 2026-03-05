@@ -776,11 +776,13 @@ class SessionManager:
     # -- stream event classification -----------------------------------------
 
     @staticmethod
-    def _classify_stream_event(event: dict) -> tuple[str, dict] | None:
-        """Classify a stream-json event into a deliverable (text, metadata) or None.
+    def _classify_stream_event(
+        event: dict,
+    ) -> list[tuple[str, dict]] | None:
+        """Classify a stream-json event into deliverable (text, metadata) tuples.
 
-        Returns None for events that should be skipped (thinking, tool_result,
-        system, rate_limit_event, etc.).
+        Returns a list of deliverables, or None for events that should be
+        skipped (thinking, tool_result, system, rate_limit_event, etc.).
         """
         etype = event.get("type")
 
@@ -796,7 +798,7 @@ class SessionManager:
                 "model": event.get("model"),
                 "_is_result": True,  # internal flag
             }
-            return "", meta
+            return [("", meta)]
 
         # Assistant message — inspect content blocks
         if etype == "assistant":
@@ -827,11 +829,7 @@ class SessionManager:
                         )
                     )
                 # thinking, tool_result in assistant blocks — skip
-            if deliveries:
-                # Return only the first delivery; caller will get others
-                # by re-parsing.  In practice assistant events have one block.
-                return deliveries[0]
-            return None
+            return deliveries or None
 
         # Everything else (user, system, rate_limit_event) — skip
         return None
@@ -849,7 +847,7 @@ class SessionManager:
                 continue
             classified = SessionManager._classify_stream_event(event)
             if classified is not None:
-                yield classified
+                yield from classified
 
     # -- streaming completion -----------------------------------------------
 

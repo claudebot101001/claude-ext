@@ -53,6 +53,7 @@ class _StreamBuffer:
     tool_parts: list[str] = field(default_factory=list)
     tool_flush_task: asyncio.Task | None = None
     tool_folded: bool = False  # True when tool text was folded into live_text
+    tool_hidden: bool = False  # True when a tool_use was filtered (not shown)
     # C3: cost footer integration (multi mode)
     last_sent_message_id: int | None = None
     last_sent_text: str = ""  # text of last sent message (for edit-to-append)
@@ -237,6 +238,10 @@ class ExtensionImpl(Extension):
             # Flush any pending tool summaries before text arrives
             if buf.tool_parts:
                 await self._flush_tool_buffer(session_id)
+            # Insert paragraph break when text follows a hidden (filtered) tool
+            if buf.tool_hidden:
+                buf.text_parts.append("\n\n")
+                buf.tool_hidden = False
             buf.text_parts.append(result_text)
             # Periodic flush: start timer once, delivers every STREAM_FLUSH_DELAY
             if not buf.flush_task or buf.flush_task.done():
@@ -264,6 +269,11 @@ class ExtensionImpl(Extension):
                 if buf.tool_flush_task and not buf.tool_flush_task.done():
                     buf.tool_flush_task.cancel()
                 buf.tool_flush_task = asyncio.create_task(self._delayed_tool_flush(session_id))
+            else:
+                # Tool filtered out — mark so next text gets a paragraph break
+                buf = self._stream_buffers.get(session_id)
+                if buf:
+                    buf.tool_hidden = True
             return
 
         # --- Stopped ---
@@ -421,10 +431,11 @@ class ExtensionImpl(Extension):
         if not new_text.strip() and not buf.live_text:
             return False
 
-        # Add paragraph break when text follows folded tool summaries
-        if buf.tool_folded and new_text:
+        # Add paragraph break when text follows folded tool summaries or hidden tools
+        if (buf.tool_folded or buf.tool_hidden) and new_text:
             buf.live_text += "\n\n"
             buf.tool_folded = False
+            buf.tool_hidden = False
         buf.live_text += new_text
         prefix = self._session_prefix_from_buf(buf)
         display_text = f"{prefix}{buf.live_text}"
@@ -675,7 +686,16 @@ class ExtensionImpl(Extension):
 
         # Try common field names for a detail snippet
         detail = ""
-        for key in ("file_path", "command", "pattern", "description", "prompt", "query", "url"):
+        for key in (
+            "file_path",
+            "command",
+            "pattern",
+            "description",
+            "prompt",
+            "query",
+            "url",
+            "action",
+        ):
             val = tool_input.get(key)
             if val and isinstance(val, str):
                 detail = val
