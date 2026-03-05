@@ -165,14 +165,13 @@ class StealthBrowserManager:
             user_data_dir = str(profiles_dir / session_id)
         Path(user_data_dir).mkdir(parents=True, exist_ok=True)
 
-        # headless=False needed for extension loading; Xvfb provides virtual display
-        # If no extensions, headless=True is fine (Patchright expects boolean)
-        use_headless = nopecha_path is None
-        headless_val = use_headless
-
-        # Auto-start Xvfb if headless=False and no DISPLAY set
-        if not headless_val and not os.environ.get("DISPLAY"):
+        # Always use headed mode (headless=False) for stealth.
+        # Headless Chrome leaks 7+ detection signals (no window.chrome, plugins=0,
+        # rtt=0, outerHeight==innerHeight, UA contains "Headless", etc.).
+        # Xvfb provides a virtual display for headed mode on headless servers.
+        if not os.environ.get("DISPLAY"):
             self._ensure_xvfb()
+        headless_val = False
 
         # Proxy configuration (per-call override > bridge RPC > none)
         proxy_config = None
