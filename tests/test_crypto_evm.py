@@ -215,16 +215,20 @@ class TestEVMAdapter:
                 return {"status": "0x0"}
             raise ValueError(f"Unexpected RPC: {method}")
 
-        with patch.object(adapter, "_rpc", side_effect=mock_rpc):
-            with pytest.raises(RuntimeError, match="reverted"):
-                _run(adapter.deploy_contract(key, "0x6060", None, "0"))
+        with (
+            patch.object(adapter, "_rpc", side_effect=mock_rpc),
+            pytest.raises(RuntimeError, match="reverted"),
+        ):
+            _run(adapter.deploy_contract(key, "0x6060", None, "0"))
 
     def test_wait_for_receipt_timeout(self, adapter):
         adapter._receipt_timeout = 0.1
         mock_rpc = AsyncMock(return_value=None)
-        with patch.object(adapter, "_rpc", mock_rpc):
-            with pytest.raises(TimeoutError, match="Receipt not found"):
-                _run(adapter._wait_for_receipt("0x" + "ab" * 32))
+        with (
+            patch.object(adapter, "_rpc", mock_rpc),
+            pytest.raises(TimeoutError, match="Receipt not found"),
+        ):
+            _run(adapter._wait_for_receipt("0x" + "ab" * 32))
 
     def test_call_contract(self, adapter):
         from eth_account import Account

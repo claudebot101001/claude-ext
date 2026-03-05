@@ -356,6 +356,5 @@ class CryptoMCPServer(MCPServerBase):
 # Import needed for contract_read direct execution
 from extensions.crypto.chains.evm import EVMAdapter  # noqa: E402
 
-
 if __name__ == "__main__":
     CryptoMCPServer().run()

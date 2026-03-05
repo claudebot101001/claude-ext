@@ -1,6 +1,5 @@
 """Tests for crypto portfolio store."""
 
-import json
 
 import pytest
 

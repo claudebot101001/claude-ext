@@ -52,5 +52,5 @@ class ChainAdapter(ABC):
     ) -> dict:
         """Deploy a contract. Returns {tx_hash, contract_address}."""
 
-    async def close(self) -> None:
+    async def close(self) -> None:  # noqa: B027
         """Cleanup resources (e.g. HTTP clients)."""

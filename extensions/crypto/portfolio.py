@@ -6,7 +6,7 @@ JSON file with flock-based atomic I/O matching vault/store.py pattern.
 import fcntl
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class PortfolioStore:
             "address": address,
             "chain": chain,
             "label": label,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         wallets.append(entry)
         self._write(wallets)
