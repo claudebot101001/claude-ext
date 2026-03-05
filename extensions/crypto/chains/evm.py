@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from eth_abi import encode as abi_encode
 from eth_account import Account
+from eth_account.messages import encode_defunct
 from eth_utils import keccak
 
 from .base import ChainAdapter
@@ -385,6 +386,21 @@ class EVMAdapter(ChainAdapter):
             return {"tx_hash": tx_hash, "contract_address": contract_address}
         except Exception as e:
             raise RuntimeError(_sanitize_error(str(e), key)) from None
+        finally:
+            del acct
+
+    async def sign_message(self, private_key: str, message: str) -> dict:
+        """Sign an EIP-191 personal message. Returns signature + address."""
+        acct = None
+        try:
+            acct = Account.from_key(private_key)
+            signable = encode_defunct(text=message)
+            signed = acct.sign_message(signable)
+            return {
+                "signature": signed.signature.hex(),
+                "address": acct.address,
+                "message": message,
+            }
         finally:
             del acct
 

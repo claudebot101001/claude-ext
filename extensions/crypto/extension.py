@@ -36,7 +36,8 @@ _SYSTEM_PROMPT = """\
 You manage crypto wallets with full on-chain capabilities via the crypto gateway tool.
 SECURITY: Private keys are in the encrypted vault and never exposed. All signing is server-side.
 x402: For paid web resources returning HTTP 402, use x402_pay to auto-handle payment.
-Amounts are in human units (e.g. '0.1' ETH, not wei)."""
+Amounts are in human units (e.g. '0.1' ETH, not wei).
+sign_message: Sign EIP-191 personal messages for wallet-based authentication (e.g. SIWE, dApp login)."""
 
 
 class ExtensionImpl(Extension):
@@ -166,6 +167,7 @@ class ExtensionImpl(Extension):
             "send_token": self._handle_send_token,
             "contract_deploy": self._handle_contract_deploy,
             "contract_call": self._handle_contract_call,
+            "sign_message": self._handle_sign_message,
             "x402_pay": self._handle_x402_pay,
             "x402_configure": self._handle_x402_configure,
             "get_chain_config": self._handle_get_chain_config,
@@ -246,6 +248,43 @@ class ExtensionImpl(Extension):
         if token:
             return await adapter.get_token_balance(address, token)
         return await adapter.get_balance(address)
+
+    # -- Message signing -------------------------------------------------------
+
+    async def _handle_sign_message(self, params: dict, session_id: str) -> dict:
+        wallet = params.get("wallet", "")
+        message = params.get("message", "")
+        chain = params.get("chain", self.config.get("default_chain", "ethereum"))
+
+        if not wallet or not message:
+            return {"error": "wallet and message are required"}
+
+        vault = self.engine.services.get("vault")
+        if not vault:
+            return {"error": "Vault service not available"}
+
+        key = None
+        try:
+            vault_key = f"crypto/{chain}/{wallet}/privkey"
+            key = vault.get(vault_key)
+            if not key:
+                return {"error": f"No key for wallet {wallet} on {chain}"}
+
+            adapter = self._get_chain_adapter(chain)
+            result = await adapter.sign_message(key, message)
+
+            if self.engine.events:
+                self.engine.events.log(
+                    "crypto.sign_message",
+                    session_id,
+                    {"wallet": wallet, "message_preview": message[:50]},
+                )
+
+            return result
+        except Exception as e:
+            return {"error": _sanitize_error(str(e), key)}
+        finally:
+            _secure_wipe(key)
 
     # -- Transaction handlers --------------------------------------------------
 

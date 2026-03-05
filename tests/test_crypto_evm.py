@@ -262,3 +262,21 @@ class TestEVMAdapter:
                 )
             )
         assert tx_hash.startswith("0x")
+
+    def test_sign_message(self, adapter):
+        from eth_account import Account
+
+        acct = Account.create()
+        key = acct.key.hex()
+
+        result = _run(adapter.sign_message(key, "Hello, Code4rena!"))
+        assert result["address"] == acct.address
+        assert result["message"] == "Hello, Code4rena!"
+        assert len(result["signature"]) == 130  # 65 bytes hex
+
+        # Verify the signature recovers to the correct address
+        from eth_account.messages import encode_defunct
+
+        signable = encode_defunct(text="Hello, Code4rena!")
+        recovered = Account.recover_message(signable, signature=bytes.fromhex(result["signature"]))
+        assert recovered == acct.address

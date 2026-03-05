@@ -227,6 +227,28 @@ class CryptoMCPServer(MCPServerBase):
             },
         },
         {
+            "name": "sign_message",
+            "description": "Sign an EIP-191 personal message. Returns hex signature.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wallet": {
+                        "type": "string",
+                        "description": "Wallet address to sign with (must be managed)",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Message text to sign",
+                    },
+                    "chain": {
+                        "type": "string",
+                        "description": "Chain name (for key lookup, default: configured default)",
+                    },
+                },
+                "required": ["wallet", "message"],
+            },
+        },
+        {
             "name": "x402_pay",
             "description": "Make HTTP request with automatic x402 payment handling.",
             "inputSchema": {
@@ -288,6 +310,7 @@ class CryptoMCPServer(MCPServerBase):
             "send_token",
             "contract_deploy",
             "contract_call",
+            "sign_message",
             "x402_pay",
             "x402_configure",
         ]:
