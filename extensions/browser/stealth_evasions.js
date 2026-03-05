@@ -1,7 +1,6 @@
 // Stealth evasions injected before page load via addInitScript.
 // Patches WebGL renderer info, WebRTC IP leak, and other fingerprint vectors.
 (() => {
-  window.__stealth_evasion_applied = true;
   // --- WebGL Renderer Spoofing ---
   // Override SwiftShader with a realistic GPU string.
   const SPOOFED_VENDOR = "Intel Inc.";

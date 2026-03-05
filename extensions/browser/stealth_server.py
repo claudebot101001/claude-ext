@@ -18,12 +18,16 @@ Gateway-compatible: in gateway mode, all tools consolidate into a single
 
 import asyncio
 import json
+import logging
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Ensure DISPLAY is set for headless Linux (Xvfb must be running externally or will be started)
 if not os.environ.get("DISPLAY"):
@@ -101,7 +105,9 @@ class StealthBrowserManager:
             )
 
         # Session-specific user data dir to avoid collisions
-        session_id = os.environ.get("CLAUDE_EXT_SESSION_ID", "default")
+        session_id = re.sub(
+            r"[^a-zA-Z0-9_-]", "", os.environ.get("CLAUDE_EXT_SESSION_ID", "default")
+        )
         user_data_dir = f"/tmp/patchright-{session_id}"
 
         # headless=False needed for extension loading; Xvfb provides virtual display
@@ -178,7 +184,8 @@ class StealthBrowserManager:
                     await route.fulfill(response=resp, body=body)
                 else:
                     await route.fulfill(response=resp)
-            except Exception:
+            except Exception as exc:
+                log.debug("Evasion route handler error: %s", exc)
                 try:
                     await route.fallback()
                 except Exception:
@@ -364,8 +371,14 @@ class StealthBrowserManager:
         if not self._page:
             return "Error: no browser open."
         self._reset_idle()
-        await self._page.screenshot(path=path)
-        return f"Screenshot saved to {path}"
+        # Restrict to /tmp or session state dir to prevent arbitrary file writes
+        resolved = str(Path(path).resolve())
+        state_dir = os.environ.get("CLAUDE_EXT_STATE_DIR", "")
+        safe_prefix = state_dir.rstrip("/") + "/" if state_dir else ""
+        if not (resolved.startswith("/tmp/") or (safe_prefix and resolved.startswith(safe_prefix))):
+            return f"Error: screenshot path must be under /tmp/ or session state dir."
+        await self._page.screenshot(path=resolved)
+        return f"Screenshot saved to {resolved}"
 
     async def get_url(self) -> str:
         if not self._page:

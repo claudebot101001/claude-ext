@@ -112,7 +112,18 @@ class ExtensionImpl(Extension):
                 "command": sys.executable,
                 "args": [stealth_script],
                 "env": {
-                    "STEALTH_BROWSER_CONFIG": json.dumps(self._stealth_config),
+                    # Strip secrets before serializing to env var (/proc visible).
+                    # API keys (e.g. nopecha_api_key) must be delivered via
+                    # bridge RPC at runtime, not through env vars.
+                    "STEALTH_BROWSER_CONFIG": json.dumps(
+                        {
+                            k: v
+                            for k, v in self._stealth_config.items()
+                            if "key" not in k.lower()
+                            and "secret" not in k.lower()
+                            and "password" not in k.lower()
+                        }
+                    ),
                     "DISPLAY": os.environ.get("DISPLAY", ":99"),
                 },
             },
