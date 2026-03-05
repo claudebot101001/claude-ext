@@ -74,6 +74,7 @@ class ExtensionImpl(Extension):
         self._user_stream_levels: dict[str, str] = {}  # user_id -> "all"|"mcp"|"none"
         self._typing_tasks: dict[str, asyncio.Task] = {}  # session_id -> typing loop task
         self._prompt_message_ids: dict[str, int] = {}  # session_id -> user message_id
+        self._last_tg_message_ids: dict[str, int] = {}  # session_id -> last bot message_id
         self._reply_threading = config.get("reply_threading", True)
         self._show_prefix = config.get("show_prefix", "auto")
         self._stream_mode: str = config.get("stream_mode", "edit")  # "edit" or "multi"
@@ -276,6 +277,9 @@ class ExtensionImpl(Extension):
                 await self._stream_edit_flush(session_id)
             else:
                 await self._flush_stream_buffer(session_id)
+            buf = self._stream_buffers.get(session_id)  # re-fetch after flush
+            if buf and buf.last_sent_message_id:
+                self._last_tg_message_ids[session_id] = buf.last_sent_message_id
             prefix = self._session_prefix(session, session.user_id)
             await self._send_chunked(chat_id, f"{prefix}<b>Stopped</b>", parse_mode="HTML")
             return
@@ -325,6 +329,8 @@ class ExtensionImpl(Extension):
             elif cost is not None:
                 await self._send_cost_footer(session_id, chat_id, prefix, cost, turns)
 
+            if buf and buf.last_sent_message_id:
+                self._last_tg_message_ids[session_id] = buf.last_sent_message_id
             self._stream_buffers.pop(session_id, None)
             self._prompt_message_ids.pop(session_id, None)
             return
@@ -819,9 +825,17 @@ class ExtensionImpl(Extension):
     # -- ask_user callback handling ------------------------------------------
 
     async def _handle_callback_query(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-        """Handle InlineKeyboard button presses for ask_user questions."""
+        """Handle InlineKeyboard button presses."""
         query = update.callback_query
-        if not query or not query.data or not query.data.startswith("q:"):
+        if not query or not query.data:
+            return
+
+        # --- Jump to last message for a session ---
+        if query.data.startswith("jump:"):
+            await self._handle_jump_callback(query)
+            return
+
+        if not query.data.startswith("q:"):
             return
 
         await query.answer()
@@ -866,6 +880,34 @@ class ExtensionImpl(Extension):
         else:
             await query.edit_message_reply_markup(reply_markup=None)
             await query.message.reply_text("Question expired or already answered.")
+
+    async def _handle_jump_callback(self, query) -> None:
+        """Handle jump-to-message button press from /sessions."""
+        session_id = query.data[len("jump:") :]
+        msg_id = self._last_tg_message_ids.get(session_id)
+
+        # Also check live buffer (session still running)
+        if not msg_id:
+            buf = self._stream_buffers.get(session_id)
+            if buf and buf.last_sent_message_id:
+                msg_id = buf.last_sent_message_id
+
+        if not msg_id:
+            await query.answer("No message to jump to.", show_alert=True)
+            return
+
+        chat_id = query.message.chat_id
+        try:
+            await self.app.bot.send_message(
+                chat_id,
+                "^",
+                reply_parameters=ReplyParameters(
+                    message_id=msg_id, allow_sending_without_reply=True
+                ),
+            )
+            await query.answer()
+        except BadRequest:
+            await query.answer("Message no longer available.", show_alert=True)
 
     # -- helpers ------------------------------------------------------------
 
@@ -1039,6 +1081,7 @@ class ExtensionImpl(Extension):
             return
 
         lines = ["Sessions (* = active):"]
+        jump_buttons = []
         for s in sessions:
             marker = " *" if s.id == active_id else ""
             status_tag = s.status.value.upper()
@@ -1052,7 +1095,23 @@ class ExtensionImpl(Extension):
                 prompt_info = f"\n      {s.last_prompt[:50]}"
             lines.append(f"  #{s.slot}. {s.name} [{status_tag}]{marker}{dir_info}{prompt_info}")
 
-        await update.message.reply_text("\n".join(lines))
+            # Add jump button if we have a last message for this session
+            has_msg = s.id in self._last_tg_message_ids
+            if not has_msg:
+                buf = self._stream_buffers.get(s.id)
+                has_msg = buf is not None and buf.last_sent_message_id is not None
+            if has_msg:
+                jump_buttons.append(
+                    InlineKeyboardButton(f"#{s.slot} {s.name}", callback_data=f"jump:{s.id}")
+                )
+
+        markup = None
+        if jump_buttons:
+            # Arrange buttons in rows of 2
+            rows = [jump_buttons[i : i + 2] for i in range(0, len(jump_buttons), 2)]
+            markup = InlineKeyboardMarkup(rows)
+
+        await update.message.reply_text("\n".join(lines), reply_markup=markup)
 
     async def _cmd_switch(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
@@ -1243,6 +1302,7 @@ class ExtensionImpl(Extension):
                 buf.tool_flush_task.cancel()
         self._awaiting_text_answer.pop(session_id, None)
         self._prompt_message_ids.pop(session_id, None)
+        self._last_tg_message_ids.pop(session_id, None)
 
         await self.sm.destroy_session(session_id)
 
@@ -1504,6 +1564,7 @@ class ExtensionImpl(Extension):
         self._stream_buffers.clear()
         self._awaiting_text_answer.clear()
         self._prompt_message_ids.clear()
+        self._last_tg_message_ids.clear()
 
         self.engine.services.pop("telegram", None)
 
