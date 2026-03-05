@@ -95,6 +95,9 @@ class ExtensionImpl(Extension):
         stealth_enabled = self._stealth_config.get("enabled", True)
         if stealth_enabled:
             self._register_stealth_server()
+            # Register bridge handler for vault credential retrieval from stealth MCP
+            if hasattr(self.engine, "bridge") and self.engine.bridge:
+                self.engine.bridge.add_handler(self._bridge_handler)
 
         stealth_status = "enabled" if stealth_enabled else "disabled"
         log.info(
@@ -185,11 +188,46 @@ class ExtensionImpl(Extension):
                     "description": "Get page text or element text",
                 },
                 {
+                    "name": "upload",
+                    "description": "Upload file to input element",
+                },
+                {
+                    "name": "download",
+                    "description": "Download file via click",
+                },
+                {
+                    "name": "switch_tab",
+                    "description": "Switch to browser tab by index",
+                },
+                {
+                    "name": "switch_frame",
+                    "description": "Switch to iframe or main frame",
+                },
+                {
+                    "name": "add_auth_domain",
+                    "description": "Add domain to auth skip list",
+                },
+                {
                     "name": "close",
                     "description": "Close stealth browser",
                 },
             ],
         )
+
+    async def _bridge_handler(self, method: str, params: dict):
+        """Handle bridge RPC calls from stealth browser MCP server."""
+        if method != "stealth_vault_retrieve":
+            return None  # Not our method — let other handlers try
+        vault = self.engine.services.get("vault")
+        if not vault:
+            return {"error": "Vault not enabled"}
+        key = params.get("key", "")
+        if not key:
+            return {"error": "Missing 'key' parameter"}
+        result = vault.get(key)
+        if result is None:
+            return {"error": f"Key not found: {key}"}
+        return {"value": result}
 
     async def stop(self) -> None:
         log.info("Browser extension stopped.")

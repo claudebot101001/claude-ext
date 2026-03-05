@@ -66,12 +66,12 @@ class TestStealthRegistration:
         assert "stealth_browser" not in server_names
         assert "browser" in server_names  # scraping still registered
 
-    def test_stealth_server_has_15_tools(self, ext):
+    def test_stealth_server_has_20_tools(self, ext):
         _run(ext.start())
         calls = ext.engine.session_manager.register_mcp_server.call_args_list
         stealth_call = [c for c in calls if c[0][0] == "stealth_browser"][0]
         tools = stealth_call[1].get("tools") or stealth_call[0][2]
-        assert len(tools) == 15
+        assert len(tools) == 20
 
     def test_stealth_tool_names(self, ext):
         _run(ext.start())
@@ -94,6 +94,11 @@ class TestStealthRegistration:
             "get_url",
             "get_title",
             "get_text",
+            "upload",
+            "download",
+            "switch_tab",
+            "switch_frame",
+            "add_auth_domain",
             "close",
         }
         assert names == expected
@@ -166,11 +171,11 @@ class TestStealthMCPServerSchema:
         server._loop.call_soon_threadsafe(server._loop.stop)
         server._thread.join(timeout=2)
 
-    def test_has_15_tools(self):
+    def test_has_20_tools(self):
         from extensions.browser.stealth_server import StealthBrowserMCPServer
 
         server = StealthBrowserMCPServer()
-        assert len(server.tools) == 15
+        assert len(server.tools) == 20
         server._loop.call_soon_threadsafe(server._loop.stop)
         server._thread.join(timeout=2)
 
