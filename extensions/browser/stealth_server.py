@@ -186,6 +186,18 @@ class StealthBrowserManager:
         if proxy_server:
             proxy_config = {"server": proxy_server}
 
+        # Get stealth config for browser-level settings (timezone, locale, UA)
+        stealth_cfg = self._get_stealth_config()
+        tz_id = stealth_cfg.get("timezone", "America/New_York")
+        locale = stealth_cfg.get("locale", "en-US")
+
+        # Override UA to hide HeadlessChrome; configurable via profile/stealth config
+        _default_ua = (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
+        ua = stealth_cfg.get("user_agent", _default_ua)
+
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             headless=headless_val,
@@ -193,6 +205,9 @@ class StealthBrowserManager:
             viewport={"width": 1280, "height": 720},
             ignore_https_errors=True,
             proxy=proxy_config,
+            user_agent=ua,
+            timezone_id=tz_id,
+            locale=locale,
         )
 
         # Use existing page (persistent context always has one)
@@ -201,18 +216,19 @@ class StealthBrowserManager:
         else:
             self._page = await self._context.new_page()
 
-        # Inject fingerprint evasions via route interception
-        # (Patchright blocks addInitScript and CDP Page.addScriptToEvaluateOnNewDocument)
+        # Inject fingerprint evasions via route interception.
+        # Patchright blocks addInitScript/CDP, so we modify HTML responses to insert
+        # <script> tags. Note: Patchright's page.evaluate() runs in an isolated JS
+        # context, so evasion effects can't be verified via evaluate() — but they DO
+        # apply in the page's real main world (verified via DOM attribute probing).
         config_json = json.dumps(self._get_stealth_config()).replace("</", "<\\/")
         config_tag = f"<script>window.__STEALTH_CONFIG__={config_json};</script>"
         _evasion_tag = f"{config_tag}<script>{_EVASION_JS}</script>".encode()
 
-        _mgr_ref = self  # capture for closure (access _is_auth_url)
+        _mgr_ref = self  # capture for closure
 
         async def _inject_evasions(route):
             try:
-                # Skip if current page or request is on an auth domain —
-                # Google GAIA breaks under any route interception including continue_()
                 from urllib.parse import urlparse
 
                 page_parsed = urlparse(_mgr_ref._page.url if _mgr_ref._page else "")
@@ -227,7 +243,6 @@ class StealthBrowserManager:
                     await route.fallback()
                     return
 
-                # Only modify document/iframe HTML responses
                 if route.request.resource_type not in ("document", "iframe"):
                     await route.fallback()
                     return
@@ -242,7 +257,11 @@ class StealthBrowserManager:
                         idx = body.index(b"<head ")
                         close = body.index(b">", idx)
                         body = body[: close + 1] + _evasion_tag + body[close + 1 :]
-                    await route.fulfill(response=resp, body=body)
+                    # Strip content-length/encoding to avoid mismatch with modified body
+                    headers = dict(resp.headers)
+                    headers.pop("content-length", None)
+                    headers.pop("content-encoding", None)
+                    await route.fulfill(status=resp.status, headers=headers, body=body)
                 else:
                     await route.fulfill(response=resp)
             except Exception as exc:

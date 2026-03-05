@@ -238,8 +238,8 @@
   // --- Client Hints (navigator.userAgentData) ---
   const uaData = CFG.user_agent_data || {
     brands: [
-      { brand: "Chromium", version: "120" },
-      { brand: "Google Chrome", version: "120" },
+      { brand: "Chromium", version: "131" },
+      { brand: "Google Chrome", version: "131" },
       { brand: "Not_A Brand", version: "8" },
     ],
     mobile: false,
@@ -263,7 +263,7 @@
             model: "",
             uaFullVersion:
               (uaData.brands && uaData.brands[0] && uaData.brands[0].version) ||
-              "120.0.0.0",
+              "131.0.0.0",
           });
         },
         toJSON: function () {
