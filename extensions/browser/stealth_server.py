@@ -87,9 +87,9 @@ class StealthBrowserManager:
         user_data_dir = f"/tmp/patchright-{session_id}"
 
         # headless=False needed for extension loading; Xvfb provides virtual display
-        # If no extensions, can use headless="new" (Chromium new headless)
+        # If no extensions, headless=True is fine (Patchright expects boolean)
         use_headless = nopecha_path is None
-        headless_val = "new" if use_headless else False
+        headless_val = use_headless
 
         self._context = await self._pw.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
