@@ -68,6 +68,7 @@ enabled:
   # - cron                         # Uncomment to enable scheduled tasks
   # - subagent                     # Multi-agent orchestration (PM spawns workers)
   # - session_ask                  # Cross-session RPC (session-to-session Q&A)
+  # - crypto                       # On-chain wallet management (requires vault)
   # - context                      # Context window monitoring and compaction control
   # - browser                      # Web browser automation (agent-browser CLI)
 
@@ -146,6 +147,37 @@ extensions:
   session_ask:
     timeout: 300                   # Seconds to wait for target session's reply
     max_question_length: 2000      # Max characters for question text
+
+  crypto:
+    # On-chain wallet management, contract interaction, x402 payments.
+    # Requires vault extension enabled and loaded before crypto.
+    # Prerequisites: pip install "eth-account>=0.13,<0.15" "eth-abi>=5.0,<6.0" "httpx>=0.27,<1.0"
+    chains:
+      base:
+        rpc_url: "https://mainnet.base.org"
+        chain_id: 8453
+        explorer_url: "https://basescan.org"
+        native_symbol: "ETH"
+        usdc_address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      ethereum:
+        rpc_url: "https://eth.llamarpc.com"
+        chain_id: 1
+        explorer_url: "https://etherscan.io"
+        native_symbol: "ETH"
+        usdc_address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      # sepolia:
+      #   rpc_url: "https://rpc.sepolia.org"
+      #   chain_id: 11155111
+      #   explorer_url: "https://sepolia.etherscan.io"
+      #   native_symbol: "ETH"
+      #   testnet: true
+    x402:
+      default_network: "base"
+      facilitator_url: null            # null = Coinbase CDP default
+    tx:
+      gas_multiplier: 1.2             # Safety margin on gas estimates
+      receipt_timeout: 120             # Seconds to wait for tx receipt
+    default_chain: "ethereum"
 
   context:
     auto_compact:

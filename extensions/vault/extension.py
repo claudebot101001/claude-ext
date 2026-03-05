@@ -80,6 +80,7 @@ class ExtensionImpl(Extension):
 
         # Register as shared service for other extensions
         self.engine.services["vault"] = self._vault
+        self.engine.services["vault_ext"] = self
 
         # Register MCP server for Claude session access
         mcp_script = str(Path(__file__).with_name("mcp_server.py"))
@@ -121,6 +122,7 @@ class ExtensionImpl(Extension):
 
     async def stop(self) -> None:
         self.engine.services.pop("vault", None)
+        self.engine.services.pop("vault_ext", None)
         log.info("Vault extension stopped.")
 
     async def health_check(self) -> dict:
@@ -143,6 +145,12 @@ class ExtensionImpl(Extension):
                 "(a-z, 0-9, ._- in each segment)."
             )
         return None
+
+    def register_internal_prefix(self, prefix: str) -> None:
+        """Register a key prefix as internal-only (blocked from MCP retrieve)."""
+        if prefix not in self._internal_prefixes:
+            self._internal_prefixes.append(prefix)
+            log.info("Vault: registered internal prefix '%s'", prefix)
 
     def _is_internal_key(self, key: str) -> bool:
         """Check if a key is restricted to internal-only access."""
