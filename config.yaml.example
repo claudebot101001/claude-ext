@@ -68,6 +68,7 @@ enabled:
   # - cron                         # Uncomment to enable scheduled tasks
   # - subagent                     # Multi-agent orchestration (PM spawns workers)
   # - session_ask                  # Cross-session RPC (session-to-session Q&A)
+  # - context                      # Context window monitoring and compaction control
   # - browser                      # Web browser automation (agent-browser CLI)
 
 # Per-extension configuration
@@ -145,6 +146,12 @@ extensions:
   session_ask:
     timeout: 300                   # Seconds to wait for target session's reply
     max_question_length: 2000      # Max characters for question text
+
+  context:
+    auto_compact:
+      enabled: false               # Off by default — costs API tokens when triggered
+      threshold_pct: 85            # Trigger compaction when context fill exceeds this %
+      cooldown_prompts: 3          # Skip N prompts after compaction before re-checking
 
   browser:
     # Web automation + scraping extension

@@ -182,6 +182,12 @@ class ExtensionImpl(Extension):
         if not chat_id:
             return
 
+        # --- Suppressed delivery (e.g. auto-compact) ---
+        if session.context.get("_suppress_delivery"):
+            if metadata.get("is_final"):
+                session.context.pop("_suppress_delivery", None)
+            return
+
         # --- Question from Claude (ask_user) ---
         if metadata.get("is_question"):
             request_id = metadata["request_id"]
