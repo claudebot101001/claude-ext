@@ -1354,6 +1354,72 @@ class ExtensionImpl(Extension):
         }
         await update.message.reply_text(f"Stream verbosity: {level} ({labels[level]})")
 
+    # -- context commands ---------------------------------------------------
+
+    async def _cmd_context(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        active_id = ctx.user_data.get("active_session_id")
+        if not active_id or active_id not in self.sm.sessions:
+            await update.message.reply_text("No active session.")
+            return
+
+        context_svc = self.engine.services.get("context")
+        if not context_svc:
+            await update.message.reply_text("Context extension not enabled.")
+            return
+
+        data = context_svc.tracker.to_dict(active_id)
+        if "error" in data:
+            await update.message.reply_text(data["error"])
+            return
+
+        session = self.sm.sessions[active_id]
+        fill_pct = data["estimated_fill_pct"]
+        bar_len = 20
+        filled = round(fill_pct / 100 * bar_len)
+        bar = "█" * filled + "░" * (bar_len - filled)
+
+        lines = [
+            f"<b>Context: {session.name}</b> (slot {session.slot})",
+            f"",
+            f"<code>[{bar}] {fill_pct:.1f}%</code>",
+            f"",
+            f"Tokens: {data['last_context_fill']:,} / {data['context_window']:,}",
+            f"Prompts: {data['prompt_count']}",
+            f"Compactions: {data['compaction_count']}",
+            f"Cost: ${data['total_cost_usd']:.4f}",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+    async def _cmd_compact(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        if not self._authorized(update):
+            return
+        active_id = ctx.user_data.get("active_session_id")
+        if not active_id or active_id not in self.sm.sessions:
+            await update.message.reply_text("No active session.")
+            return
+
+        context_svc = self.engine.services.get("context")
+        if not context_svc:
+            await update.message.reply_text("Context extension not enabled.")
+            return
+
+        session = self.sm.sessions[active_id]
+        if session.status == SessionStatus.BUSY:
+            await update.message.reply_text("Session is busy. Wait for it to finish first.")
+            return
+
+        result = await context_svc._trigger_compact(active_id)
+        if result.get("error"):
+            await update.message.reply_text(f"Compact failed: {result['error']}")
+            return
+
+        await update.message.reply_text(
+            f"Compaction queued (#{result['compaction_count']}) for <b>{session.name}</b>.",
+            parse_mode="HTML",
+        )
+
     # -- message handler ----------------------------------------------------
 
     async def _handle_message(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1522,6 +1588,8 @@ class ExtensionImpl(Extension):
         self.app.add_handler(CommandHandler("stop", self._cmd_stop))
         self.app.add_handler(CommandHandler("delete", self._cmd_delete))
         self.app.add_handler(CommandHandler("verbose", self._cmd_verbose))
+        self.app.add_handler(CommandHandler("context", self._cmd_context))
+        self.app.add_handler(CommandHandler("compact", self._cmd_compact))
         self.app.add_handler(CallbackQueryHandler(self._handle_callback_query))
         self.app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
         self.app.add_handler(
@@ -1548,6 +1616,8 @@ class ExtensionImpl(Extension):
                 BotCommand("stop", "Stop running task + clear queue"),
                 BotCommand("delete", "Delete a session"),
                 BotCommand("verbose", "Tool verbosity: all/mcp/none"),
+                BotCommand("context", "Context window usage"),
+                BotCommand("compact", "Trigger context compaction"),
             ]
         )
         await self.app.start()
