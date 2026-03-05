@@ -31,6 +31,8 @@ class ExtensionImpl(Extension):
 
         # Per-session overrides: session_id -> {auto_compact, threshold_pct}
         self._session_config: dict[str, dict] = {}
+        # Guard fire-and-forget tasks from GC
+        self._background_tasks: set[asyncio.Task] = set()
 
     @property
     def sm(self):
@@ -160,7 +162,7 @@ class ExtensionImpl(Extension):
         # Cooldown check: need N user prompts since last compact
         if tokens.last_compact_at_prompt >= 0:
             prompts_since = tokens.prompt_count - tokens.last_compact_at_prompt
-            if prompts_since <= self._auto_compact_cooldown:
+            if prompts_since < self._auto_compact_cooldown:
                 return
 
         log.info(
@@ -169,7 +171,7 @@ class ExtensionImpl(Extension):
             fill,
             threshold,
         )
-        asyncio.create_task(self._auto_compact(session_id))
+        self._spawn_task(self._auto_compact(session_id))
 
     async def _auto_compact(self, session_id: str) -> None:
         """Queue a /compact command for the session."""
@@ -211,9 +213,15 @@ class ExtensionImpl(Extension):
     # -- cleanup ------------------------------------------------------------
 
     def _schedule_cleanup(self, session_id: str, delay: float = 10.0) -> None:
-        asyncio.create_task(self._delayed_cleanup(session_id, delay))
+        self._spawn_task(self._delayed_cleanup(session_id, delay))
 
     async def _delayed_cleanup(self, session_id: str, delay: float) -> None:
         await asyncio.sleep(delay)
         self.tracker.remove(session_id)
         self._session_config.pop(session_id, None)
+
+    def _spawn_task(self, coro) -> None:
+        """Create a background task with GC protection."""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)

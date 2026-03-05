@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Context management MCP server — token tracking and compaction control.
 
-Spawned by Claude Code per session. Uses gateway mode (single tool, multiple actions).
+Spawned by Claude Code per session. Supports gateway mode when enabled via environment.
 """
 
 import json
