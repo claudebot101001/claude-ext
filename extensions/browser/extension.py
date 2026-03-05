@@ -16,6 +16,7 @@ automation with optional NopeCHA CAPTCHA solving.
 import asyncio
 import json
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -112,6 +113,7 @@ class ExtensionImpl(Extension):
                 "args": [stealth_script],
                 "env": {
                     "STEALTH_BROWSER_CONFIG": json.dumps(self._stealth_config),
+                    "DISPLAY": os.environ.get("DISPLAY", ":99"),
                 },
             },
             tools=[

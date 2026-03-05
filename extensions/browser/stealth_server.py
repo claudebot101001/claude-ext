@@ -25,6 +25,19 @@ import sys
 import threading
 from pathlib import Path
 
+# Ensure DISPLAY is set for headless Linux (Xvfb must be running externally or will be started)
+if not os.environ.get("DISPLAY"):
+    # Check if Xvfb :99 is already running
+    _lock = "/tmp/.X99-lock"
+    if os.path.exists(_lock):
+        try:
+            with open(_lock) as _f:
+                _pid = int(_f.read().strip())
+            os.kill(_pid, 0)
+            os.environ["DISPLAY"] = ":99"
+        except (ValueError, OSError, ProcessLookupError):
+            pass
+
 _project_root = str(Path(__file__).resolve().parent.parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
@@ -33,6 +46,9 @@ from core.mcp_base import MCPServerBase  # noqa: E402
 
 # JS for element enumeration (snapshot)
 _SNAPSHOT_JS = (Path(__file__).with_name("stealth_snapshot.js")).read_text(encoding="utf-8")
+
+# JS for fingerprint evasion (WebGL, WebRTC, hardware)
+_EVASION_JS = (Path(__file__).with_name("stealth_evasions.js")).read_text(encoding="utf-8")
 
 # Idle timeout before auto-closing browser (seconds)
 _DEFAULT_IDLE_TIMEOUT = 300
@@ -105,11 +121,70 @@ class StealthBrowserManager:
             ignore_https_errors=True,
         )
 
-        # Use existing or create new page
+        # Use existing page (persistent context always has one)
         if self._context.pages:
             self._page = self._context.pages[0]
         else:
             self._page = await self._context.new_page()
+
+        # Inject fingerprint evasions via route interception
+        # (Patchright blocks addInitScript and CDP Page.addScriptToEvaluateOnNewDocument)
+        _evasion_tag = f"<script>{_EVASION_JS}</script>".encode()
+
+        # Domains where route interception must be skipped entirely.
+        # Google GAIA sign-in uses XHR calls that break under ANY route
+        # interception (even route.continue_()). Skip the whole domain.
+        _skip_domains = {
+            "accounts.google.com",
+            "accounts.youtube.com",
+            "github.com",
+            "api.github.com",
+            "appleid.apple.com",
+        }
+
+        _page_ref = self._page  # capture for closure
+
+        async def _inject_evasions(route):
+            try:
+                # Skip if current page is on an auth domain — Google GAIA
+                # breaks under any route interception including continue_()
+                from urllib.parse import urlparse
+
+                page_host = urlparse(_page_ref.url).hostname or ""
+                if any(page_host == d or page_host.endswith("." + d) for d in _skip_domains):
+                    await route.fallback()
+                    return
+
+                req_host = urlparse(route.request.url).hostname or ""
+                if any(req_host == d or req_host.endswith("." + d) for d in _skip_domains):
+                    await route.fallback()
+                    return
+
+                # Only modify document/iframe HTML responses
+                if route.request.resource_type not in ("document", "iframe"):
+                    await route.fallback()
+                    return
+
+                resp = await route.fetch()
+                ct = resp.headers.get("content-type", "")
+                if "text/html" in ct:
+                    body = await resp.body()
+                    if b"<head>" in body:
+                        body = body.replace(b"<head>", b"<head>" + _evasion_tag, 1)
+                    elif b"<head " in body:
+                        idx = body.index(b"<head ")
+                        close = body.index(b">", idx)
+                        body = body[: close + 1] + _evasion_tag + body[close + 1 :]
+                    await route.fulfill(response=resp, body=body)
+                else:
+                    await route.fulfill(response=resp)
+            except Exception:
+                try:
+                    await route.fallback()
+                except Exception:
+                    pass
+
+        await self._page.route("**/*", _inject_evasions)
 
         if url:
             await self._page.goto(url, wait_until="domcontentloaded")
@@ -119,11 +194,29 @@ class StealthBrowserManager:
     def _ensure_xvfb(self) -> None:
         """Start Xvfb virtual display if not already running."""
         import shutil
+        import time
 
         if not shutil.which("Xvfb"):
             raise RuntimeError("Xvfb not installed. Run: sudo apt install xvfb")
-        # Pick a display number unlikely to collide
+
+        # Try to reuse an existing Xvfb on :99 first
         display = ":99"
+        lock_file = f"/tmp/.X{display[1:]}-lock"
+        if os.path.exists(lock_file):
+            # Verify the Xvfb process is still alive
+            try:
+                with open(lock_file) as f:
+                    pid = int(f.read().strip())
+                os.kill(pid, 0)  # Check if alive
+                os.environ["DISPLAY"] = display
+                return  # Reuse existing Xvfb
+            except (ValueError, OSError, ProcessLookupError):
+                # Stale lock file, clean up and start fresh
+                try:
+                    os.unlink(lock_file)
+                except OSError:
+                    pass
+
         try:
             self._xvfb_proc = subprocess.Popen(
                 ["Xvfb", display, "-screen", "0", "1280x720x24", "-nolisten", "tcp"],
@@ -131,6 +224,12 @@ class StealthBrowserManager:
                 stderr=subprocess.DEVNULL,
             )
             os.environ["DISPLAY"] = display
+            # Wait for Xvfb to be ready
+            time.sleep(0.5)
+            if self._xvfb_proc.poll() is not None:
+                raise RuntimeError(f"Xvfb exited with code {self._xvfb_proc.returncode}")
+        except RuntimeError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to start Xvfb: {e}")
 
@@ -319,6 +418,7 @@ class StealthBrowserManager:
         if self._xvfb_proc:
             self._xvfb_proc.terminate()
             self._xvfb_proc = None
+            os.environ.pop("DISPLAY", None)
 
 
 class StealthBrowserMCPServer(MCPServerBase):
