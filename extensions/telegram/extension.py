@@ -79,6 +79,7 @@ class ExtensionImpl(Extension):
         self._reply_threading = config.get("reply_threading", True)
         self._show_prefix = config.get("show_prefix", "auto")
         self._stream_mode: str = config.get("stream_mode", "edit")  # "edit" or "multi"
+        self._templates: dict[str, dict] = config.get("templates", {})
 
     def _authorized(self, update: Update) -> bool:
         if not self.allowed_users:
@@ -1028,7 +1029,7 @@ class ExtensionImpl(Extension):
         await update.message.reply_text(
             "Claude Code bridge ready.\n\n"
             "Commands:\n"
-            f"/new [name] [dir] - Create new session (max {max_s})\n"
+            f"/new [@template] [name] [dir] - Create session (max {max_s})\n"
             "/sessions - List all sessions\n"
             "/switch <slot|name> - Switch session\n"
             "/status - Auth, usage & session info\n"
@@ -1038,19 +1039,53 @@ class ExtensionImpl(Extension):
             "Send any message to start working."
         )
 
+    def _resolve_template(self, arg: str) -> dict | None:
+        """Lookup a session template by @name. Returns config dict or None."""
+        if arg.startswith("@"):
+            tpl_name = arg[1:]
+            return self._templates.get(tpl_name)
+        return None
+
     async def _cmd_new(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
         user_id = str(update.effective_user.id)
         chat_id = update.effective_chat.id
 
-        # Parse: /new [name] [working_dir]  or  /new <dir>
+        # Parse: /new [@template] [name] [working_dir]
+        # or:    /new [name] [working_dir]
+        # or:    /new <dir>
         parts = update.message.text.split(maxsplit=2)
         name = None
         work_dir = self.working_dir
+        extra_context: dict = {}
+        tpl_label = None
 
+        # Check for @template as first arg
+        if len(parts) >= 2 and parts[1].startswith("@"):
+            tpl = self._resolve_template(parts[1].strip())
+            if tpl is None:
+                available = ", ".join(f"@{k}" for k in self._templates) or "(none)"
+                await update.message.reply_text(
+                    f"Unknown template: {parts[1]}\nAvailable: {available}"
+                )
+                return
+            tpl_label = parts[1].strip()
+            # Apply template defaults
+            if tpl.get("working_dir"):
+                candidate = self._resolve_dir(tpl["working_dir"])
+                if os.path.isdir(candidate):
+                    work_dir = candidate
+                else:
+                    await update.message.reply_text(f"Template dir not found: {tpl['working_dir']}")
+                    return
+            extra_context = dict(tpl.get("context", {}))
+            # Re-split the remainder after consuming the @template token
+            rest = parts[2] if len(parts) > 2 else ""
+            parts = [parts[0]] + rest.split(maxsplit=1) if rest else [parts[0]]
+
+        # Standard parsing of remaining args: [name] [working_dir] or <dir>
         if len(parts) == 2 and os.path.isdir(self._resolve_dir(parts[1].strip())):
-            # Single arg is an existing directory — treat as dir, auto-name
             work_dir = self._resolve_dir(parts[1].strip())
         elif len(parts) >= 2:
             name = parts[1].strip()
@@ -1078,12 +1113,15 @@ class ExtensionImpl(Extension):
             await update.message.reply_text(f"Name '{name}' already in use.")
             return
 
+        # Build context: template context + chat_id (always wins)
+        session_context = {**extra_context, "chat_id": chat_id}
+
         try:
             session = await self.sm.create_session(
                 name=name,
                 user_id=user_id,
                 working_dir=work_dir,
-                context={"chat_id": chat_id},
+                context=session_context,
             )
         except RuntimeError as e:
             await update.message.reply_text(str(e))
@@ -1091,8 +1129,9 @@ class ExtensionImpl(Extension):
 
         self._set_active(ctx, user_id, session.id)
         dir_note = f"\nDir: {work_dir}" if work_dir != self.working_dir else ""
+        tpl_note = f"\nTemplate: {tpl_label}" if tpl_label else ""
         await update.message.reply_text(
-            f"Created #{session.slot} '{session.name}'. Now active.{dir_note}"
+            f"Created #{session.slot} '{session.name}'. Now active.{dir_note}{tpl_note}"
         )
 
     async def _cmd_sessions(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1629,7 +1668,7 @@ class ExtensionImpl(Extension):
         await self.app.bot.set_my_commands(
             [
                 BotCommand("start", "Show welcome message"),
-                BotCommand("new", "Create new session [name] [dir]"),
+                BotCommand("new", "Create session [@template] [name] [dir]"),
                 BotCommand("sessions", "List all sessions"),
                 BotCommand("switch", "Switch active session"),
                 BotCommand("status", "Auth, usage & session info"),

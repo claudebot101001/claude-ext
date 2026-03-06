@@ -82,6 +82,16 @@ extensions:
     # Default working directory for Claude Code. null = current directory.
     # Can be overridden per-session with /new <name> <dir>
     working_dir: null
+    # Session templates: /new @template_name [session_name]
+    # Each template sets working_dir and/or context fields for the session.
+    templates:
+      dev:
+        working_dir: ~/claude-ext
+        context: {}                  # No special flags
+      audit:
+        working_dir: "~"
+        context:
+          magma: true                # Enable MAGMA knowledge injection
 
   ask_user:
     timeout: 300                   # Seconds to wait for user response before timing out
