@@ -182,6 +182,12 @@ class MCPServerBase:
             if self._is_gateway_active() and tool_name == self.name:
                 action = arguments.get("action", "")
                 action_params = arguments.get("params", {})
+                # Claude sometimes serializes params as a JSON string
+                if isinstance(action_params, str):
+                    try:
+                        action_params = json.loads(action_params)
+                    except (json.JSONDecodeError, TypeError):
+                        action_params = {}
 
                 if action == "help":
                     return {
