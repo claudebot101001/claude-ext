@@ -8,7 +8,7 @@ English | [中文](README.zh-CN.md)
 
 Server-side framework that turns [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) into a programmable, always-on, multi-session agent platform. It wraps the official `claude` binary and manages independent extensions — nothing more.
 
-> **21k LoC** | **9 extensions** | **654 tests** | **Pure Python, zero framework dependencies**
+> **27k LoC** | **11 extensions** | **782 tests** | **Pure Python, zero framework dependencies**
 
 ## Why claude-ext
 
@@ -32,7 +32,7 @@ Most Claude Code extension projects focus on a single concern — session manage
 | **Delivery callbacks** | Real-time streaming with structured metadata (cost, status, tool use) |
 | **Pending store** | Generic async request/response registry for cross-process coordination |
 
-These core primitives power 9 independent extensions that can be enabled/disabled via config.
+These core primitives power 11 independent extensions that can be enabled/disabled via config.
 
 ### How it stays compliant
 
@@ -81,7 +81,9 @@ User / Frontend (Telegram, CLI, ...)
 | **ask_user** | 1 | Interactive questions from Claude to user, with optional choice buttons |
 | **subagent** | 10 | Multi-agent orchestration. PM spawns worker sessions with paradigms + git worktree isolation |
 | **session_ask** | 3 | Cross-session RPC. Sessions ask questions to each other and wait for replies |
-| **browser** | 3 | Web automation (agent-browser CLI) + anti-bot scraping (Scrapling MCP gateway) |
+| **context** | 3 | Context window monitoring + auto-compaction. Per-session token tracking via delivery callbacks |
+| **browser** | 3+25 | Web automation (agent-browser CLI) + anti-bot scraping (Scrapling) + stealth browsing (Patchright anti-detect + CAPTCHA solver) |
+| **crypto** | 11 | On-chain wallet management. Multi-chain EVM, token transfers, contract deploy/call, EIP-191 signing, x402 payment protocol |
 | **telegram** | 0 | Telegram bot frontend. Multi-session, streaming output, inline commands |
 
 All extensions are fully independent — delete the directory + remove from `enabled` = zero impact.
@@ -94,7 +96,7 @@ These are the two major open-source "Claw" frameworks. claude-ext takes a fundam
 
 | | claude-ext | [OpenClaw](https://github.com/openclaw/openclaw) (257k stars) | [NanoClaw](https://github.com/qwibitai/nanoclaw) (18k stars) |
 |---|---|---|---|
-| **Codebase** | ~21k LoC (Python) | ~800k LoC (TypeScript) | ~3.9k LoC (TypeScript) |
+| **Codebase** | ~27k LoC (Python) | ~800k LoC (TypeScript) | ~3.9k LoC (TypeScript) |
 | **Architecture** | Plugin-based core + extensions | Monolithic Gateway | Minimal host + containers |
 | **CLI wrapping** | `claude -p` via tmux | SDK-native (no CLI) | Claude Agent SDK in containers |
 | **IPC** | Unix socket bridge RPC (0.06ms) | WebSocket RPC | Filesystem polling (1s interval) |

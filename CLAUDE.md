@@ -28,6 +28,7 @@ claude-ext/
 │   ├── session_ask/         # Cross-session RPC (bridge + PendingStore)
 │   ├── context/             # Context window monitoring + compaction control
 │   ├── browser/             # Web automation (agent-browser CLI) + scraping (Scrapling) + stealth (Patchright)
+│   ├── crypto/              # On-chain wallet management (multi-chain EVM + vault + x402)
 │   └── telegram/            # Telegram bot bridge (multi-session + streaming)
 ├── config.yaml              # Runtime config (.gitignored)
 ├── config.yaml.example      # Config template
@@ -144,7 +145,8 @@ Subclass `MCPServerBase`, set `name`, `tools`, `handlers`. Gets session context 
 | **session_ask** | `session_ask`, `session_reply`, `session_list` | Bridge RPC → PendingStore + SessionManager |
 | **context** | `context_status`, `context_compact`, `context_configure` (gateway) | Bridge RPC + delivery callback (token tracking) |
 | **browser** | `scrape`, `scrape_stealth`, `scrape_extract` (gateway) | System prompt (agent-browser CLI) + MCP (Scrapling scraping) |
-| **stealth_browser** | `open`, `goto`, `snapshot`, `click`, `fill`, `select`, `type`, `press`, `wait`, `evaluate`, `screenshot`, `get_url`, `get_title`, `get_text`, `close` (gateway) | MCP (Patchright anti-detect + NopeCHA CAPTCHA) |
+| **stealth_browser** | `open`, `goto`, `snapshot`, `click`, `fill`, ... (25 tools, gateway) | MCP (Patchright anti-detect + NopeCHA CAPTCHA) |
+| **crypto** | `wallet_create`, `wallet_list`, `balance`, `send`, `send_token`, `contract_deploy`, `contract_call`, `contract_read`, `sign_message`, `x402_pay`, `x402_configure` (gateway) | Bridge RPC (signing in main process) + vault (private key storage) |
 | **telegram** | (none — frontend only) | Delivery callbacks |
 
 ## Memory Extension: Three-Layer Identity System
@@ -241,16 +243,27 @@ sessions:
 enabled:
   - vault       # Encrypted credential store
   - memory      # Cross-session memory
+  - context     # Context window monitoring
+  - browser     # Web automation + scraping + stealth
   - telegram    # Telegram bot frontend
-  # - heartbeat    # Autonomous periodic agent
-  # - ask_user     # Interactive questions
-  # - cron         # Scheduled tasks
-  # - subagent     # Multi-agent orchestration
-  # - session_ask  # Cross-session RPC
+  # - crypto      # On-chain wallet management
+  # - heartbeat   # Autonomous periodic agent
+  # - ask_user    # Interactive questions
+  # - cron        # Scheduled tasks
+  # - subagent    # Multi-agent orchestration
+  # - session_ask # Cross-session RPC
 
 extensions:
   vault: {}           # Zero-config (passphrase auto-generated)
   memory: {}          # Three-layer identity (requires vault before memory for personality encryption)
+  context:
+    auto_compact:
+      enabled: false
+      threshold_pct: 85
+  crypto:
+    default_chain: base
+    chains:
+      base: { rpc_url: "https://mainnet.base.org", chain_id: 8453 }
   telegram:
     token: "BOT_TOKEN"
     allowed_users: [123456789]

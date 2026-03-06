@@ -47,9 +47,21 @@ claude-ext/
 │   │   ├── mcp_server.py          # MCP stdio server (10 subagent tools)
 │   │   ├── store.py               # SubAgentStore: agent records + flock + prefix ID matching
 │   │   └── worktree.py            # Git worktree utilities (create/diff/merge/cleanup)
-│   └── session_ask/
-│       ├── extension.py           # Cross-session RPC (bridge + PendingStore)
-│       └── mcp_server.py          # MCP stdio server (3 session tools)
+│   ├── session_ask/
+│   │   ├── extension.py           # Cross-session RPC (bridge + PendingStore)
+│   │   └── mcp_server.py          # MCP stdio server (3 session tools)
+│   ├── context/
+│   │   ├── extension.py           # Context window monitoring + auto-compaction (delivery callback)
+│   │   ├── mcp_server.py          # MCP stdio server (3 context tools, gateway mode)
+│   │   └── tracker.py             # Per-session token usage tracking (fill %, compaction history)
+│   └── crypto/
+│       ├── extension.py           # On-chain wallet management (bridge RPC + vault integration)
+│       ├── mcp_server.py          # MCP stdio server (11 tools, gateway mode)
+│       ├── chains/                # Chain adapter layer (pluggable per-chain logic)
+│       │   ├── base.py            # Abstract chain adapter interface
+│       │   └── evm.py             # EVM adapter (web3.py, tx building, signing, receipt)
+│       ├── portfolio.py           # Wallet portfolio store (JSON + flock)
+│       └── x402_handler.py        # HTTP x402 payment protocol handler
 ├── config.yaml                    # Global config (engine params + extension toggles + extension config) (.gitignore)
 ├── config.yaml.example            # Config template (tracked)
 ├── main.py                        # Entry point (load config → build engine → init sessions → register extensions → run)
@@ -923,12 +935,13 @@ Session A → MCP tool(session_ask) → bridge.call("session_ask") → BridgeSer
 
 ### Existing Extension: browser
 
-Web automation + anti-bot scraping. Hybrid architecture: CLI system prompt (agent-browser) + MCP gateway (Scrapling).
+Web automation + anti-bot scraping + stealth browsing. Hybrid architecture: CLI system prompt (agent-browser) + MCP gateways (Scrapling + Patchright).
 
-**Two integration tiers**:
+**Three integration tiers**:
 
 1. **agent-browser** (CLI via Bash) — Interactive browser automation. System prompt (~130 tokens) teaches ref-based workflow (`@e1`, `@e2` element references). 30+ AI-optimized commands (open, snapshot, click, fill, select, type, press, wait, screenshot, pdf).
 2. **Scrapling** (MCP gateway) — Data scraping with anti-bot bypass. 3 tools consolidated to 1 gateway tool via `MCPServerBase` gateway mode.
+3. **Patchright stealth** (MCP gateway) — Anti-detect interactive browsing. 25 tools consolidated to 1 gateway tool. Uses Patchright (undetected Playwright fork) with optional NopeCHA CAPTCHA solver. Persistent browser profiles, multi-tab, iframe switching, email checking.
 
 **Data flow**:
 ```
@@ -938,22 +951,100 @@ Interactive browsing:  Agent → Bash(agent-browser open <url>) → agent-browse
 
 Data scraping:         Agent → MCP tool(browser) → gateway dispatch → scrape/scrape_stealth/scrape_extract
                        → Scrapling Fetcher/StealthyFetcher → HTTP with TLS impersonation → response
+
+Stealth browsing:      Agent → MCP tool(stealth_browser) → gateway dispatch → open/snapshot/click/fill/...
+                       → Patchright (async event loop in background thread) → anti-detect Chromium
 ```
 
-**MCP Tools** (3, gateway-consolidated to 1):
+**Scrapling MCP Tools** (3, gateway-consolidated to 1):
 - `scrape(url, selector?, format?, impersonate?)` — HTTP fetch with TLS fingerprint impersonation (fast, no browser)
 - `scrape_stealth(url, selector?, format?, solve_cloudflare?, wait?)` — Stealth browser with anti-bot bypass (Cloudflare, DataDome)
 - `scrape_extract(url, selectors)` — Extract structured data via named CSS selectors
 
+**Stealth Browser MCP Tools** (25, gateway-consolidated to 1):
+- Core navigation: `open`, `goto`, `snapshot`, `click`, `fill`, `select`, `type`, `press`, `wait`
+- Data extraction: `get_url`, `get_title`, `get_text`, `screenshot`, `evaluate`
+- File operations: `upload`, `download`
+- Context management: `switch_tab`, `switch_frame`, `add_auth_domain`
+- Browser profiles: `create_profile`, `list_profiles`, `delete_profile`
+- Email: `check_email`, `read_email`
+- Lifecycle: `close`
+
 **Design**:
 - System prompt registered with `mcp_server="browser"` tag, enabling per-session exclusion via session customizers
-- Zero bridge RPC — all Scrapling operations are self-contained in the MCP server process
-- Health check probes both binary availability and daemon status
+- Zero bridge RPC for Scrapling — all operations are self-contained in the MCP server process
+- Stealth browser uses async Patchright in a background thread; sync MCP handlers dispatch via `run_coroutine_threadsafe`
+- Sensitive config (API keys, proxy) stripped from env vars; delivered via bridge RPC at runtime
+- Health check probes binary availability, daemon status, and stealth browser state
 - Configurable binary name via `config.browser.binary` (default: `agent-browser`)
 
 **Gateway Mode** (established pattern):
 
 `MCPServerBase` supports gateway mode (`CLAUDE_EXT_GATEWAY_MODE=1`): servers with >1 tool consolidate into a single gateway tool. The agent calls `tool(action="scrape", params={...})` instead of three separate tools. Token savings: Scrapling's native MCP server has 6 tools with 19-25 params each (~5,640 tokens); gateway mode reduces to ~120 tokens (98% reduction). Gateway dispatch adds an `action='help'` command that returns available actions and their parameters.
+
+---
+
+### Existing Extension: context
+
+Context window monitoring + auto-compaction. Tracks per-session token usage via delivery callbacks.
+
+**Data flow**:
+```
+Delivery callback → ContextTracker.update_from_stream_usage() / update_from_result()
+                  → fill% check → auto-compact trigger → send_prompt("/compact")
+
+MCP tools → bridge RPC → extension handler → tracker/compact
+```
+
+**MCP Tools** (3, gateway-consolidated to 1):
+- `context_status` — Current token usage, fill percentage, compaction history
+- `context_compact` — Manually trigger compaction (queues `/compact` command)
+- `context_configure` — Per-session auto-compact settings (enable/disable, threshold)
+
+**Design**:
+- `ContextTracker` maintains per-session token stats (input/output tokens, fill %, prompt count, compaction count)
+- Auto-compact: configurable threshold (default 85%), cooldown (N prompts since last compact), skips automated sessions (subagent, heartbeat)
+- Compact is non-disruptive: marks `_suppress_delivery` and `_context_compacting` on session context to avoid output noise and re-triggering
+- Registered as `engine.services["context"]` for cross-extension access
+- Cleanup: tracker entries removed 10s after session termination
+
+---
+
+### Existing Extension: crypto
+
+On-chain wallet management for autonomous agents. Multi-chain EVM support with vault-backed key storage.
+
+**Security model**:
+- Private keys generated in main process, stored in vault (`crypto/<chain>/<address>/privkey`), wiped from memory after use
+- All signing operations happen server-side via bridge RPC — MCP process never sees private keys
+- `crypto/` vault prefix registered as internal (blocks LLM direct access via vault MCP tools)
+- Log redaction filter strips 64-char hex strings from all crypto-related log output
+- Error sanitization: private key patterns redacted from exception messages before returning to MCP
+
+**Data flow**:
+```
+Signing operations:    Agent → MCP tool(crypto) → gateway dispatch → bridge RPC (crypto_send, crypto_sign_message, ...)
+                       → extension handler → vault.get(privkey) → EVMAdapter.sign → vault key wiped → tx_hash
+
+Read-only operations:  Agent → MCP tool(crypto) → gateway dispatch → contract_read
+                       → bridge RPC (get_chain_config) → EVMAdapter.read_contract (direct, no signing)
+
+x402 payments:         Agent → MCP tool(crypto) → gateway dispatch → x402_pay
+                       → X402Handler → HTTP request → 402 response → sign payment → retry with payment header
+```
+
+**MCP Tools** (11, gateway-consolidated to 1):
+- Wallet: `wallet_create`, `wallet_list`, `balance`
+- Transactions: `send` (native), `send_token` (ERC-20)
+- Contracts: `contract_deploy`, `contract_call`, `contract_read`
+- Signing: `sign_message` (EIP-191 personal messages, SIWE/dApp auth)
+- Payments: `x402_pay` (HTTP 402 auto-payment), `x402_configure`
+
+**Design**:
+- Chain adapters: pluggable per-chain logic via `chains/` directory. Currently EVM only (`EVMAdapter` with web3.py)
+- Portfolio store: JSON-backed wallet metadata (address, chain, label, created_at) with flock
+- x402 handler: automatic HTTP 402 payment protocol — detects payment-required responses, signs EIP-3009 authorization, retries with payment header
+- `reconfigure()` support: chain configs hot-reloadable via SIGHUP
 
 ---
 
@@ -975,7 +1066,9 @@ sessions:
 enabled:                          # Enabled extension names (correspond to directories under extensions/)
   - vault                         # Encrypted credential store (zero-config, passphrase auto-generated)
   - memory                        # Cross-session memory (zero-config)
-  - browser                       # Web automation + scraping (zero-config if agent-browser installed)
+  - browser                       # Web automation + scraping + stealth browsing
+  - context                       # Context window monitoring + auto-compaction
+  # - crypto                      # On-chain wallet management (requires web3 + eth_account)
   - telegram
   # - heartbeat                   # Autonomous heartbeat (periodic check + LLM decision + execution)
   # - ask_user                    # Interactive questioning
@@ -1015,6 +1108,27 @@ extensions:                       # Per-extension config
   session_ask:
     timeout: 300                  # Default timeout for inter-session questions
     max_question_length: 2000     # Max characters for question text
+  context:
+    auto_compact:
+      enabled: false              # Auto-compact when context fills up
+      threshold_pct: 85           # Fill % that triggers compaction
+      cooldown_prompts: 3         # Min prompts between compactions
+  crypto:
+    default_chain: base           # Default chain for operations
+    chains:
+      base:
+        rpc_url: "https://mainnet.base.org"
+        chain_id: 8453
+        native_symbol: ETH
+      ethereum:
+        rpc_url: "https://eth.llamarpc.com"
+        chain_id: 1
+        native_symbol: ETH
+    tx:
+      gas_multiplier: 1.2
+      receipt_timeout: 120
+    x402:
+      default_network: base
 ```
 
 **Note: `config.yaml` contains sensitive information (bot token) and is excluded via `.gitignore`. Copy `config.yaml.example` and fill in actual values.**
