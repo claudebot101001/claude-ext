@@ -14,8 +14,7 @@ automation with optional NopeCHA CAPTCHA solving.
 """
 
 import asyncio
-import email
-import imaplib
+import base64
 import json
 import logging
 import os
@@ -254,112 +253,133 @@ class ExtensionImpl(Extension):
             ],
         )
 
-    def _imap_connect(self) -> tuple[imaplib.IMAP4_SSL, dict]:
-        """Connect to IMAP using credentials from vault. Returns (conn, creds_dict)."""
-        vault_key = self._stealth_config.get("email", {}).get("vault_key", "browser/email/imap")
-        vault = self.engine.services.get("vault")
-        if not vault:
-            raise RuntimeError("Vault not enabled — cannot retrieve email credentials")
-        raw = vault.get(vault_key)
-        if not raw:
-            raise RuntimeError(f"Email credentials not found in vault key: {vault_key}")
-        creds = json.loads(raw)
-        conn = imaplib.IMAP4_SSL(creds["host"], int(creds.get("port", 993)), timeout=30)
-        conn.login(creds["username"], creds["password"])
-        return conn, creds
+    def _gmail_service(self):
+        """Build Gmail API service using OAuth2 credentials. Cached per instance."""
+        if hasattr(self, "_gmail_svc") and self._gmail_svc is not None:
+            return self._gmail_svc
 
-    def _imap_search(
+        from google.auth.transport.requests import Request
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        creds_path = Path.home() / ".config" / "gws" / "credentials.json"
+        if not creds_path.exists():
+            raise RuntimeError(f"Gmail OAuth2 credentials not found: {creds_path}")
+
+        with open(creds_path) as f:
+            creds_data = json.load(f)
+
+        creds = Credentials(
+            token=None,
+            refresh_token=creds_data["refresh_token"],
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=creds_data["client_id"],
+            client_secret=creds_data["client_secret"],
+            scopes=["https://www.googleapis.com/auth/gmail.readonly"],
+        )
+        creds.refresh(Request())
+
+        self._gmail_svc = build("gmail", "v1", credentials=creds, cache_discovery=False)
+        return self._gmail_svc
+
+    def _gmail_search(
         self,
         sender: str | None,
         subject: str | None,
         after: str | None,
         limit: int,
     ) -> list[dict]:
-        """Search INBOX and return message summaries (blocking)."""
-        conn = None
-        try:
-            conn, _ = self._imap_connect()
-            conn.select("INBOX", readonly=True)
-            criteria = []
-            if sender:
-                # Strip double quotes to prevent IMAP search injection
-                safe_sender = sender.replace('"', "")
-                criteria.append(f'FROM "{safe_sender}"')
-            if subject:
-                safe_subject = subject.replace('"', "")
-                criteria.append(f'SUBJECT "{safe_subject}"')
-            if after:
-                from datetime import datetime
+        """Search INBOX via Gmail API and return message summaries (blocking)."""
+        svc = self._gmail_service()
+        query_parts = []
+        if sender:
+            query_parts.append(f"from:{sender}")
+        if subject:
+            query_parts.append(f"subject:{subject}")
+        if after:
+            from datetime import datetime
 
-                dt = datetime.fromisoformat(after)
-                criteria.append(f'SINCE "{dt.strftime("%d-%b-%Y")}"')
-            search_str = " ".join(criteria) if criteria else "ALL"
-            _, data = conn.search(None, search_str)
-            msg_ids = data[0].split()
-            msg_ids = msg_ids[-limit:]  # Most recent N
-            results = []
-            for mid in reversed(msg_ids):
-                _, msg_data = conn.fetch(mid, "(RFC822.HEADER BODY.PEEK[TEXT]<0.500>)")
-                if not msg_data or not msg_data[0]:
-                    continue
-                header_bytes = msg_data[0][1] if msg_data[0] else b""
-                snippet = ""
-                if len(msg_data) > 2 and msg_data[1]:
-                    snippet = msg_data[1][1].decode("utf-8", errors="replace")[:200]
-                msg = email.message_from_bytes(header_bytes)
-                results.append(
-                    {
-                        "id": mid.decode(),
-                        "subject": str(msg.get("Subject", "")),
-                        "sender": str(msg.get("From", "")),
-                        "date": str(msg.get("Date", "")),
-                        "snippet": snippet.strip(),
-                    }
+            dt = datetime.fromisoformat(after)
+            query_parts.append(f"after:{dt.strftime('%Y/%m/%d')}")
+        query_parts.append("in:inbox")
+        q = " ".join(query_parts)
+
+        resp = svc.users().messages().list(userId="me", q=q, maxResults=limit).execute()
+        messages = resp.get("messages", [])
+        if not messages:
+            return []
+
+        results = []
+        for msg_stub in messages:
+            msg = (
+                svc.users()
+                .messages()
+                .get(
+                    userId="me",
+                    id=msg_stub["id"],
+                    format="metadata",
+                    metadataHeaders=["From", "Subject", "Date"],
                 )
-            return results
-        finally:
-            if conn:
-                try:
-                    conn.logout()
-                except Exception:
-                    pass
+                .execute()
+            )
+            headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+            results.append(
+                {
+                    "id": msg_stub["id"],
+                    "subject": headers.get("Subject", ""),
+                    "sender": headers.get("From", ""),
+                    "date": headers.get("Date", ""),
+                    "snippet": msg.get("snippet", ""),
+                }
+            )
+        return results
 
-    def _imap_read(self, message_id: str) -> dict:
-        """Read a full message by sequence number (blocking)."""
-        conn = None
-        try:
-            conn, _ = self._imap_connect()
-            conn.select("INBOX", readonly=True)
-            _, msg_data = conn.fetch(message_id.encode(), "(RFC822)")
-            if not msg_data or not msg_data[0]:
-                return {"error": f"Message {message_id} not found"}
-            raw = msg_data[0][1]
-            msg = email.message_from_bytes(raw)
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    ct = part.get_content_type()
-                    if ct == "text/plain":
-                        body = part.get_payload(decode=True).decode("utf-8", errors="replace")
-                        break
-                    elif ct == "text/html" and not body:
-                        body = part.get_payload(decode=True).decode("utf-8", errors="replace")
-            else:
-                body = msg.get_payload(decode=True).decode("utf-8", errors="replace")
-            verification = _extract_verification(body)
-            return {
-                "subject": str(msg.get("Subject", "")),
-                "sender": str(msg.get("From", "")),
-                "body": body,
-                "codes": verification["codes"],
-                "links": verification["links"],
-            }
-        finally:
-            if conn:
-                try:
-                    conn.logout()
-                except Exception:
-                    pass
+    def _gmail_read(self, message_id: str) -> dict:
+        """Read a full message by Gmail message ID (blocking)."""
+        svc = self._gmail_service()
+        msg = svc.users().messages().get(userId="me", id=message_id, format="full").execute()
+
+        headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+
+        def _get_body(payload: dict) -> str:
+            """Recursively extract text body from Gmail payload."""
+            mime = payload.get("mimeType", "")
+            if mime == "text/plain":
+                data = payload.get("body", {}).get("data", "")
+                if data:
+                    return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+            if mime == "text/html":
+                data = payload.get("body", {}).get("data", "")
+                if data:
+                    return base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+            parts = payload.get("parts", [])
+            text_body = ""
+            html_body = ""
+            for part in parts:
+                part_mime = part.get("mimeType", "")
+                if part_mime == "text/plain" and not text_body:
+                    data = part.get("body", {}).get("data", "")
+                    if data:
+                        text_body = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                elif part_mime == "text/html" and not html_body:
+                    data = part.get("body", {}).get("data", "")
+                    if data:
+                        html_body = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                elif "parts" in part:
+                    nested = _get_body(part)
+                    if nested:
+                        return nested
+            return text_body or html_body
+
+        body = _get_body(msg.get("payload", {}))
+        verification = _extract_verification(body)
+        return {
+            "subject": headers.get("Subject", ""),
+            "sender": headers.get("From", ""),
+            "body": body,
+            "codes": verification["codes"],
+            "links": verification["links"],
+        }
 
     async def _bridge_handler(self, method: str, params: dict):
         """Handle bridge RPC calls from stealth browser MCP server."""
@@ -401,7 +421,7 @@ class ExtensionImpl(Extension):
             try:
                 loop = asyncio.get_event_loop()
                 results = await loop.run_in_executor(
-                    None, self._imap_search, sender, subject, after, limit
+                    None, self._gmail_search, sender, subject, after, limit
                 )
                 return {"messages": results}
             except Exception as exc:
@@ -412,7 +432,7 @@ class ExtensionImpl(Extension):
                 return {"error": "Missing 'message_id' parameter"}
             try:
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(None, self._imap_read, str(message_id))
+                result = await loop.run_in_executor(None, self._gmail_read, str(message_id))
                 return result
             except Exception as exc:
                 return {"error": str(exc)}
