@@ -14,8 +14,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import logging
+import os
+import re
+import signal
 import sys
 import time
 from pathlib import Path
@@ -39,6 +43,7 @@ log = logging.getLogger("batch_import")
 MEMORY_DIR = Path.home() / ".claude-ext" / "memory"
 WRITEUPS_DIR = Path.home() / "writeups"
 PROGRESS_FILE = "topics/batch-progress.md"
+LOCKFILE = Path.home() / ".claude-ext" / "batch_import.lock"
 
 # Sonnet invocation
 MODEL = "claude-sonnet-4-6"
@@ -145,6 +150,36 @@ def build_sonnet_prompt(batch_prompt: str, report_content: str, existing_notes: 
 {report_content}"""
 
 
+def _extract_json(text: str) -> dict | None:
+    """Extract JSON object from text that may contain markdown fences or prose."""
+    text = text.strip()
+
+    # Strip markdown fences
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON object within mixed text (Sonnet sometimes adds prose before/after)
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 async def call_sonnet(prompt: str) -> dict | None:
     """Call Sonnet via claude CLI and parse JSON response."""
     cmd = [
@@ -160,8 +195,6 @@ async def call_sonnet(prompt: str) -> dict | None:
     ]
 
     # Must unset CLAUDECODE to allow nested invocation
-    import os
-
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
     proc = await asyncio.create_subprocess_exec(
@@ -191,26 +224,38 @@ async def call_sonnet(prompt: str) -> dict | None:
     # Parse outer JSON (claude CLI envelope)
     try:
         envelope = json.loads(raw)
-        result_text = envelope.get("result", raw)
+        if envelope.get("is_error"):
+            log.error("Sonnet returned error: %s", str(envelope.get("errors", ""))[:300])
+            return None
+        result_text = envelope.get("result")
+        if not result_text:
+            log.error("Sonnet returned empty result (stop_reason=%s)", envelope.get("stop_reason"))
+            return None
     except (json.JSONDecodeError, TypeError):
         result_text = raw
 
     # Parse inner JSON (Sonnet's structured output)
     text = result_text.strip()
-    # Strip markdown fences if present
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].strip() == "```":
-            lines = lines[:-1]
-        text = "\n".join(lines)
-
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+    parsed = _extract_json(text)
+    if parsed is None:
         log.error("Failed to parse Sonnet JSON output: %s", text[:300])
         return None
+
+    # Handle nested JSON — Sonnet sometimes wraps the result
+    if isinstance(parsed, dict) and "action" not in parsed:
+        # Check common nesting patterns
+        for key in ("result", "output", "response", "data"):
+            if key in parsed and isinstance(parsed[key], dict) and "action" in parsed[key]:
+                return parsed[key]
+        # Check if there's a single dict value with action
+        dict_vals = [v for v in parsed.values() if isinstance(v, dict) and "action" in v]
+        if len(dict_vals) == 1:
+            return dict_vals[0]
+        # No action field — treat as parse failure to trigger retry
+        log.warning("Sonnet JSON has no 'action' field. Keys: %s", list(parsed.keys()))
+        return None
+
+    return parsed
 
 
 def apply_create(data: dict, store: MemoryStore, graph: KnowledgeGraph) -> str:
@@ -316,13 +361,16 @@ def apply_append(data: dict, store: MemoryStore, graph: KnowledgeGraph) -> str:
         return f"REJECTED: {existing_path} does not exist"
     meta, body = parse_frontmatter(text)
 
-    # Add new historical instance
+    # Add new historical instance (skip if report_id already present)
     hist = data.get("historical_instance", {})
     if hist:
+        rid = hist.get("report_id", "")
+        if rid and rid in body:
+            return f"SKIPPED: {existing_path} already contains {rid}"
+
         proto = hist.get("protocol", "Unknown")
         contract = hist.get("contract", "")
         sev = hist.get("severity", "Critical")
-        rid = hist.get("report_id", "")
         desc = hist.get("description", "")
         label = f"{proto} ({contract})" if contract else proto
         instance_line = f"\n- Protocol: {label}, Severity: {sev}, Report: {rid}"
@@ -395,11 +443,20 @@ async def process_one(
     elapsed = time.monotonic() - t0
 
     if data is None:
-        result = "ERROR: Sonnet returned no parseable output"
-        log.error("%s: %s (%.1fs)", report_id, result, elapsed)
-        if not dry_run:
-            record_progress(store, report_id, report_path, result)
-        return result
+        # Retry once with explicit JSON-only instruction
+        log.warning("%s: first attempt failed, retrying with JSON reminder", report_id)
+        retry_prompt = prompt + (
+            "\n\nIMPORTANT: You MUST respond with ONLY a JSON object. "
+            "No prose, no analysis, no explanation. Output raw JSON starting with { and ending with }."
+        )
+        data = await call_sonnet(retry_prompt)
+        elapsed = time.monotonic() - t0
+        if data is None:
+            result = "ERROR: Sonnet returned no parseable output (after retry)"
+            log.error("%s: %s (%.1fs)", report_id, result, elapsed)
+            if not dry_run:
+                record_progress(store, report_id, report_path, result)
+            return result
 
     action = data.get("action", "unknown")
 
@@ -438,6 +495,7 @@ async def process_one(
         result = f"SKIPPED: {reason}"
     else:
         result = f"UNKNOWN action: {action}"
+        log.warning("%s: raw Sonnet output: %s", report_id, json.dumps(data)[:500])
 
     log.info("%s: %s (%.1fs)", report_id, result, elapsed)
     record_progress(store, report_id, report_path, result)
@@ -456,6 +514,31 @@ async def process_one(
     return result
 
 
+def _acquire_lock() -> int:
+    """Acquire exclusive lockfile. Returns fd. Raises SystemExit if already running."""
+    LOCKFILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(LOCKFILE), os.O_WRONLY | os.O_CREAT, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        log.error("Another batch_import instance is already running (lockfile: %s)", LOCKFILE)
+        sys.exit(1)
+    os.write(fd, f"{os.getpid()}\n".encode())
+    os.fsync(fd)
+    return fd
+
+
+def _release_lock(fd: int) -> None:
+    """Release lockfile."""
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        LOCKFILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Batch import vulnerability reports")
     parser.add_argument("--dry-run", action="store_true", help="Preview without writing")
@@ -469,6 +552,20 @@ async def main() -> None:
         datefmt="%H:%M:%S",
     )
 
+    # Exclusive lock — prevents multiple instances
+    lock_fd = _acquire_lock()
+
+    # Ensure child processes are killed when we die
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+
+    try:
+        await _run(args, lock_fd)
+    finally:
+        _release_lock(lock_fd)
+
+
+async def _run(args: argparse.Namespace, lock_fd: int) -> None:
     # Initialize store + graph
     store = MemoryStore(MEMORY_DIR)
     graph = KnowledgeGraph(MEMORY_DIR)
