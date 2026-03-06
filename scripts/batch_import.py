@@ -18,7 +18,6 @@ import fcntl
 import json
 import logging
 import os
-import re
 import signal
 import sys
 import time
@@ -44,6 +43,21 @@ MEMORY_DIR = Path.home() / ".claude-ext" / "memory"
 WRITEUPS_DIR = Path.home() / "writeups"
 PROGRESS_FILE = "topics/batch-progress.md"
 LOCKFILE = Path.home() / ".claude-ext" / "batch_import.lock"
+
+# Track active child process for cleanup on signal
+_active_proc: asyncio.subprocess.Process | None = None
+
+
+def _kill_proc(proc: asyncio.subprocess.Process) -> None:
+    """Kill a subprocess and its entire process group."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
+
 
 # Sonnet invocation
 MODEL = "claude-sonnet-4-6"
@@ -170,12 +184,34 @@ def _extract_json(text: str) -> dict | None:
         pass
 
     # Try to find JSON object within mixed text (Sonnet sometimes adds prose before/after)
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        try:
-            return json.loads(match.group())
-        except json.JSONDecodeError:
-            pass
+    # Use bracket matching to find the outermost balanced { ... }
+    start = text.find("{")
+    if start != -1:
+        depth = 0
+        in_str = False
+        escape = False
+        for i in range(start, len(text)):
+            c = text[i]
+            if escape:
+                escape = False
+                continue
+            if c == "\\":
+                escape = True
+                continue
+            if c == '"':
+                in_str = not in_str
+                continue
+            if in_str:
+                continue
+            if c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start : i + 1])
+                    except json.JSONDecodeError:
+                        break
 
     return None
 
@@ -197,23 +233,28 @@ async def call_sonnet(prompt: str) -> dict | None:
     # Must unset CLAUDECODE to allow nested invocation
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
+    global _active_proc
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        start_new_session=True,  # isolate process group for clean kills
     )
+    _active_proc = proc
 
     try:
         stdout, stderr = await asyncio.wait_for(
             proc.communicate(input=prompt.encode()), timeout=TIMEOUT
         )
     except TimeoutError:
-        proc.kill()
+        _kill_proc(proc)
         await proc.wait()
         log.error("Sonnet call timed out")
         return None
+    finally:
+        _active_proc = None
 
     raw = stdout.decode().strip()
     if proc.returncode != 0:
@@ -555,9 +596,14 @@ async def main() -> None:
     # Exclusive lock — prevents multiple instances
     lock_fd = _acquire_lock()
 
-    # Ensure child processes are killed when we die
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
+    def _shutdown(signum, frame):
+        """Kill active child process group on signal, then exit."""
+        if _active_proc and _active_proc.returncode is None:
+            _kill_proc(_active_proc)
+        sys.exit(1)
+
+    signal.signal(signal.SIGTERM, _shutdown)
+    signal.signal(signal.SIGINT, _shutdown)
 
     try:
         await _run(args, lock_fd)

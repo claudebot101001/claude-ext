@@ -16,6 +16,7 @@ Two-tier design:
 
 import json as _json
 import logging
+import os.path
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -267,7 +268,9 @@ class ReflectionEngine:
                 elif isinstance(action, CreateNote):
                     if store is not None:
                         # Safety: L2-created notes restricted to topics/ prefix
-                        if not action.path.startswith("topics/"):
+                        # Normalize to prevent traversal (e.g. topics/../constitution.md)
+                        safe_path = os.path.normpath(action.path)
+                        if not safe_path.startswith("topics/"):
                             log.warning(
                                 "L2 CreateNote blocked: path %r not under topics/",
                                 action.path,

@@ -390,9 +390,7 @@ class MemoryMCPServer(MCPServerBase):
     @staticmethod
     def _check_readonly(path: str) -> str | None:
         """Return error string if path is read-only, else None."""
-        from pathlib import PurePosixPath
-
-        normalized = PurePosixPath(path.strip()).as_posix().lower()
+        normalized = os.path.normpath(path.strip()).lower()
         if normalized in _READONLY_PATHS:
             return (
                 f"Error: '{path}' is read-only (human-authored constitutional rules). "
