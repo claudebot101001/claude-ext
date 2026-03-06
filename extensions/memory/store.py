@@ -182,6 +182,25 @@ class MemoryIndex:
         except sqlite3.Error:
             pass  # best-effort
 
+    def reindex_file(self, path: str) -> None:
+        """Immediately re-index a file (FTS5 + graph metadata sync).
+
+        Unlike invalidate_file() which defers to next ensure_index(),
+        this synchronously updates all indexes so metadata is queryable
+        immediately after a write.
+        """
+        if not self.available or self._db is None:
+            return
+        filepath = self.memory_dir / path
+        try:
+            mtime_ns = filepath.stat().st_mtime_ns
+        except OSError:
+            return
+        try:
+            self._index_file(path, mtime_ns)
+        except Exception:
+            log.exception("reindex_file failed for %s", path)
+
     def search(self, fts_query: str, limit: int = _MAX_SEARCH_RESULTS) -> list[dict]:
         """Search chunks using FTS5 MATCH with BM25 ranking.
 
@@ -512,7 +531,7 @@ class MemoryStore:
                 self._set_expiry_locked(path, expires)
             else:
                 self._clear_expiry_locked(path)
-        self._index.invalidate_file(path)
+        self._index.reindex_file(path)
         log.info("Memory: wrote %d bytes to %s", len(data), path)
         return len(data)
 
@@ -548,7 +567,7 @@ class MemoryStore:
                 f.write(chunk)
             if expires:
                 self._set_expiry_locked(path, expires)
-        self._index.invalidate_file(path)
+        self._index.reindex_file(path)
         log.info("Memory: appended %d bytes to %s", len(data), path)
         return len(data)
 

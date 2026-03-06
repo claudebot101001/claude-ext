@@ -423,6 +423,39 @@ class TestStoreGraphIntegration:
         assert row is not None
         assert row[0] == "api"
 
+    def test_write_syncs_graph_immediately(self, store, memory_dir):
+        """Graph metadata is queryable immediately after write() — no ensure_index() needed."""
+        content = "---\ntags: [vuln:test, defi:lending]\nkeywords: [kw1, kw2]\nimportance: 0.85\n---\n# Test Note"
+        store.write("immediate.md", content)
+
+        # Query graph metadata WITHOUT calling ensure_index()
+        db = sqlite3.connect(str(memory_dir / ".search_index.db"))
+        row = db.execute(
+            "SELECT importance FROM note_meta WHERE path = ?", ("immediate.md",)
+        ).fetchone()
+        tags = db.execute(
+            "SELECT tag FROM note_tags WHERE path = ? ORDER BY tag", ("immediate.md",)
+        ).fetchall()
+        db.close()
+        assert row is not None, "note_meta should be populated immediately after write()"
+        assert row[0] == 0.85
+        assert [t[0] for t in tags] == ["defi:lending", "vuln:test"]
+
+    def test_append_syncs_graph_immediately(self, store, memory_dir):
+        """Graph metadata is queryable immediately after append() too."""
+        content = "---\ntags: [test]\nimportance: 0.6\n---\n# Append Test"
+        store.write("append_sync.md", content)
+
+        store.append("append_sync.md", "New content added", timestamp=False)
+
+        db = sqlite3.connect(str(memory_dir / ".search_index.db"))
+        row = db.execute(
+            "SELECT importance FROM note_meta WHERE path = ?", ("append_sync.md",)
+        ).fetchone()
+        db.close()
+        assert row is not None, "note_meta should be populated after append()"
+        assert row[0] == 0.6
+
 
 # ===========================================================================
 # Reflection Engine
