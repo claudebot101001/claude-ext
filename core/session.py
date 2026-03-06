@@ -14,8 +14,10 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import shlex
 import shutil
+import signal
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -538,6 +540,11 @@ class SessionManager:
         session = self.sessions[session_id]
         sdir = self.session_dir(session_id)
 
+        # Ensure no orphaned process from a previous prompt is still running.
+        # This guards against the case where a timeout Ctrl-C failed to kill
+        # the old Claude process, which would eat the new run.sh as stdin.
+        await self._force_kill_session_processes(session.tmux_session, sdir)
+
         # Clean previous artifacts
         for fname in (
             "stream.jsonl",
@@ -583,9 +590,11 @@ class SessionManager:
         if session_id not in self.sessions:
             return
 
-        # Timeout — try to terminate the orphaned process
+        # Timeout — forcefully kill orphaned processes so the pane is clean
+        # for the next prompt.  Ctrl-C alone is unreliable for Claude CLI.
         if metadata.get("is_error") and metadata.get("timed_out"):
             await self._tmux_send_ctrl_c(session.tmux_session)
+            await self._force_kill_session_processes(session.tmux_session, sdir)
 
         # Update state
         session.status = SessionStatus.IDLE
@@ -1076,6 +1085,55 @@ class SessionManager:
         if proc.returncode != 0:
             log.error("tmux new-session failed: %s", stderr.decode())
         return proc.returncode
+
+    async def _force_kill_session_processes(self, session_name: str, sdir: Path) -> None:
+        """Kill any running processes in the tmux pane for this session.
+
+        Uses the session directory path to find associated processes
+        (run.sh, script, claude) via pgrep, then SIGTERM → wait → SIGKILL.
+        Also writes a synthetic exitcode so any waiting poller unblocks.
+        """
+        sdir_str = str(sdir)
+        proc = await asyncio.create_subprocess_exec(
+            "pgrep",
+            "-f",
+            sdir_str,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await proc.communicate()
+        pids = [p for p in stdout.decode().strip().split() if p]
+        if not pids:
+            return
+
+        log.warning(
+            "Force-killing %d orphaned process(es) in session pane: %s",
+            len(pids),
+            ", ".join(pids),
+        )
+
+        # SIGTERM first
+        for pid in pids:
+            try:
+                os.kill(int(pid), signal.SIGTERM)
+            except (ProcessLookupError, ValueError, PermissionError):
+                pass
+
+        await asyncio.sleep(3)
+
+        # SIGKILL survivors
+        for pid in pids:
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except (ProcessLookupError, ValueError, PermissionError):
+                pass
+
+        await asyncio.sleep(1)
+
+        # Write synthetic exitcode so any poller unblocks
+        exitcode_path = sdir / "exitcode"
+        if not exitcode_path.exists():
+            exitcode_path.write_text("137")
 
     async def _tmux_send_keys(self, session_name: str, command: str) -> None:
         proc = await asyncio.create_subprocess_exec(
