@@ -64,12 +64,20 @@ class ClaudeEngine:
         )
         self.bridge = BridgeServer(base_dir / "bridge.sock")
 
-    def _build_cmd(self, prompt: str, continue_session: bool = False) -> list[str]:
+    def _build_cmd(
+        self,
+        prompt: str,
+        continue_session: bool = False,
+        model: str | None = None,
+        max_turns: int | None = None,
+    ) -> list[str]:
         cmd = ["claude", "-p", prompt, "--output-format", "json"]
-        if self.model:
-            cmd.extend(["--model", self.model])
-        if self.max_turns > 0:
-            cmd.extend(["--max-turns", str(self.max_turns)])
+        effective_model = model or self.model
+        if effective_model:
+            cmd.extend(["--model", effective_model])
+        effective_turns = max_turns if max_turns is not None else self.max_turns
+        if effective_turns > 0:
+            cmd.extend(["--max-turns", str(effective_turns)])
         if self.permission_mode:
             cmd.extend(["--permission-mode", self.permission_mode])
         if self.allowed_tools:
@@ -84,9 +92,16 @@ class ClaudeEngine:
         cwd: str | None = None,
         continue_session: bool = False,
         timeout: float = 300,
+        model: str | None = None,
+        max_turns: int | None = None,
     ) -> str:
-        """Send a prompt to Claude Code and return the text response."""
-        cmd = self._build_cmd(prompt, continue_session)
+        """Send a prompt to Claude Code and return the text response.
+
+        Args:
+            model: Override the default model (e.g. 'claude-sonnet-4-6' for lightweight tasks).
+            max_turns: Override the default max_turns.
+        """
+        cmd = self._build_cmd(prompt, continue_session, model=model, max_turns=max_turns)
         log.info("Running: %s", " ".join(cmd[:6]))
 
         proc = await asyncio.create_subprocess_exec(

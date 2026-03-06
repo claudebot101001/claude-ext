@@ -8,16 +8,17 @@ Two-tier design:
 
   L2 (LLM-assisted, optional): Triggered conditionally.
      - Controlled by config (extensions.memory.reflection.llm_enabled)
-     - Only fires when session context has "audit": true or result contains
-       vulnerability-related keywords
-     - Uses a lightweight model (Sonnet) for structured analysis
-     - Stub implementation — full L2 is Phase 4 work
+     - Only fires when result text contains vulnerability-related keywords
+     - Uses Sonnet for structured analysis (no tools, single turn)
+     - Returns structured JSON: keyword additions, relation suggestions,
+       importance adjustments, and optional new note creation
 """
 
+import json as _json
 import logging
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 log = logging.getLogger(__name__)
 
@@ -140,7 +141,27 @@ class SuggestRelation:
     rel_type: str = "related"
 
 
-ReflectionAction = BoostImportance | AddKeywords | SuggestRelation
+@dataclass
+class SetImportance:
+    path: str
+    kind: str = "set_importance"
+    importance: float = 0.5
+
+
+@dataclass
+class CreateNote:
+    """L2-only: create a new knowledge note from reflection analysis."""
+
+    path: str
+    kind: str = "create_note"
+    content: str = ""
+    tags: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+    importance: float = 0.5
+    relations: list[dict] = field(default_factory=list)
+
+
+ReflectionAction = BoostImportance | AddKeywords | SuggestRelation | SetImportance | CreateNote
 
 
 class ReflectionEngine:
@@ -211,8 +232,12 @@ class ReflectionEngine:
 
         return actions
 
-    def apply(self, actions: list[ReflectionAction]) -> int:
-        """Apply reflection actions to the knowledge graph. Returns count applied."""
+    def apply(self, actions: list[ReflectionAction], store=None) -> int:
+        """Apply reflection actions to the knowledge graph. Returns count applied.
+
+        Args:
+            store: Optional MemoryStore for CreateNote actions (file I/O).
+        """
         applied = 0
         for action in actions:
             try:
@@ -233,6 +258,41 @@ class ReflectionEngine:
                     if self.graph.add_relation(action.path, action.target, action.rel_type):
                         applied += 1
 
+                elif isinstance(action, SetImportance):
+                    # Only update if the path exists in the graph (avoid phantom entries)
+                    if self.graph.get_meta(action.path) is not None:
+                        self.graph.set_meta(action.path, importance=action.importance)
+                        applied += 1
+
+                elif isinstance(action, CreateNote):
+                    if store is not None:
+                        # Safety: L2-created notes restricted to topics/ prefix
+                        if not action.path.startswith("topics/"):
+                            log.warning(
+                                "L2 CreateNote blocked: path %r not under topics/",
+                                action.path,
+                            )
+                            continue
+                        from extensions.memory.frontmatter import (
+                            NoteMeta,
+                            serialize_frontmatter,
+                        )
+
+                        meta = NoteMeta(
+                            tags=action.tags,
+                            keywords=action.keywords,
+                            importance=action.importance,
+                        )
+                        full_content = serialize_frontmatter(meta, action.content)
+                        store.write(action.path, full_content)
+                        # Add relations
+                        for rel in action.relations:
+                            target = rel.get("target", "")
+                            rel_type = rel.get("type", "related")
+                            if target and rel_type:
+                                self.graph.add_relation(action.path, target, rel_type)
+                        applied += 1
+
             except Exception:
                 log.exception("Failed to apply reflection action: %s", action)
 
@@ -249,20 +309,10 @@ class ReflectionEngine:
         word_freq = Counter(w for w in words if len(w) >= _MIN_WORD_LEN and w not in _STOP_WORDS)
         return {w for w, c in word_freq.items() if c >= min_freq}, word_freq
 
-    # -- L2 stub (future: LLM-assisted reflection) --------------------------
+    # -- L2: LLM-assisted reflection -----------------------------------------
 
-    def should_trigger_l2(self, session_id: str, result_text: str, metadata: dict) -> bool:
-        """Check if L2 (LLM) reflection should be triggered.
-
-        Conditions:
-        - Config enables LLM reflection
-        - Result text contains vulnerability-related keywords
-        """
-        if not self.config.get("llm_enabled", False):
-            return False
-
-        # Check for vulnerability-related keywords
-        vuln_keywords = {
+    _VULN_KEYWORDS = frozenset(
+        {
             "vulnerability",
             "exploit",
             "reentrancy",
@@ -272,6 +322,149 @@ class ReflectionEngine:
             "price manipulation",
             "access control",
             "privilege escalation",
+            "delegatecall",
+            "storage collision",
+            "front-running",
+            "sandwich",
+            "oracle manipulation",
+            "unchecked return",
+            "integer overflow",
+            "rug pull",
         }
+    )
+
+    def should_trigger_l2(self, result_text: str) -> bool:
+        """Check if L2 (LLM) reflection should be triggered.
+
+        Conditions:
+        - Config enables LLM reflection
+        - Result text contains vulnerability-related keywords
+        """
+        if not self.config.get("llm_enabled", False):
+            return False
+
         text_lower = result_text.lower()
-        return any(kw in text_lower for kw in vuln_keywords)
+        return any(kw in text_lower for kw in self._VULN_KEYWORDS)
+
+    def build_l2_prompt(self, result_text: str, existing_notes: list[dict]) -> str:
+        """Build the Sonnet prompt for L2 reflection.
+
+        Args:
+            result_text: The delivery result text to analyze.
+            existing_notes: List of {path, keywords, tags, importance} from graph.
+        """
+        # Truncate result to avoid huge prompts
+        max_result = 4000
+        truncated = result_text[:max_result]
+        if len(result_text) > max_result:
+            truncated += "\n... [truncated]"
+
+        # Build existing notes context
+        notes_ctx = ""
+        for n in existing_notes[:30]:  # Cap at 30 notes
+            kw = ", ".join(n.get("keywords", [])[:10])
+            tags = ", ".join(n.get("tags", [])[:5])
+            notes_ctx += (
+                f"- {n['path']} [imp={n.get('importance', 0.5)}, tags={tags}, keywords={kw}]\n"
+            )
+
+        return f"""Analyze this task result for knowledge graph updates. You are curating a security research knowledge base.
+
+## Task Result
+{truncated}
+
+## Existing Knowledge Notes
+{notes_ctx if notes_ctx else "(none)"}
+
+## Instructions
+Analyze the result and output a JSON object with these optional fields:
+
+1. **keyword_updates**: Add domain-specific keywords to existing notes when the result reveals they're relevant.
+   Format: [{{"path": "topics/x.md", "add_keywords": ["keyword1", "keyword2"]}}]
+
+2. **relation_suggestions**: Create edges between notes that share patterns discovered in this result.
+   Format: [{{"source": "topics/a.md", "target": "topics/b.md", "type": "shares_pattern"}}]
+   Types: related, depends_on, similar_to, caused_by, exploits, mitigates, composes_with, shares_pattern
+
+3. **importance_updates**: Adjust importance when the result reveals a note is more/less critical.
+   Format: [{{"path": "topics/x.md", "importance": 0.8}}]
+
+4. **new_notes**: Create a new knowledge note if the result contains a novel pattern/finding worth preserving.
+   Format: [{{"path": "topics/pattern-name.md", "content": "# Title\\n...", "tags": [...], "keywords": [...], "importance": 0.7, "relations": [{{"target": "...", "type": "..."}}]}}]
+   Only create notes for genuinely novel findings — not routine task output.
+
+Output ONLY valid JSON. No markdown fences. Empty arrays for fields with no suggestions.
+Example: {{"keyword_updates": [], "relation_suggestions": [], "importance_updates": [], "new_notes": []}}"""
+
+    def parse_l2_response(self, response: str) -> list[ReflectionAction]:
+        """Parse Sonnet's JSON response into ReflectionActions."""
+        actions: list[ReflectionAction] = []
+
+        # Strip markdown fences if present
+        text = response.strip()
+        if text.startswith("```"):
+            lines = text.splitlines()
+            # Remove first and last fence lines
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            text = "\n".join(lines)
+
+        try:
+            data = _json.loads(text)
+        except _json.JSONDecodeError:
+            log.warning("L2 reflection: failed to parse JSON response")
+            return []
+
+        if not isinstance(data, dict):
+            return []
+
+        # keyword_updates
+        for update in data.get("keyword_updates", []):
+            path = update.get("path", "")
+            kw = update.get("add_keywords", [])
+            if path and kw and isinstance(kw, list):
+                actions.append(AddKeywords(path=path, keywords=[str(k) for k in kw[:10]]))
+
+        # relation_suggestions
+        for rel in data.get("relation_suggestions", []):
+            source = rel.get("source", "")
+            target = rel.get("target", "")
+            rel_type = rel.get("type", "related")
+            if source and target:
+                actions.append(SuggestRelation(path=source, target=target, rel_type=str(rel_type)))
+
+        # importance_updates
+        for update in data.get("importance_updates", []):
+            path = update.get("path", "")
+            imp = update.get("importance")
+            if path and imp is not None:
+                try:
+                    actions.append(
+                        SetImportance(path=path, importance=max(0.0, min(1.0, float(imp))))
+                    )
+                except (ValueError, TypeError):
+                    pass
+
+        # new_notes
+        for note in data.get("new_notes", []):
+            path = note.get("path", "")
+            content = note.get("content", "")
+            if path and content:
+                try:
+                    imp = max(0.0, min(1.0, float(note.get("importance", 0.5))))
+                except (ValueError, TypeError):
+                    imp = 0.5
+                actions.append(
+                    CreateNote(
+                        path=path,
+                        content=content,
+                        tags=[str(t) for t in note.get("tags", [])],
+                        keywords=[str(k) for k in note.get("keywords", [])],
+                        importance=imp,
+                        relations=note.get("relations", []),
+                    )
+                )
+
+        return actions

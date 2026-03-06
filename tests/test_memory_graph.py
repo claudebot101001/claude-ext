@@ -466,12 +466,122 @@ class TestReflectionEngine:
 
     def test_l2_trigger_disabled_by_default(self, graph):
         engine = ReflectionEngine(graph)
-        assert engine.should_trigger_l2("s1", "found vulnerability", {}) is False
+        assert engine.should_trigger_l2("found vulnerability") is False
 
     def test_l2_trigger_enabled(self, graph):
         engine = ReflectionEngine(graph, config={"llm_enabled": True})
-        assert engine.should_trigger_l2("s1", "found reentrancy vulnerability", {}) is True
-        assert engine.should_trigger_l2("s1", "just a normal task", {}) is False
+        assert engine.should_trigger_l2("found reentrancy vulnerability") is True
+        assert engine.should_trigger_l2("just a normal task") is False
+
+    def test_l2_parse_response(self, graph):
+        engine = ReflectionEngine(graph)
+        response = '{"keyword_updates": [{"path": "topics/test.md", "add_keywords": ["flash", "loan"]}], "relation_suggestions": [{"source": "topics/a.md", "target": "topics/b.md", "type": "shares_pattern"}], "importance_updates": [{"path": "topics/test.md", "importance": 0.9}], "new_notes": []}'
+        actions = engine.parse_l2_response(response)
+        assert len(actions) == 3
+        assert actions[0].kind == "add_keywords"
+        assert actions[0].keywords == ["flash", "loan"]
+        assert actions[1].kind == "suggest_relation"
+        assert actions[1].rel_type == "shares_pattern"
+        assert actions[2].kind == "set_importance"
+        assert actions[2].importance == 0.9
+
+    def test_l2_parse_response_with_fences(self, graph):
+        engine = ReflectionEngine(graph)
+        response = '```json\n{"keyword_updates": [], "relation_suggestions": [], "importance_updates": [], "new_notes": [{"path": "topics/new.md", "content": "# New Pattern", "tags": ["vuln"], "keywords": ["test"], "importance": 0.7, "relations": []}]}\n```'
+        actions = engine.parse_l2_response(response)
+        assert len(actions) == 1
+        assert actions[0].kind == "create_note"
+        assert actions[0].path == "topics/new.md"
+        assert actions[0].importance == 0.7
+
+    def test_l2_parse_invalid_json(self, graph):
+        engine = ReflectionEngine(graph)
+        actions = engine.parse_l2_response("not valid json at all")
+        assert actions == []
+
+    def test_l2_build_prompt(self, graph):
+        engine = ReflectionEngine(graph)
+        prompt = engine.build_l2_prompt(
+            "found a reentrancy bug",
+            [
+                {
+                    "path": "topics/test.md",
+                    "keywords": ["reentrancy"],
+                    "tags": ["vuln"],
+                    "importance": 0.8,
+                }
+            ],
+        )
+        assert "reentrancy bug" in prompt
+        assert "topics/test.md" in prompt
+        assert "JSON" in prompt
+
+    def test_apply_set_importance(self, graph):
+        from extensions.memory.reflect import SetImportance
+
+        graph.set_meta("topics/test.md", importance=0.5)
+        engine = ReflectionEngine(graph)
+        actions = [SetImportance(path="topics/test.md", importance=0.9)]
+        applied = engine.apply(actions)
+        assert applied == 1
+        meta = graph.get_meta("topics/test.md")
+        assert meta["importance"] == 0.9
+
+    def test_apply_set_importance_phantom_path_rejected(self, graph):
+        """SetImportance on a nonexistent path should not create a phantom entry."""
+        from extensions.memory.reflect import SetImportance
+
+        engine = ReflectionEngine(graph)
+        actions = [SetImportance(path="topics/nonexistent.md", importance=0.9)]
+        applied = engine.apply(actions)
+        assert applied == 0
+        assert graph.get_meta("topics/nonexistent.md") is None
+
+    def test_apply_create_note_blocked_outside_topics(self, graph, memory_dir):
+        """CreateNote should be blocked for paths outside topics/."""
+        from extensions.memory.reflect import CreateNote
+
+        store = MemoryStore(memory_dir)
+        engine = ReflectionEngine(graph)
+        actions = [
+            CreateNote(
+                path="constitution.md",
+                content="# Overwritten!",
+                tags=["evil"],
+            ),
+            CreateNote(
+                path="users/123/profile.md",
+                content="# Overwritten!",
+            ),
+        ]
+        applied = engine.apply(actions, store=store)
+        assert applied == 0
+        # Verify constitution.md was NOT overwritten
+        assert store.read("constitution.md") is None or "Overwritten" not in (
+            store.read("constitution.md") or ""
+        )
+
+    def test_apply_create_note_allowed_under_topics(self, graph, memory_dir):
+        """CreateNote should work for paths under topics/."""
+        from extensions.memory.reflect import CreateNote
+
+        store = MemoryStore(memory_dir)
+        (memory_dir / "topics").mkdir(exist_ok=True)
+        engine = ReflectionEngine(graph)
+        actions = [
+            CreateNote(
+                path="topics/new-pattern.md",
+                content="# New Pattern\nSome content",
+                tags=["vuln"],
+                keywords=["reentrancy"],
+                importance=0.7,
+            ),
+        ]
+        applied = engine.apply(actions, store=store)
+        assert applied == 1
+        content = store.read("topics/new-pattern.md")
+        assert content is not None
+        assert "New Pattern" in content
 
 
 # ===========================================================================

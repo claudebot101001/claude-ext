@@ -338,9 +338,10 @@ class ExtensionImpl(Extension):
     def _knowledge_injection_customizer(self, session) -> SessionOverrides | None:
         """Auto-inject top-importance notes into session system prompt.
 
-        Two-stage selection:
+        Three-stage selection:
         1. If session.context has 'tags', match those first (high weight)
-        2. Fall back to top-N by effective_importance
+        2. If session.context has 'audit_target', FTS5 fuzzy search (medium weight)
+        3. Fill remaining with top-N by effective_importance
         Cached per session for configured TTL.
         """
         if self._graph is None:
@@ -370,7 +371,7 @@ class ExtensionImpl(Extension):
                     ]
                 )
 
-        # Stage 1: Context tag matching
+        # Stage 1: Context tag matching (high weight)
         context = getattr(session, "context", {}) or {}
         context_tags = context.get("tags", [])
 
@@ -383,7 +384,20 @@ class ExtensionImpl(Extension):
                 candidates.append(r)
                 seen.add(r["path"])
 
-        # Stage 2: Fill remaining with top by importance
+        # Stage 2: FTS5 fuzzy search for audit_target (medium weight)
+        audit_target = context.get("audit_target", "")
+        if audit_target and self._store is not None and len(candidates) < max_notes:
+            fts_results = self._store.search(str(audit_target))
+            for r in fts_results[: max_notes - len(candidates)]:
+                path = r.get("file", "")
+                if path and path not in seen:
+                    # Get effective importance from graph
+                    meta = self._graph.get_meta(path)
+                    eff_imp = meta.get("effective_importance", 0.5) if meta else 0.5
+                    candidates.append({"path": path, "effective_importance": eff_imp})
+                    seen.add(path)
+
+        # Stage 3: Fill remaining with top by importance
         remaining = max_notes - len(candidates)
         if remaining > 0:
             top_results = self._graph.top_notes(limit=remaining + len(seen))
@@ -477,17 +491,66 @@ class ExtensionImpl(Extension):
     async def _safe_reflect(self, session_id: str, text: str, metadata: dict) -> None:
         """Wrap reflection in try/except to prevent unhandled task exceptions."""
         try:
+            # L1: deterministic (always runs)
             actions = self._reflector.reflect(session_id, text, metadata)
             if actions:
-                applied = self._reflector.apply(actions)
+                applied = self._reflector.apply(actions, store=self._store)
                 log.info(
-                    "Reflection for session %s: %d actions proposed, %d applied",
+                    "L1 reflection for session %s: %d actions proposed, %d applied",
                     session_id[:8],
                     len(actions),
                     applied,
                 )
+
+            # L2: LLM-assisted (conditional)
+            if self._reflector.should_trigger_l2(text):
+                await self._run_l2_reflection(session_id, text)
+
         except Exception:
             log.exception("Reflection failed for session %s", session_id[:8])
+
+    async def _run_l2_reflection(self, session_id: str, text: str) -> None:
+        """Run L2 LLM reflection using Sonnet."""
+        if self._graph is None or self._reflector is None:
+            return
+
+        # Gather existing notes context
+        existing_notes = []
+        top = self._graph.top_notes(limit=30, min_importance=0.1)
+        for n in top:
+            meta = self._graph.get_meta(n["path"])
+            if meta:
+                existing_notes.append(meta)
+
+        prompt = self._reflector.build_l2_prompt(text, existing_notes)
+
+        l2_model = self.config.get("reflection", {}).get("llm_model", "claude-sonnet-4-6")
+        log.info("L2 reflection: calling %s for session %s", l2_model, session_id[:8])
+
+        try:
+            response = await self.engine.ask(
+                prompt,
+                model=l2_model,
+                max_turns=1,
+                timeout=60,
+            )
+        except Exception:
+            log.exception("L2 reflection: engine.ask failed")
+            return
+
+        if response.startswith("[Error]"):
+            log.warning("L2 reflection: %s", response)
+            return
+
+        actions = self._reflector.parse_l2_response(response)
+        if actions:
+            applied = self._reflector.apply(actions, store=self._store)
+            log.info(
+                "L2 reflection for session %s: %d actions proposed, %d applied",
+                session_id[:8],
+                len(actions),
+                applied,
+            )
 
     # -- seed files ---------------------------------------------------------
 
