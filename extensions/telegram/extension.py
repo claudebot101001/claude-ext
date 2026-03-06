@@ -68,7 +68,8 @@ class ExtensionImpl(Extension):
         super().configure(engine, config)
         self.token = config["token"]
         self.allowed_users = set(config.get("allowed_users", []))
-        self.working_dir = config.get("working_dir") or os.getcwd()
+        wd = config.get("working_dir")
+        self.working_dir = os.path.expanduser(wd) if wd else os.getcwd()
         self.app: Application | None = None
         self._stream_buffers: dict[str, _StreamBuffer] = {}  # session_id -> buffer
         self._awaiting_text_answer: dict[str, str] = {}  # session_id -> request_id
@@ -1082,7 +1083,7 @@ class ExtensionImpl(Extension):
             extra_context = dict(tpl.get("context", {}))
             # Re-split the remainder after consuming the @template token
             rest = parts[2] if len(parts) > 2 else ""
-            parts = [parts[0]] + rest.split(maxsplit=1) if rest else [parts[0]]
+            parts = [parts[0], *rest.split(maxsplit=1)] if rest else [parts[0]]
 
         # Standard parsing of remaining args: [name] [working_dir] or <dir>
         if len(parts) == 2 and os.path.isdir(self._resolve_dir(parts[1].strip())):
