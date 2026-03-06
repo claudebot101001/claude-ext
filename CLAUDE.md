@@ -204,6 +204,20 @@ The memory extension implements an autonomous agent identity model with encrypte
 
 Topics are searchable via FTS5/BM25 (`memory_search`). The FTS5 index covers all `.md` files automatically.
 
+### MAGMA Subsystem (Knowledge Injection + Reflection)
+
+**Disabled by default.** Controlled by `extensions.memory.magma.enabled` in `config.yaml`.
+
+When `magma.enabled: false` (default):
+- No knowledge notes injected into system prompt
+- No post-task reflection engine
+- KnowledgeGraph + all MCP tools (`memory_search`, `memory_meta`, `memory_relate`, `memory_graph`, `memory_import`) remain fully functional for on-demand use
+
+When `magma.enabled: true`:
+- Knowledge injection customizer is registered, but **only fires for sessions with `context.magma=True`**
+- Reflection engine runs post-task L1 (deterministic) and L2 (LLM) analysis
+- Daily/regular sessions still receive zero knowledge injection unless they explicitly opt in via session context
+
 ### Migration
 
 On first start after upgrade, auto-migrates v1 format:

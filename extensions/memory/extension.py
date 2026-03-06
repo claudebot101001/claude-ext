@@ -72,6 +72,7 @@ class ExtensionImpl(Extension):
         self._personality_key: str | None = None
         self._graph = None
         self._reflector = None
+        self._magma_enabled = False
         self._last_reflect: dict[str, float] = {}  # session_id -> timestamp
         self._injection_cache: dict[
             str, tuple[float, list[str]]
@@ -165,24 +166,29 @@ class ExtensionImpl(Extension):
         self.sm.add_session_customizer(self._constitution_customizer)
         self.sm.add_session_customizer(self._user_profile_customizer)
 
-        ki_config = self.config.get("knowledge_injection", {})
-        if ki_config.get("enabled", True):
-            self.sm.add_session_customizer(self._knowledge_injection_customizer)
+        # 10. MAGMA subsystem (knowledge injection + reflection engine)
+        magma_config = self.config.get("magma", {})
+        self._magma_enabled = magma_config.get("enabled", False)
 
-        # 10. Reflection engine + delivery callback
-        from extensions.memory.reflect import ReflectionEngine
+        if self._magma_enabled:
+            ki_config = self.config.get("knowledge_injection", {})
+            if ki_config.get("enabled", True):
+                self.sm.add_session_customizer(self._knowledge_injection_customizer)
 
-        reflection_config = self.config.get("reflection", {})
-        self._reflector = ReflectionEngine(self._graph, config=reflection_config)
-        self.sm.add_delivery_callback(self._on_delivery)
+            from extensions.memory.reflect import ReflectionEngine
+
+            reflection_config = self.config.get("reflection", {})
+            self._reflector = ReflectionEngine(self._graph, config=reflection_config)
+            self.sm.add_delivery_callback(self._on_delivery)
 
         # 11. Seed files on first run
         self._seed_files(memory_dir)
 
         log.info(
-            "Memory extension started. Store at %s (personality_key=%s)",
+            "Memory extension started. Store at %s (personality_key=%s, magma=%s)",
             memory_dir,
             "yes" if self._personality_key else "no",
+            "enabled" if self._magma_enabled else "disabled",
         )
 
     async def stop(self) -> None:
@@ -202,6 +208,7 @@ class ExtensionImpl(Extension):
             "status": "ok",
             "files": len(files),
             "personality_encrypted": self._personality_key is not None,
+            "magma_enabled": self._magma_enabled,
         }
 
     # -- personality encryption key -----------------------------------------
@@ -336,15 +343,21 @@ class ExtensionImpl(Extension):
     # -- knowledge injection customizer -------------------------------------
 
     def _knowledge_injection_customizer(self, session) -> SessionOverrides | None:
-        """Auto-inject top-importance notes into session system prompt.
+        """Inject knowledge notes into MAGMA-enabled sessions only.
 
-        Three-stage selection:
+        Only fires when session.context['magma'] is truthy.
+        Three-stage selection when active:
         1. If session.context has 'tags', match those first (high weight)
         2. If session.context has 'audit_target', FTS5 fuzzy search (medium weight)
         3. Fill remaining with top-N by effective_importance
         Cached per session for configured TTL.
         """
         if self._graph is None:
+            return None
+
+        # Only inject into sessions that explicitly request MAGMA knowledge
+        context = getattr(session, "context", {}) or {}
+        if not context.get("magma"):
             return None
 
         ki_config = self.config.get("knowledge_injection", {})

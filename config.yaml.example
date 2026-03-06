@@ -97,7 +97,20 @@ extensions:
     # Personality encryption requires vault to be enabled and listed before memory.
     # On first run, auto-migrates from v1 format (creates constitution.md, TOPICS_INDEX.md,
     # archives daily/ logs, creates users/ and events/ directories).
-    {}
+    magma:
+      enabled: false    # MAGMA subsystem (knowledge injection + reflection engine)
+                        # When false (default): no auto-injection into system prompt,
+                        # no post-task reflection. Knowledge graph + MCP tools remain
+                        # functional for on-demand use via memory_search.
+                        # When true: sessions with context.magma=True get knowledge
+                        # injection; reflection engine runs post-task analysis.
+    # knowledge_injection:        # Only active when magma.enabled is true
+    #   max_notes: 10
+    #   max_chars: 8000
+    #   cache_ttl_seconds: 60
+    # reflection:                 # Only active when magma.enabled is true
+    #   llm_enabled: false
+    #   llm_model: claude-sonnet-4-6
 
   heartbeat:
     interval: 1800                   # Base interval in seconds (default 30 minutes)
