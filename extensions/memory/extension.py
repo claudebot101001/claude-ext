@@ -1,23 +1,28 @@
-"""Memory extension — three-layer identity system + persistent knowledge store.
+"""Memory extension — three-layer identity + knowledge graph + persistent store.
 
 Layers:
 1. Constitution: human-authored rules, AI read-only, injected into every session
 2. Personality: AI self-developed principles, Fernet-encrypted, AI-managed via MCP
 3. User Profile: per-user aspirations, injected per-session via customizer
 
+Knowledge graph: MAGMA-style structured notes with tags, keywords, relations,
+importance/decay scoring. Post-task reflection for graph evolution.
+
 Knowledge store: general.md (identity + topic index, force-read at session start),
 topics/<name>.md (deep knowledge), searchable via FTS5. Personality encryption uses Vault-managed
 key via bridge RPC; all other memory ops use direct file I/O.
 """
 
+import asyncio
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 from core.extension import Extension
 from core.session import SessionOverrides
-from extensions.memory.migration import migrate, needs_migration
+from extensions.memory.migration import migrate, migrate_v3, needs_migration, needs_migration_v3
 from extensions.memory.store import MemoryStore
 
 log = logging.getLogger(__name__)
@@ -65,6 +70,12 @@ class ExtensionImpl(Extension):
         super().configure(engine, config)
         self._store: MemoryStore | None = None
         self._personality_key: str | None = None
+        self._graph = None
+        self._reflector = None
+        self._last_reflect: dict[str, float] = {}  # session_id -> timestamp
+        self._injection_cache: dict[
+            str, tuple[float, list[str]]
+        ] = {}  # session_id -> (ts, snippets)
 
     @property
     def sm(self):
@@ -77,9 +88,20 @@ class ExtensionImpl(Extension):
         memory_dir = Path(self.sm.base_dir) / "memory"
         self._store = MemoryStore(memory_dir)
 
-        # 2. Run v1→v2 migration if needed
+        # 2. Run migrations if needed
         if needs_migration(memory_dir):
             migrate(memory_dir)
+        if needs_migration_v3(memory_dir):
+            migrate_v3(memory_dir)
+
+        # 2b. Initialize KnowledgeGraph (own DB connection)
+        from extensions.memory.graph import KnowledgeGraph
+
+        self._graph = KnowledgeGraph(
+            memory_dir,
+            half_life_days=self.config.get("knowledge_injection", {}).get("half_life_days", 30),
+        )
+        self.engine.services["knowledge_graph"] = self._graph
 
         # 3. Register shared service (used by heartbeat etc.)
         self.engine.services["memory"] = self._store
@@ -101,10 +123,23 @@ class ExtensionImpl(Extension):
             },
             tools=[
                 {"name": "memory_read", "description": "Read a memory file"},
-                {"name": "memory_write", "description": "Overwrite/create a memory file"},
+                {
+                    "name": "memory_write",
+                    "description": "Overwrite/create a memory file (supports frontmatter)",
+                },
                 {"name": "memory_append", "description": "Append content with UTC timestamp"},
-                {"name": "memory_search", "description": "Search across all memory files"},
+                {"name": "memory_search", "description": "Search with tag/importance filtering"},
                 {"name": "memory_list", "description": "List memory files by modification time"},
+                {
+                    "name": "memory_meta",
+                    "description": "Get/set note metadata (tags, keywords, importance)",
+                },
+                {"name": "memory_relate", "description": "Add/remove/list knowledge graph edges"},
+                {"name": "memory_graph", "description": "Graph traversal, link suggestions, stats"},
+                {
+                    "name": "memory_import",
+                    "description": "Batch import: content + meta + relations",
+                },
                 {
                     "name": "personality_read",
                     "description": "Read AI personality principles (decrypted)",
@@ -126,11 +161,22 @@ class ExtensionImpl(Extension):
         # 8. System prompt (tagged so it can be excluded per-session)
         self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="memory")
 
-        # 8. Session customizers — inject constitution + user profile per-session
+        # 9. Session customizers — inject constitution + user profile + knowledge per-session
         self.sm.add_session_customizer(self._constitution_customizer)
         self.sm.add_session_customizer(self._user_profile_customizer)
 
-        # 9. Seed files on first run
+        ki_config = self.config.get("knowledge_injection", {})
+        if ki_config.get("enabled", True):
+            self.sm.add_session_customizer(self._knowledge_injection_customizer)
+
+        # 10. Reflection engine + delivery callback
+        from extensions.memory.reflect import ReflectionEngine
+
+        reflection_config = self.config.get("reflection", {})
+        self._reflector = ReflectionEngine(self._graph, config=reflection_config)
+        self.sm.add_delivery_callback(self._on_delivery)
+
+        # 11. Seed files on first run
         self._seed_files(memory_dir)
 
         log.info(
@@ -141,7 +187,11 @@ class ExtensionImpl(Extension):
 
     async def stop(self) -> None:
         self._personality_key = None
+        if self._graph:
+            self._graph.close()
+            self._graph = None
         self.engine.services.pop("memory", None)
+        self.engine.services.pop("knowledge_graph", None)
         log.info("Memory extension stopped.")
 
     async def health_check(self) -> dict:
@@ -282,6 +332,162 @@ class ExtensionImpl(Extension):
         return SessionOverrides(
             extra_system_prompt=[f"## USER PROFILE (user_id={user_id})\n{content}"]
         )
+
+    # -- knowledge injection customizer -------------------------------------
+
+    def _knowledge_injection_customizer(self, session) -> SessionOverrides | None:
+        """Auto-inject top-importance notes into session system prompt.
+
+        Two-stage selection:
+        1. If session.context has 'tags', match those first (high weight)
+        2. Fall back to top-N by effective_importance
+        Cached per session for configured TTL.
+        """
+        if self._graph is None:
+            return None
+
+        ki_config = self.config.get("knowledge_injection", {})
+        max_chars = ki_config.get("max_chars", 8000)
+        max_notes = ki_config.get("max_notes", 10)
+        cache_ttl = ki_config.get("cache_ttl_seconds", 60)
+
+        session_id = getattr(session, "id", None) or ""
+
+        # Prune stale cache entries (cap at 100)
+        now = time.time()
+        if len(self._injection_cache) > 100:
+            stale = [k for k, (ts, _) in self._injection_cache.items() if now - ts > cache_ttl]
+            for k in stale:
+                del self._injection_cache[k]
+
+        # Check cache
+        if session_id in self._injection_cache:
+            cached_ts, cached_snippets = self._injection_cache[session_id]
+            if now - cached_ts < cache_ttl and cached_snippets:
+                return SessionOverrides(
+                    extra_system_prompt=[
+                        "## KNOWLEDGE CONTEXT (auto-injected)\n" + "\n---\n".join(cached_snippets)
+                    ]
+                )
+
+        # Stage 1: Context tag matching
+        context = getattr(session, "context", {}) or {}
+        context_tags = context.get("tags", [])
+
+        candidates = []
+        seen = set()
+
+        if context_tags:
+            tag_results = self._graph.top_notes(limit=max_notes, tags=context_tags)
+            for r in tag_results:
+                candidates.append(r)
+                seen.add(r["path"])
+
+        # Stage 2: Fill remaining with top by importance
+        remaining = max_notes - len(candidates)
+        if remaining > 0:
+            top_results = self._graph.top_notes(limit=remaining + len(seen))
+            for r in top_results:
+                if r["path"] not in seen:
+                    candidates.append(r)
+                    if len(candidates) >= max_notes:
+                        break
+
+        if not candidates:
+            return None
+
+        # Build snippets (first heading + first paragraph, max 500 chars each)
+        snippets = []
+        total_chars = 0
+        for c in candidates:
+            if total_chars >= max_chars:
+                break
+            if self._store is None:
+                break
+            content = self._store.read(c["path"])
+            if not content:
+                continue
+            from extensions.memory.frontmatter import strip_frontmatter
+
+            body = strip_frontmatter(content)
+            snippet = self._truncate_note(body, 500)
+            snippet_with_meta = f"**{c['path']}** (imp={c['effective_importance']})\n{snippet}"
+            if total_chars + len(snippet_with_meta) > max_chars:
+                break
+            snippets.append(snippet_with_meta)
+            total_chars += len(snippet_with_meta)
+
+        if not snippets:
+            return None
+
+        # Cache
+        self._injection_cache[session_id] = (now, snippets)
+
+        return SessionOverrides(
+            extra_system_prompt=[
+                "## KNOWLEDGE CONTEXT (auto-injected)\n" + "\n---\n".join(snippets)
+            ]
+        )
+
+    @staticmethod
+    def _truncate_note(body: str, max_chars: int = 500) -> str:
+        """Truncate to first heading + first paragraph."""
+        lines = body.strip().splitlines()
+        result = []
+        total = 0
+        for line in lines:
+            if total + len(line) > max_chars:
+                result.append("...")
+                break
+            result.append(line)
+            total += len(line) + 1
+            # Stop after first blank line following content
+            if total > 50 and line.strip() == "":
+                break
+        return "\n".join(result)
+
+    # -- delivery callback (reflection) -------------------------------------
+
+    async def _on_delivery(self, session_id: str, text: str, metadata: dict) -> None:
+        """Post-task reflection via delivery callback."""
+        if not metadata.get("is_final"):
+            return
+        # Skip heartbeat/subagent sessions
+        if metadata.get("is_heartbeat") or metadata.get("is_subagent"):
+            return
+        if self._reflector is None:
+            return
+
+        # Rate limit: 1 per session per 5 min
+        now = time.time()
+        last = self._last_reflect.get(session_id, 0)
+        if now - last < 300:
+            return
+        self._last_reflect[session_id] = now
+
+        # Prune stale entries (older than 1 hour)
+        if len(self._last_reflect) > 100:
+            stale = [k for k, ts in self._last_reflect.items() if now - ts > 3600]
+            for k in stale:
+                del self._last_reflect[k]
+
+        # Run reflection in background to not block delivery
+        asyncio.create_task(self._safe_reflect(session_id, text, metadata))
+
+    async def _safe_reflect(self, session_id: str, text: str, metadata: dict) -> None:
+        """Wrap reflection in try/except to prevent unhandled task exceptions."""
+        try:
+            actions = self._reflector.reflect(session_id, text, metadata)
+            if actions:
+                applied = self._reflector.apply(actions)
+                log.info(
+                    "Reflection for session %s: %d actions proposed, %d applied",
+                    session_id[:8],
+                    len(actions),
+                    applied,
+                )
+        except Exception:
+            log.exception("Reflection failed for session %s", session_id[:8])
 
     # -- seed files ---------------------------------------------------------
 

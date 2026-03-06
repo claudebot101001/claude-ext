@@ -107,6 +107,32 @@ class MemoryIndex:
                 content,
                 tokenize='porter unicode61'
             );
+
+            -- v3: Knowledge graph tables
+            CREATE TABLE IF NOT EXISTS note_meta (
+                path TEXT PRIMARY KEY,
+                importance REAL NOT NULL DEFAULT 0.5,
+                created TEXT NOT NULL DEFAULT '',
+                accessed TEXT NOT NULL DEFAULT '',
+                access_count INTEGER NOT NULL DEFAULT 0,
+                keywords TEXT NOT NULL DEFAULT '[]',
+                embedding BLOB DEFAULT NULL
+            );
+            CREATE TABLE IF NOT EXISTS note_tags (
+                path TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                PRIMARY KEY (path, tag)
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_tags_tag ON note_tags(tag);
+            CREATE TABLE IF NOT EXISTS note_relations (
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                type TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 1.0,
+                origin TEXT NOT NULL DEFAULT 'api',
+                PRIMARY KEY (source, target, type)
+            );
+            CREATE INDEX IF NOT EXISTS idx_note_relations_target ON note_relations(target);
             """
         )
 
@@ -198,7 +224,7 @@ class MemoryIndex:
     # -- internal helpers ----------------------------------------------------
 
     def _index_file(self, rel_path: str, mtime_ns: int) -> None:
-        """Chunk a Markdown file and insert into FTS5."""
+        """Chunk a Markdown file and insert into FTS5 + sync graph metadata."""
         assert self._db is not None
         filepath = self.memory_dir / rel_path
         try:
@@ -206,16 +232,24 @@ class MemoryIndex:
         except (OSError, UnicodeDecodeError):
             return
 
-        # Remove old chunks
-        self._remove_file(rel_path, update_meta=False)
+        # Remove old chunks (FTS5 only, not graph metadata)
+        self._db.execute("DELETE FROM chunks WHERE path = ?", (rel_path,))
 
-        # Chunk and insert
-        chunks = _chunk_markdown(text)
+        # Parse frontmatter and index body
+        from extensions.memory.frontmatter import parse_frontmatter
+
+        meta, body = parse_frontmatter(text)
+
+        # Chunk body (not full text with frontmatter) and insert
+        chunks = _chunk_markdown(body)
         for heading, chunk_text in chunks:
             self._db.execute(
                 "INSERT INTO chunks (path, heading, content) VALUES (?, ?, ?)",
                 (rel_path, heading, chunk_text),
             )
+
+        # Sync frontmatter metadata to graph tables
+        self._sync_graph_meta(rel_path, meta, filepath)
 
         # Update mtime
         self._db.execute(
@@ -224,12 +258,84 @@ class MemoryIndex:
         )
         self._db.commit()
 
+    def _sync_graph_meta(self, rel_path: str, meta, filepath) -> None:
+        """Sync parsed frontmatter metadata to note_meta/note_tags/note_relations."""
+        assert self._db is not None
+        from datetime import UTC, datetime as dt
+        import json as _json
+
+        # Preserve existing access tracking
+        existing = self._db.execute(
+            "SELECT accessed, access_count FROM note_meta WHERE path = ?",
+            (rel_path,),
+        ).fetchone()
+
+        now_iso = dt.now(UTC).isoformat()
+        accessed = existing[0] if existing else now_iso
+        access_count = existing[1] if existing else 0
+
+        # Fallback created to file ctime if not in frontmatter
+        created = meta.created
+        if not created:
+            try:
+                stat = filepath.stat()
+                created = dt.fromtimestamp(stat.st_ctime, tz=UTC).isoformat()
+            except OSError:
+                created = now_iso
+
+        # Upsert note_meta
+        self._db.execute(
+            "INSERT OR REPLACE INTO note_meta "
+            "(path, importance, created, accessed, access_count, keywords) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                rel_path,
+                meta.importance,
+                created,
+                accessed,
+                access_count,
+                _json.dumps(meta.keywords),
+            ),
+        )
+
+        # Sync tags
+        self._db.execute("DELETE FROM note_tags WHERE path = ?", (rel_path,))
+        for tag in meta.tags:
+            tag = tag.strip()
+            if tag:
+                self._db.execute(
+                    "INSERT OR IGNORE INTO note_tags (path, tag) VALUES (?, ?)",
+                    (rel_path, tag),
+                )
+
+        # Sync relations from frontmatter (only delete frontmatter-origin, preserve API-added)
+        self._db.execute(
+            "DELETE FROM note_relations WHERE source = ? AND origin = 'frontmatter'",
+            (rel_path,),
+        )
+        from extensions.memory.frontmatter import validate_relation_type
+
+        for rel in meta.relations:
+            if validate_relation_type(rel.type):
+                self._db.execute(
+                    "INSERT OR REPLACE INTO note_relations (source, target, type, weight, origin) "
+                    "VALUES (?, ?, ?, ?, 'frontmatter')",
+                    (rel_path, rel.target, rel.type, rel.weight),
+                )
+
     def _remove_file(self, rel_path: str, update_meta: bool = True) -> None:
-        """Remove all chunks and metadata for a file."""
+        """Remove all chunks, graph metadata, and file_meta for a file."""
         assert self._db is not None
         self._db.execute("DELETE FROM chunks WHERE path = ?", (rel_path,))
         if update_meta:
             self._db.execute("DELETE FROM file_meta WHERE path = ?", (rel_path,))
+            # Cascade delete graph data (both directions for relations)
+            self._db.execute("DELETE FROM note_meta WHERE path = ?", (rel_path,))
+            self._db.execute("DELETE FROM note_tags WHERE path = ?", (rel_path,))
+            self._db.execute(
+                "DELETE FROM note_relations WHERE source = ? OR target = ?",
+                (rel_path, rel_path),
+            )
             self._db.commit()
 
 
@@ -586,6 +692,25 @@ class MemoryStore:
                 )
         entries.sort(key=lambda e: e["modified"], reverse=True)
         return entries
+
+    def touch(self, path: str) -> None:
+        """Update access timestamp and count in SQLite. No file write."""
+        if not self._index.available or self._index._db is None:
+            return
+        now_iso = datetime.now(UTC).isoformat()
+        try:
+            self._index._db.execute(
+                "UPDATE note_meta SET accessed = ?, access_count = access_count + 1 WHERE path = ?",
+                (now_iso, path),
+            )
+            self._index._db.commit()
+        except sqlite3.Error:
+            pass  # best-effort
+
+    @property
+    def graph_db_path(self) -> Path:
+        """Path to the shared search_index.db (for KnowledgeGraph's own connection)."""
+        return self.memory_dir / _INDEX_DB
 
     @staticmethod
     def today_log_path() -> str:

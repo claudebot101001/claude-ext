@@ -109,7 +109,8 @@ class TestMemoryMCPSearch:
         """Regex fallback results should use line:text format."""
         (memory_dir / "notes.md").write_text("error code 404\nok 200", encoding="utf-8")
         result = mcp.handlers["memory_search"]({"query": r"code \d+"})
-        assert "notes.md:1:" in result
+        assert "notes.md:1" in result
+        assert "error code 404" in result
 
 
 class TestMemoryMCPList:

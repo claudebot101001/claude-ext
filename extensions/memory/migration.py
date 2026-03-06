@@ -1,19 +1,21 @@
-"""One-time migration from old memory format (v1) to three-layer identity (v2).
+"""One-time migrations for the memory extension.
 
-Migration steps:
-1. Archive daily/ logs into topics/daily-archive.md, remove daily/
-2. Seed constitution.md (human-editable, AI read-only)
-3. Create users/ and events/ directories
-4. Write .migrated_v2 marker
+v1 → v2: Archive daily/ logs, seed constitution, create directories.
+v2 → v3: Knowledge graph tables, seed note_meta from file stats.
 """
 
+import json
 import logging
 import shutil
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 _MIGRATION_MARKER = ".migrated_v2"
+_MIGRATION_V3_MARKER = ".migrated_v3"
+_INDEX_DB = ".search_index.db"
 
 
 def needs_migration(memory_dir: Path) -> bool:
@@ -86,3 +88,116 @@ def _seed_constitution(memory_dir: Path) -> None:
         encoding="utf-8",
     )
     log.info("Created seed constitution.md")
+
+
+# ---------------------------------------------------------------------------
+# v2 → v3: Knowledge graph tables + seed note_meta
+# ---------------------------------------------------------------------------
+
+
+def needs_migration_v3(memory_dir: Path) -> bool:
+    """Check if migration from v2 to v3 is needed."""
+    return not (memory_dir / _MIGRATION_V3_MARKER).exists()
+
+
+def migrate_v3(memory_dir: Path) -> None:
+    """Run v2 → v3 migration: seed note_meta from file stats.
+
+    Schema tables are created by MemoryIndex._init_schema() (CREATE IF NOT EXISTS),
+    so this migration only needs to populate initial data.
+    """
+    if not needs_migration_v3(memory_dir):
+        return
+
+    log.info("Running memory v2 -> v3 migration (knowledge graph)...")
+
+    db_path = memory_dir / _INDEX_DB
+    if not db_path.exists():
+        # DB will be created by MemoryIndex; just write marker
+        (memory_dir / _MIGRATION_V3_MARKER).write_text("v3\n", encoding="utf-8")
+        return
+
+    try:
+        db = sqlite3.connect(str(db_path))
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+    except sqlite3.Error:
+        log.exception("Failed to open DB for v3 migration")
+        return
+
+    try:
+        _seed_note_meta(db, memory_dir)
+        db.commit()
+    except sqlite3.Error:
+        log.exception("v3 migration failed")
+    finally:
+        db.close()
+
+    (memory_dir / _MIGRATION_V3_MARKER).write_text("v3\n", encoding="utf-8")
+    log.info("Memory migration v2 -> v3 complete")
+
+
+def _seed_note_meta(db: sqlite3.Connection, memory_dir: Path) -> None:
+    """Populate note_meta from existing .md files' filesystem stats."""
+    # Importance heuristics by path
+    importance_map = {
+        "constitution.md": 1.0,
+        "general.md": 0.9,
+    }
+    dir_importance = {
+        "events": 0.4,
+        "users": 0.6,
+        "topics": 0.5,
+    }
+    dir_tags = {
+        "topics": "topic",
+        "events": "event",
+        "users": "user_profile",
+    }
+
+    for filepath in sorted(memory_dir.rglob("*.md")):
+        if not filepath.is_file():
+            continue
+        rel = str(filepath.relative_to(memory_dir))
+        if rel.startswith("."):
+            continue
+
+        # Check if already seeded
+        existing = db.execute("SELECT path FROM note_meta WHERE path = ?", (rel,)).fetchone()
+        if existing:
+            continue
+
+        try:
+            stat = filepath.stat()
+        except OSError:
+            continue
+
+        # Determine importance
+        importance = importance_map.get(rel)
+        if importance is None:
+            parts = Path(rel).parts
+            if parts:
+                importance = dir_importance.get(parts[0], 0.5)
+            else:
+                importance = 0.5
+
+        created = datetime.fromtimestamp(stat.st_ctime, tz=UTC).isoformat()
+        accessed = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+
+        db.execute(
+            "INSERT OR IGNORE INTO note_meta "
+            "(path, importance, created, accessed, access_count, keywords) "
+            "VALUES (?, ?, ?, ?, 0, '[]')",
+            (rel, importance, created, accessed),
+        )
+
+        # Infer tags from directory
+        parts = Path(rel).parts
+        if parts and parts[0] in dir_tags:
+            tag = dir_tags[parts[0]]
+            db.execute(
+                "INSERT OR IGNORE INTO note_tags (path, tag) VALUES (?, ?)",
+                (rel, tag),
+            )
+
+    log.info("Seeded note_meta from filesystem stats")
