@@ -4,7 +4,6 @@ v1 → v2: Archive daily/ logs, seed constitution, create directories.
 v2 → v3: Knowledge graph tables, seed note_meta from file stats.
 """
 
-import json
 import logging
 import shutil
 import sqlite3

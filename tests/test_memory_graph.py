@@ -1,6 +1,5 @@
 """Tests for MAGMA knowledge graph: frontmatter, graph, reflect, migration v3."""
 
-import json
 import sqlite3
 
 import pytest

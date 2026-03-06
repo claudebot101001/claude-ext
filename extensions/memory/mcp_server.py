@@ -495,9 +495,8 @@ class MemoryMCPServer(MCPServerBase):
             meta = graph.get_meta(file_path)
 
             # Tag filter
-            if filter_tags and meta:
-                if not set(meta.get("tags", [])) & set(filter_tags):
-                    continue
+            if filter_tags and meta and not set(meta.get("tags", [])) & set(filter_tags):
+                continue
 
             # Importance filter
             eff_imp = meta.get("effective_importance", 0.5) if meta else 0.5
@@ -640,7 +639,7 @@ class MemoryMCPServer(MCPServerBase):
 
         elif action == "remove":
             ok = graph.remove_relation(source, target, rel_type)
-            return f"Relation removed" if ok else f"No such relation found"
+            return "Relation removed" if ok else "No such relation found"
 
         return f"Error: Unknown action '{action}'. Use 'add', 'remove', or 'list'."
 
@@ -701,15 +700,19 @@ class MemoryMCPServer(MCPServerBase):
         # Add relations to frontmatter
         raw_rels = args.get("relations", [])
         for r in raw_rels:
-            if isinstance(r, dict) and r.get("target") and r.get("type"):
-                if validate_relation_type(r["type"]):
-                    meta.relations.append(
-                        Relation(
-                            target=r["target"],
-                            type=r["type"],
-                            weight=r.get("weight", 1.0),
-                        )
+            if (
+                isinstance(r, dict)
+                and r.get("target")
+                and r.get("type")
+                and validate_relation_type(r["type"])
+            ):
+                meta.relations.append(
+                    Relation(
+                        target=r["target"],
+                        type=r["type"],
+                        weight=r.get("weight", 1.0),
                     )
+                )
 
         full_content = serialize_frontmatter(meta, content)
 
@@ -724,9 +727,13 @@ class MemoryMCPServer(MCPServerBase):
         # that might not be in frontmatter's outgoing edges)
         graph = self._get_graph()
         for r in raw_rels:
-            if isinstance(r, dict) and r.get("target") and r.get("type"):
-                if validate_relation_type(r["type"]):
-                    graph.add_relation(path, r["target"], r["type"], r.get("weight", 1.0))
+            if (
+                isinstance(r, dict)
+                and r.get("target")
+                and r.get("type")
+                and validate_relation_type(r["type"])
+            ):
+                graph.add_relation(path, r["target"], r["type"], r.get("weight", 1.0))
 
         parts = [f"Imported {nbytes} bytes to {path}"]
         if meta.tags:

@@ -11,7 +11,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from extensions.memory.frontmatter import NoteMeta, Relation, validate_relation_type
+from extensions.memory.frontmatter import NoteMeta, validate_relation_type
 
 log = logging.getLogger(__name__)
 

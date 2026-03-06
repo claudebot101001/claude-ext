@@ -261,8 +261,9 @@ class MemoryIndex:
     def _sync_graph_meta(self, rel_path: str, meta, filepath) -> None:
         """Sync parsed frontmatter metadata to note_meta/note_tags/note_relations."""
         assert self._db is not None
-        from datetime import UTC, datetime as dt
         import json as _json
+        from datetime import UTC
+        from datetime import datetime as dt
 
         # Preserve existing access tracking
         existing = self._db.execute(

@@ -23,12 +23,92 @@ log = logging.getLogger(__name__)
 
 # Words to ignore in keyword extraction
 _STOP_WORDS = frozenset(
-    "the a an is are was were be been being have has had do does did will would "
-    "shall should may might can could of in to for on with at by from as into "
-    "through during before after above below between under again further then "
-    "once here there when where why how all each every both few more most other "
-    "some such no nor not only own same so than too very just don't should've "
-    "that this it its and but or if".split()
+    [
+        "the",
+        "a",
+        "an",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "shall",
+        "should",
+        "may",
+        "might",
+        "can",
+        "could",
+        "of",
+        "in",
+        "to",
+        "for",
+        "on",
+        "with",
+        "at",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "no",
+        "nor",
+        "not",
+        "only",
+        "own",
+        "same",
+        "so",
+        "than",
+        "too",
+        "very",
+        "just",
+        "don't",
+        "should've",
+        "that",
+        "this",
+        "it",
+        "its",
+        "and",
+        "but",
+        "or",
+        "if",
+    ]
 )
 
 # Memory path pattern (relative .md paths mentioned in result text)
@@ -194,7 +274,4 @@ class ReflectionEngine:
             "privilege escalation",
         }
         text_lower = result_text.lower()
-        if any(kw in text_lower for kw in vuln_keywords):
-            return True
-
-        return False
+        return any(kw in text_lower for kw in vuln_keywords)
