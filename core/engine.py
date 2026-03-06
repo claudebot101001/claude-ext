@@ -66,12 +66,12 @@ class ClaudeEngine:
 
     def _build_cmd(
         self,
-        prompt: str,
         continue_session: bool = False,
         model: str | None = None,
         max_turns: int | None = None,
     ) -> list[str]:
-        cmd = ["claude", "-p", prompt, "--output-format", "json"]
+        # Prompt passed via stdin (`-p -`) to avoid OS arg length limits
+        cmd = ["claude", "-p", "-", "--output-format", "json"]
         effective_model = model or self.model
         if effective_model:
             cmd.extend(["--model", effective_model])
@@ -101,18 +101,21 @@ class ClaudeEngine:
             model: Override the default model (e.g. 'claude-sonnet-4-6' for lightweight tasks).
             max_turns: Override the default max_turns.
         """
-        cmd = self._build_cmd(prompt, continue_session, model=model, max_turns=max_turns)
+        cmd = self._build_cmd(continue_session, model=model, max_turns=max_turns)
         log.info("Running: %s", " ".join(cmd[:6]))
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd,
         )
 
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(input=prompt.encode()), timeout=timeout
+            )
         except TimeoutError:
             proc.kill()
             await proc.wait()
