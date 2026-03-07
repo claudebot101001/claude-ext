@@ -40,6 +40,7 @@ from extensions.memory.store import MemoryStore  # noqa: E402
 log = logging.getLogger("batch_import")
 
 MEMORY_DIR = Path.home() / ".claude-ext" / "memory"
+DOMAIN_DIR = MEMORY_DIR / "domains" / "vuln"
 WRITEUPS_DIR = Path.home() / "writeups"
 PROGRESS_FILE = "topics/batch-progress.md"
 LOCKFILE = Path.home() / ".claude-ext" / "batch_import.lock"
@@ -60,14 +61,14 @@ def _kill_proc(proc: asyncio.subprocess.Process) -> None:
 
 
 # Sonnet invocation
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-haiku-4-5-20251001"
 MAX_TURNS = 1
 TIMEOUT = 120  # seconds per report
 
 
 def load_batch_prompt() -> str:
     """Load the batch processing prompt from memory."""
-    path = MEMORY_DIR / "topics" / "batch-processing-prompt.md"
+    path = DOMAIN_DIR / "topics" / "batch-processing-prompt.md"
     if not path.exists():
         raise FileNotFoundError(f"Batch processing prompt not found at {path}")
     text = path.read_text(encoding="utf-8")
@@ -95,8 +96,8 @@ def collect_reports(severity: str = "critical", limit: int = 0) -> list[Path]:
 def load_existing_notes(store: MemoryStore, graph: KnowledgeGraph) -> list[dict]:
     """Load existing vulnerability notes for dedup context."""
     notes = []
-    for path in sorted((MEMORY_DIR / "topics").glob("vuln-*.md")):
-        rel = str(path.relative_to(MEMORY_DIR))
+    for path in sorted((DOMAIN_DIR / "topics").glob("vuln-*.md")):
+        rel = str(path.relative_to(DOMAIN_DIR))
         meta = graph.get_meta(rel)
         if meta:
             notes.append(
@@ -113,7 +114,7 @@ def load_existing_notes(store: MemoryStore, graph: KnowledgeGraph) -> list[dict]
 def load_processed_ids(store: MemoryStore) -> set[str]:
     """Load set of already-processed report IDs from progress file."""
     ids = set()
-    path = MEMORY_DIR / PROGRESS_FILE
+    path = DOMAIN_DIR / PROGRESS_FILE
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -306,7 +307,7 @@ def apply_create(data: dict, store: MemoryStore, graph: KnowledgeGraph) -> str:
         return f"REJECTED: invalid path {path!r}"
 
     # Check if file already exists
-    if (MEMORY_DIR / path).exists():
+    if (DOMAIN_DIR / path).exists():
         return f"SKIPPED: {path} already exists"
 
     # Build note content
@@ -387,6 +388,23 @@ def apply_create(data: dict, store: MemoryStore, graph: KnowledgeGraph) -> str:
     return f"CREATED: {path} ({len(tags)} tags, {len(keywords)} keywords)"
 
 
+MAX_INSTANCES = 5  # Max historical instances per note
+MAX_INSTANCES_PER_PROTOCOL = 3  # Max instances from same protocol (allows genuine variants)
+
+
+def _count_instances(body: str) -> tuple[int, dict[str, int]]:
+    """Count historical instances total and per-protocol."""
+    total = 0
+    per_proto: dict[str, int] = {}
+    for line in body.splitlines():
+        if line.startswith("- Protocol: "):
+            total += 1
+            # Extract protocol name: "- Protocol: Foo (Bar.sol), ..."
+            proto = line.split(",")[0].replace("- Protocol: ", "").strip()
+            per_proto[proto] = per_proto.get(proto, 0) + 1
+    return total, per_proto
+
+
 def apply_append(data: dict, store: MemoryStore, graph: KnowledgeGraph) -> str:
     """Apply an 'append' action — add variant to existing note."""
     existing_path = data.get("existing_path", "")
@@ -404,53 +422,74 @@ def apply_append(data: dict, store: MemoryStore, graph: KnowledgeGraph) -> str:
 
     # Add new historical instance (skip if report_id already present)
     hist = data.get("historical_instance", {})
+    instance_added = False
     if hist:
         rid = hist.get("report_id", "")
         if rid and rid in body:
             return f"SKIPPED: {existing_path} already contains {rid}"
 
+        # Check instance caps before appending
+        total, per_proto = _count_instances(body)
         proto = hist.get("protocol", "Unknown")
         contract = hist.get("contract", "")
-        sev = hist.get("severity", "Critical")
-        desc = hist.get("description", "")
         label = f"{proto} ({contract})" if contract else proto
-        instance_line = f"\n- Protocol: {label}, Severity: {sev}, Report: {rid}"
-        if desc:
-            instance_line += f"\n  - {desc}"
 
-        # Find Historical Instances section and append
-        if "## Historical Instances" in body:
-            # Insert before the next ## section or at end
-            sections = body.split("## Historical Instances")
-            after = sections[1]
-            # Find the next ## heading
-            next_heading = after.find("\n## ")
-            if next_heading != -1:
-                after = after[:next_heading] + instance_line + "\n" + after[next_heading:]
-            else:
-                after = after.rstrip() + instance_line + "\n"
-            body = sections[0] + "## Historical Instances" + after
+        if total >= MAX_INSTANCES:
+            # Still accept keywords/variants, just skip the instance
+            log.debug(
+                "Instance cap (%d) reached for %s, skipping instance", MAX_INSTANCES, existing_path
+            )
+        elif per_proto.get(label, 0) >= MAX_INSTANCES_PER_PROTOCOL:
+            log.debug("Protocol cap for %s in %s, skipping instance", label, existing_path)
         else:
-            body += f"\n## Historical Instances{instance_line}\n"
+            sev = hist.get("severity", "Critical")
+            desc = hist.get("description", "")
+            instance_line = f"\n- Protocol: {label}, Severity: {sev}, Report: {rid}"
+            if desc:
+                instance_line += f"\n  - {desc}"
+
+            # Find Historical Instances section and append
+            if "## Historical Instances" in body:
+                sections = body.split("## Historical Instances")
+                after = sections[1]
+                next_heading = after.find("\n## ")
+                if next_heading != -1:
+                    after = after[:next_heading] + instance_line + "\n" + after[next_heading:]
+                else:
+                    after = after.rstrip() + instance_line + "\n"
+                body = sections[0] + "## Historical Instances" + after
+            else:
+                body += f"\n## Historical Instances{instance_line}\n"
+            instance_added = True
 
     # Add new variant
     new_variant = data.get("new_variant")
     if new_variant and "## Variants" in body:
         body = body.replace("## Variants", f"## Variants\n- {new_variant}", 1)
 
-    # Add new keywords
+    # Add new keywords (cap at 30 to prevent keyword bloat)
     new_kw = data.get("new_keywords", [])
+    added_kw = 0
     if new_kw:
         existing_kw = set(meta.keywords)
         for kw in new_kw:
+            if len(meta.keywords) >= 30:
+                break
             if str(kw) not in existing_kw:
                 meta.keywords.append(str(kw))
+                existing_kw.add(str(kw))
+                added_kw += 1
+
+    if not instance_added and added_kw == 0 and not new_variant:
+        return f"SKIPPED: {existing_path} caps reached, nothing to add"
 
     # Rewrite file
     full_content = serialize_frontmatter(meta, body)
     store.write(existing_path, full_content)
 
-    return f"APPENDED: {existing_path} (+{len(new_kw)} keywords, instance: {hist.get('report_id', '?')})"
+    return (
+        f"APPENDED: {existing_path} (+{added_kw} keywords, instance: {hist.get('report_id', '?')})"
+    )
 
 
 def record_progress(store: MemoryStore, report_id: str, report_path: Path, result: str) -> None:
@@ -612,9 +651,9 @@ async def main() -> None:
 
 
 async def _run(args: argparse.Namespace, lock_fd: int) -> None:
-    # Initialize store + graph
-    store = MemoryStore(MEMORY_DIR)
-    graph = KnowledgeGraph(MEMORY_DIR)
+    # Initialize store + graph (domain-scoped)
+    store = MemoryStore(DOMAIN_DIR)
+    graph = KnowledgeGraph(DOMAIN_DIR)
 
     # Force index sync so existing notes are visible
     store._index.ensure_index()
@@ -646,7 +685,7 @@ async def _run(args: argparse.Namespace, lock_fd: int) -> None:
         return
 
     # Initialize progress file if needed
-    if not (MEMORY_DIR / PROGRESS_FILE).exists():
+    if not (DOMAIN_DIR / PROGRESS_FILE).exists():
         store.write(
             PROGRESS_FILE,
             "# Batch Processing Progress\n\nTrack processed reports to avoid reprocessing.\n\n## Processed Reports\n",
