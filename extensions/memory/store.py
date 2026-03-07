@@ -61,8 +61,9 @@ class MemoryIndex:
     Multiple processes can share the same DB safely via WAL mode.
     """
 
-    def __init__(self, memory_dir: Path):
+    def __init__(self, memory_dir: Path, exclude_dirs: set[str] | None = None):
         self.memory_dir = memory_dir
+        self._exclude_dirs = exclude_dirs or set()
         self._db_path = memory_dir / _INDEX_DB
         self.available = False
         self._db: sqlite3.Connection | None = None
@@ -149,6 +150,9 @@ class MemoryIndex:
             if not filepath.is_file() or filepath.name == _LOCK_FILE:
                 continue
             rel = str(filepath.relative_to(self.memory_dir))
+            # Skip excluded directories (e.g. domains/ for core store)
+            if self._exclude_dirs and any(rel.startswith(d + "/") for d in self._exclude_dirs):
+                continue
             try:
                 disk_files[rel] = filepath.stat().st_mtime_ns
             except OSError:
@@ -484,11 +488,12 @@ class MemoryStore:
         results = store.search("pytest")
     """
 
-    def __init__(self, memory_dir: Path):
+    def __init__(self, memory_dir: Path, exclude_dirs: set[str] | None = None):
         self.memory_dir = memory_dir
+        self._exclude_dirs = exclude_dirs or set()
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.memory_dir / _LOCK_FILE
-        self._index = MemoryIndex(memory_dir)
+        self._index = MemoryIndex(memory_dir, exclude_dirs=self._exclude_dirs)
         log.info("MemoryStore initialized at %s (FTS5: %s)", memory_dir, self._index.available)
 
     def close(self) -> None:
@@ -699,10 +704,16 @@ class MemoryStore:
                 if filepath.name == _LOCK_FILE:
                     continue
                 try:
+                    rel = str(filepath.relative_to(self.memory_dir))
+                except ValueError:
+                    continue
+                # Skip excluded directories
+                if self._exclude_dirs and any(rel.startswith(d + "/") for d in self._exclude_dirs):
+                    continue
+                try:
                     st = filepath.stat()
                 except OSError:
                     continue
-                rel = str(filepath.relative_to(self.memory_dir))
                 entries.append(
                     {
                         "path": rel,
@@ -756,6 +767,8 @@ class MemoryStore:
                 if filepath.name == _LOCK_FILE:
                     continue
                 rel = str(filepath.relative_to(self.memory_dir))
+                if self._exclude_dirs and any(rel.startswith(d + "/") for d in self._exclude_dirs):
+                    continue
                 try:
                     text = filepath.read_text(encoding="utf-8")
                 except (OSError, UnicodeDecodeError):

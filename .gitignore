@@ -6,6 +6,7 @@ __pycache__/
 dist/
 build/
 .claude/
+CLAUDE.md
 CLAUDE.local.md
 sessions/
 config.yaml

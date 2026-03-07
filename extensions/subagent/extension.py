@@ -119,6 +119,7 @@ class ExtensionImpl(Extension):
         self._default_paradigm = config.get("default_paradigm", "coder")
         self._cleanup_delay = config.get("cleanup_delay", _CLEANUP_DELAY)
         self._custom_paradigms: dict[str, dict] = config.get("paradigms", {})
+        self._context_passthrough_keys: set[str] = set(config.get("context_passthrough_keys", []))
 
         self._store: SubAgentStore | None = None
         self._worktree_base: str = ""
@@ -511,6 +512,12 @@ class ExtensionImpl(Extension):
 
         # Build context
         context = dict(parent_session.context)  # inherit routing (chat_id etc.)
+        # Apply caller-provided context overrides (e.g. domains, audit_target, tags)
+        extra_context = params.get("context")
+        if extra_context and isinstance(extra_context, dict) and self._context_passthrough_keys:
+            for k, v in extra_context.items():
+                if k in self._context_passthrough_keys:
+                    context[k] = v
         context.update(
             {
                 "subagent_worker": True,

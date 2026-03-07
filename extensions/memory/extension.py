@@ -1,16 +1,17 @@
-"""Memory extension — three-layer identity + knowledge graph + persistent store.
+"""Memory extension — three-layer identity + domain-scoped knowledge stores.
 
 Layers:
 1. Constitution: human-authored rules, AI read-only, injected into every session
 2. Personality: AI self-developed principles, Fernet-encrypted, AI-managed via MCP
 3. User Profile: per-user aspirations, injected per-session via customizer
 
-Knowledge graph: MAGMA-style structured notes with tags, keywords, relations,
-importance/decay scoring. Post-task reflection for graph evolution.
-
 Knowledge store: general.md (identity + topic index, force-read at session start),
-topics/<name>.md (deep knowledge), searchable via FTS5. Personality encryption uses Vault-managed
-key via bridge RPC; all other memory ops use direct file I/O.
+topics/<name>.md (operational knowledge), searchable via FTS5.
+
+Domain knowledge (MAGMA): isolated per-domain stores under domains/<name>/.
+Each domain has its own MemoryStore + KnowledgeGraph + FTS5 index.
+Sessions declare accessible domains via context.domains list.
+Personality encryption uses Vault-managed key via bridge RPC.
 """
 
 import asyncio
@@ -22,15 +23,16 @@ from pathlib import Path
 
 from core.extension import Extension
 from core.session import SessionOverrides
-from extensions.memory.migration import migrate, migrate_v3, needs_migration, needs_migration_v3
-from extensions.memory.store import MemoryStore
+from extensions.memory.migration import (
+    migrate,
+    migrate_v3,
+    migrate_v4,
+    needs_migration,
+    needs_migration_v3,
+    needs_migration_v4,
+)
 
 log = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Seed content for first-run file creation
-# ---------------------------------------------------------------------------
-
 
 # ---------------------------------------------------------------------------
 # System prompt — three-layer identity + knowledge store guidance
@@ -59,6 +61,11 @@ Persistent knowledge is stored in topic files (topics/<name>.md). \
 Use memory_search to find relevant knowledge when needed. \
 Use memory_read/memory_write/memory_append to manage files directly.
 
+## Domain Knowledge
+Some sessions have access to isolated domain knowledge stores (e.g. vuln patterns). \
+When a domain is available, memory tools accept an optional `domain` parameter to \
+operate on domain-scoped files. Without `domain`, tools operate on core memory only.
+
 SESSION START: call personality_read() to load your personality principles.
 ALSO: call memory_read('general.md') — it contains your identity, assets, vault keys, and topic index."""
 
@@ -68,15 +75,15 @@ class ExtensionImpl(Extension):
 
     def configure(self, engine, config):
         super().configure(engine, config)
-        self._store: MemoryStore | None = None
+        self._store = None
         self._personality_key: str | None = None
         self._graph = None
-        self._reflector = None
-        self._magma_enabled = False
+        self._domain_manager = None
         self._last_reflect: dict[str, float] = {}  # session_id -> timestamp
         self._injection_cache: dict[
             str, tuple[float, list[str]]
         ] = {}  # session_id -> (ts, snippets)
+        self._base_memory_mcp_config: dict = {}  # saved for domain env override
 
     @property
     def sm(self):
@@ -85,9 +92,11 @@ class ExtensionImpl(Extension):
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
-        # 1. Initialize MemoryStore
+        from extensions.memory.store import MemoryStore
+
+        # 1. Initialize core MemoryStore (exclude domain dirs from core index)
         memory_dir = Path(self.sm.base_dir) / "memory"
-        self._store = MemoryStore(memory_dir)
+        self._store = MemoryStore(memory_dir, exclude_dirs={"domains"})
 
         # 2. Run migrations if needed
         if needs_migration(memory_dir):
@@ -95,16 +104,16 @@ class ExtensionImpl(Extension):
         if needs_migration_v3(memory_dir):
             migrate_v3(memory_dir)
 
-        # 2b. Initialize KnowledgeGraph (own DB connection)
+        # 2b. Initialize core KnowledgeGraph
         from extensions.memory.graph import KnowledgeGraph
 
         self._graph = KnowledgeGraph(
             memory_dir,
-            half_life_days=self.config.get("knowledge_injection", {}).get("half_life_days", 30),
+            half_life_days=30,
         )
         self.engine.services["knowledge_graph"] = self._graph
 
-        # 3. Register shared service (used by heartbeat etc.)
+        # 3. Register shared service
         self.engine.services["memory"] = self._store
 
         # 4. Initialize personality encryption key (requires vault)
@@ -113,15 +122,16 @@ class ExtensionImpl(Extension):
         # 5. Register bridge handler for personality encrypt/decrypt
         self.engine.bridge.add_handler(self._handle_bridge)
 
-        # 6. Register MCP server with all 8 tools
+        # 6. Register MCP server with all tools
         mcp_script = str(Path(__file__).parent / "mcp_server.py")
+        self._base_memory_mcp_config = {
+            "command": sys.executable,
+            "args": [mcp_script],
+            "env": {"MEMORY_DIR": str(memory_dir)},
+        }
         self.sm.register_mcp_server(
             "memory",
-            {
-                "command": sys.executable,
-                "args": [mcp_script],
-                "env": {"MEMORY_DIR": str(memory_dir)},
-            },
+            dict(self._base_memory_mcp_config),
             tools=[
                 {"name": "memory_read", "description": "Read a memory file"},
                 {
@@ -156,39 +166,56 @@ class ExtensionImpl(Extension):
             ],
         )
 
-        # 7. Disable CC built-in auto-memory (claude-ext manages its own)
+        # 7. Disable CC built-in auto-memory
         os.environ["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
 
-        # 8. System prompt (tagged so it can be excluded per-session)
+        # 8. System prompt
         self.sm.add_system_prompt(_SYSTEM_PROMPT, mcp_server="memory")
 
-        # 9. Session customizers — inject constitution + user profile + knowledge per-session
+        # 9. Session customizers — inject constitution + user profile per-session
         self.sm.add_session_customizer(self._constitution_customizer)
         self.sm.add_session_customizer(self._user_profile_customizer)
 
-        # 10. MAGMA subsystem (knowledge injection + reflection engine)
+        # 10. Domain knowledge (MAGMA infrastructure)
         magma_config = self.config.get("magma", {})
-        self._magma_enabled = magma_config.get("enabled", False)
+        domain_configs = magma_config.get("domains", {})
 
-        if self._magma_enabled:
-            ki_config = self.config.get("knowledge_injection", {})
-            if ki_config.get("enabled", True):
+        if domain_configs:
+            from extensions.memory.domains import DomainManager
+
+            # Run v4 migration before initializing domains
+            if needs_migration_v4(memory_dir):
+                migrate_v4(memory_dir, domain_configs)
+
+            self._domain_manager = DomainManager(memory_dir, domain_configs)
+            self.engine.services["domain_manager"] = self._domain_manager
+
+            # Domain scoping customizer (injects MEMORY_DOMAINS env per-session)
+            self.sm.add_session_customizer(self._domain_scoping_customizer)
+
+            # Knowledge injection customizer (per-domain, for sessions with domains)
+            has_injection = any(
+                d.get("knowledge_injection", {}).get("enabled", False)
+                for d in domain_configs.values()
+            )
+            if has_injection:
                 self.sm.add_session_customizer(self._knowledge_injection_customizer)
 
-            from extensions.memory.reflect import ReflectionEngine
-
-            reflection_config = self.config.get("reflection", {})
-            self._reflector = ReflectionEngine(self._graph, config=reflection_config)
-            self.sm.add_delivery_callback(self._on_delivery)
+            # Reflection engine (per-domain)
+            has_reflection = any(
+                d.get("reflection", {}).get("llm_enabled", False) for d in domain_configs.values()
+            )
+            if has_reflection:
+                self.sm.add_delivery_callback(self._on_delivery)
 
         # 11. Seed files on first run
         self._seed_files(memory_dir)
 
         log.info(
-            "Memory extension started. Store at %s (personality_key=%s, magma=%s)",
+            "Memory extension started. Store at %s (personality_key=%s, domains=%s)",
             memory_dir,
             "yes" if self._personality_key else "no",
-            "enabled" if self._magma_enabled else "disabled",
+            self._domain_manager.list_domains() if self._domain_manager else "none",
         )
 
     async def stop(self) -> None:
@@ -196,25 +223,29 @@ class ExtensionImpl(Extension):
         if self._graph:
             self._graph.close()
             self._graph = None
+        if self._domain_manager:
+            self._domain_manager.close_all()
+            self._domain_manager = None
         self.engine.services.pop("memory", None)
         self.engine.services.pop("knowledge_graph", None)
+        self.engine.services.pop("domain_manager", None)
         log.info("Memory extension stopped.")
 
     async def health_check(self) -> dict:
         if self._store is None:
             return {"status": "error", "detail": "MemoryStore not initialized"}
         files = self._store.list_files()
+        domains = self._domain_manager.list_domains() if self._domain_manager else []
         return {
             "status": "ok",
             "files": len(files),
             "personality_encrypted": self._personality_key is not None,
-            "magma_enabled": self._magma_enabled,
+            "domains": domains,
         }
 
     # -- personality encryption key -----------------------------------------
 
     async def _ensure_personality_key(self) -> None:
-        """Retrieve or generate personality encryption key from Vault."""
         vault = self.engine.services.get("vault")
         if vault is None:
             log.warning("Vault not enabled; personality encryption disabled (plaintext fallback)")
@@ -243,9 +274,8 @@ class ExtensionImpl(Extension):
     # -- bridge handler (personality encrypt/decrypt) -----------------------
 
     async def _handle_bridge(self, method: str, params: dict) -> dict | None:
-        """Handle memory bridge RPCs from MCP server processes."""
         if not method.startswith("memory_personality_"):
-            return None  # not ours
+            return None
 
         handlers = {
             "memory_personality_read": self._bridge_personality_read,
@@ -305,14 +335,11 @@ class ExtensionImpl(Extension):
     # -- session customizers ------------------------------------------------
 
     def _constitution_customizer(self, session) -> SessionOverrides | None:
-        """Inject constitution.md into every session's system prompt."""
         if self._store is None:
             return None
         content = self._store.read("constitution.md")
         if not content:
             return None
-        # Skip injection if file contains only headings, comments, and blanks
-        # (i.e. the seed template with no real rules added yet)
         has_real_content = any(
             line.strip()
             and not line.strip().startswith("#")
@@ -326,7 +353,6 @@ class ExtensionImpl(Extension):
         )
 
     def _user_profile_customizer(self, session) -> SessionOverrides | None:
-        """Inject user profile into session system prompt."""
         if self._store is None:
             return None
         user_id = getattr(session, "user_id", None)
@@ -340,116 +366,138 @@ class ExtensionImpl(Extension):
             extra_system_prompt=[f"## USER PROFILE (user_id={user_id})\n{content}"]
         )
 
-    # -- knowledge injection customizer -------------------------------------
+    def _domain_scoping_customizer(self, session) -> SessionOverrides | None:
+        """Inject MEMORY_DOMAINS env var into memory MCP server for domain sessions."""
+        context = getattr(session, "context", {}) or {}
+        domains = context.get("domains", [])
+        if not domains or not self._domain_manager:
+            return None
+        valid = [d for d in domains if d in self._domain_manager.list_domains()]
+        if not valid:
+            return None
+        # Override memory MCP server env to include domains
+        mcp_config = dict(self._base_memory_mcp_config)
+        env = dict(mcp_config.get("env", {}))
+        env["MEMORY_DOMAINS"] = ",".join(valid)
+        mcp_config["env"] = env
+
+        # Build domain description for system prompt
+        domain_descs = []
+        for d in valid:
+            cfg = self._domain_manager.get_config(d)
+            desc = cfg.get("description", d)
+            domain_descs.append(f"- **{d}**: {desc}")
+        domain_prompt = (
+            "## Available Knowledge Domains\n"
+            "This session has access to domain-specific knowledge stores. "
+            "Use `domain` parameter with memory tools to access them.\n" + "\n".join(domain_descs)
+        )
+
+        return SessionOverrides(
+            extra_mcp_servers={"memory": mcp_config},
+            extra_system_prompt=[domain_prompt],
+        )
+
+    # -- knowledge injection customizer (domain-scoped) ---------------------
 
     def _knowledge_injection_customizer(self, session) -> SessionOverrides | None:
-        """Inject knowledge notes into MAGMA-enabled sessions only.
-
-        Only fires when session.context['magma'] is truthy.
-        Three-stage selection when active:
-        1. If session.context has 'tags', match those first (high weight)
-        2. If session.context has 'audit_target', FTS5 fuzzy search (medium weight)
-        3. Fill remaining with top-N by effective_importance
-        Cached per session for configured TTL.
-        """
-        if self._graph is None:
+        """Inject knowledge notes from domain stores into domain sessions."""
+        if not self._domain_manager:
             return None
 
-        # Only inject into sessions that explicitly request MAGMA knowledge
         context = getattr(session, "context", {}) or {}
-        if not context.get("magma"):
+        domains = context.get("domains", [])
+        if not domains:
             return None
-
-        ki_config = self.config.get("knowledge_injection", {})
-        max_chars = ki_config.get("max_chars", 8000)
-        max_notes = ki_config.get("max_notes", 10)
-        cache_ttl = ki_config.get("cache_ttl_seconds", 60)
 
         session_id = getattr(session, "id", None) or ""
 
-        # Prune stale cache entries (cap at 100)
+        # Cache check
         now = time.time()
         if len(self._injection_cache) > 100:
-            stale = [k for k, (ts, _) in self._injection_cache.items() if now - ts > cache_ttl]
+            stale = [k for k, (ts, _) in self._injection_cache.items() if now - ts > 60]
             for k in stale:
                 del self._injection_cache[k]
-
-        # Check cache
         if session_id in self._injection_cache:
             cached_ts, cached_snippets = self._injection_cache[session_id]
-            if now - cached_ts < cache_ttl and cached_snippets:
+            if now - cached_ts < 60 and cached_snippets:
                 return SessionOverrides(
                     extra_system_prompt=[
                         "## KNOWLEDGE CONTEXT (auto-injected)\n" + "\n---\n".join(cached_snippets)
                     ]
                 )
 
-        # Stage 1: Context tag matching (high weight)
-        context = getattr(session, "context", {}) or {}
-        context_tags = context.get("tags", [])
+        snippets = []
+        total_chars = 0
 
-        candidates = []
-        seen = set()
+        for domain_name in domains:
+            domain_graph = self._domain_manager.get_graph(domain_name)
+            domain_store = self._domain_manager.get_store(domain_name)
+            domain_config = self._domain_manager.get_config(domain_name)
+            if not domain_graph or not domain_store:
+                continue
 
-        if context_tags:
-            tag_results = self._graph.top_notes(limit=max_notes, tags=context_tags)
-            for r in tag_results:
-                candidates.append(r)
-                seen.add(r["path"])
+            ki_config = domain_config.get("knowledge_injection", {})
+            if not ki_config.get("enabled", False):
+                continue
 
-        # Stage 2: FTS5 fuzzy search for audit_target (medium weight)
-        audit_target = context.get("audit_target", "")
-        if audit_target and self._store is not None and len(candidates) < max_notes:
-            fts_results = self._store.search(str(audit_target))
-            for r in fts_results[: max_notes - len(candidates)]:
-                path = r.get("file", "")
-                if path and path not in seen:
-                    # Get effective importance from graph
-                    meta = self._graph.get_meta(path)
-                    eff_imp = meta.get("effective_importance", 0.5) if meta else 0.5
-                    candidates.append({"path": path, "effective_importance": eff_imp})
-                    seen.add(path)
+            max_chars = ki_config.get("max_chars", 8000)
+            max_notes = ki_config.get("max_notes", 10)
 
-        # Stage 3: Fill remaining with top by importance
-        remaining = max_notes - len(candidates)
-        if remaining > 0:
-            top_results = self._graph.top_notes(limit=remaining + len(seen))
-            for r in top_results:
-                if r["path"] not in seen:
+            # Context tag matching
+            context_tags = context.get("tags", [])
+            candidates = []
+            seen = set()
+
+            if context_tags:
+                tag_results = domain_graph.top_notes(limit=max_notes, tags=context_tags)
+                for r in tag_results:
+                    candidates.append(r)
+                    seen.add(r["path"])
+
+            # FTS5 fuzzy search for audit_target
+            audit_target = context.get("audit_target", "")
+            if audit_target and len(candidates) < max_notes:
+                fts_results = domain_store.search(str(audit_target))
+                for r in fts_results[: max_notes - len(candidates)]:
+                    path = r.get("file", "")
+                    if path and path not in seen:
+                        meta = domain_graph.get_meta(path)
+                        eff_imp = meta.get("effective_importance", 0.5) if meta else 0.5
+                        candidates.append({"path": path, "effective_importance": eff_imp})
+                        seen.add(path)
+
+            # Fill remaining with top by importance — only when no targeted results
+            if not candidates:
+                top_results = domain_graph.top_notes(limit=max_notes)
+                for r in top_results:
                     candidates.append(r)
                     if len(candidates) >= max_notes:
                         break
 
-        if not candidates:
-            return None
+            # Build snippets
+            for c in candidates:
+                if total_chars >= max_chars:
+                    break
+                content = domain_store.read(c["path"])
+                if not content:
+                    continue
+                from extensions.memory.frontmatter import strip_frontmatter
 
-        # Build snippets (first heading + first paragraph, max 500 chars each)
-        snippets = []
-        total_chars = 0
-        for c in candidates:
-            if total_chars >= max_chars:
-                break
-            if self._store is None:
-                break
-            content = self._store.read(c["path"])
-            if not content:
-                continue
-            from extensions.memory.frontmatter import strip_frontmatter
-
-            body = strip_frontmatter(content)
-            snippet = self._truncate_note(body, 500)
-            snippet_with_meta = f"**{c['path']}** (imp={c['effective_importance']})\n{snippet}"
-            if total_chars + len(snippet_with_meta) > max_chars:
-                break
-            snippets.append(snippet_with_meta)
-            total_chars += len(snippet_with_meta)
+                body = strip_frontmatter(content)
+                snippet = self._truncate_note(body, 500)
+                snippet_with_meta = (
+                    f"**[{domain_name}] {c['path']}** (imp={c['effective_importance']})\n{snippet}"
+                )
+                if total_chars + len(snippet_with_meta) > max_chars:
+                    break
+                snippets.append(snippet_with_meta)
+                total_chars += len(snippet_with_meta)
 
         if not snippets:
             return None
 
-        # Cache
         self._injection_cache[session_id] = (now, snippets)
-
         return SessionOverrides(
             extra_system_prompt=[
                 "## KNOWLEDGE CONTEXT (auto-injected)\n" + "\n---\n".join(snippets)
@@ -458,7 +506,6 @@ class ExtensionImpl(Extension):
 
     @staticmethod
     def _truncate_note(body: str, max_chars: int = 500) -> str:
-        """Truncate to first heading + first paragraph."""
         lines = body.strip().splitlines()
         result = []
         total = 0
@@ -468,21 +515,27 @@ class ExtensionImpl(Extension):
                 break
             result.append(line)
             total += len(line) + 1
-            # Stop after first blank line following content
             if total > 50 and line.strip() == "":
                 break
         return "\n".join(result)
 
-    # -- delivery callback (reflection) -------------------------------------
+    # -- delivery callback (reflection, domain-scoped) ----------------------
 
     async def _on_delivery(self, session_id: str, text: str, metadata: dict) -> None:
-        """Post-task reflection via delivery callback."""
         if not metadata.get("is_final"):
             return
-        # Skip heartbeat/subagent sessions
         if metadata.get("is_heartbeat") or metadata.get("is_subagent"):
             return
-        if self._reflector is None:
+        if not self._domain_manager:
+            return
+
+        # Determine session's domains
+        session = self.sm.sessions.get(session_id)
+        if not session:
+            return
+        context = getattr(session, "context", {}) or {}
+        domains = context.get("domains", [])
+        if not domains:
             return
 
         # Rate limit: 1 per session per 5 min
@@ -492,61 +545,71 @@ class ExtensionImpl(Extension):
             return
         self._last_reflect[session_id] = now
 
-        # Prune stale entries (older than 1 hour)
         if len(self._last_reflect) > 100:
             stale = [k for k, ts in self._last_reflect.items() if now - ts > 3600]
             for k in stale:
                 del self._last_reflect[k]
 
-        # Run reflection in background to not block delivery
-        asyncio.create_task(self._safe_reflect(session_id, text, metadata))
+        asyncio.create_task(self._safe_reflect(session_id, text, metadata, domains))
 
-    async def _safe_reflect(self, session_id: str, text: str, metadata: dict) -> None:
-        """Wrap reflection in try/except to prevent unhandled task exceptions."""
+    async def _safe_reflect(
+        self, session_id: str, text: str, metadata: dict, domains: list[str]
+    ) -> None:
         try:
-            # L1: deterministic (always runs)
-            actions = self._reflector.reflect(session_id, text, metadata)
-            if actions:
-                applied = self._reflector.apply(actions, store=self._store)
-                log.info(
-                    "L1 reflection for session %s: %d actions proposed, %d applied",
-                    session_id[:8],
-                    len(actions),
-                    applied,
-                )
+            for domain_name in domains:
+                domain_graph = self._domain_manager.get_graph(domain_name)
+                domain_store = self._domain_manager.get_store(domain_name)
+                domain_config = self._domain_manager.get_config(domain_name)
+                if not domain_graph or not domain_store:
+                    continue
 
-            # L2: LLM-assisted (conditional)
-            if self._reflector.should_trigger_l2(text):
-                await self._run_l2_reflection(session_id, text)
+                reflection_config = domain_config.get("reflection", {})
+                if not reflection_config:
+                    continue
+
+                from extensions.memory.reflect import ReflectionEngine
+
+                reflector = ReflectionEngine(domain_graph, config=reflection_config)
+
+                # L1: deterministic
+                actions = reflector.reflect(session_id, text, metadata)
+                if actions:
+                    applied = reflector.apply(actions, store=domain_store)
+                    log.info(
+                        "L1 reflection [%s] for session %s: %d actions proposed, %d applied",
+                        domain_name,
+                        session_id[:8],
+                        len(actions),
+                        applied,
+                    )
+
+                # L2: LLM-assisted (conditional)
+                if reflector.should_trigger_l2(text):
+                    await self._run_l2_reflection(
+                        session_id, text, domain_name, domain_graph, domain_store, reflector
+                    )
 
         except Exception:
             log.exception("Reflection failed for session %s", session_id[:8])
 
-    async def _run_l2_reflection(self, session_id: str, text: str) -> None:
-        """Run L2 LLM reflection using Sonnet."""
-        if self._graph is None or self._reflector is None:
-            return
-
-        # Gather existing notes context
+    async def _run_l2_reflection(
+        self, session_id, text, domain_name, domain_graph, domain_store, reflector
+    ) -> None:
         existing_notes = []
-        top = self._graph.top_notes(limit=30, min_importance=0.1)
+        top = domain_graph.top_notes(limit=30, min_importance=0.1)
         for n in top:
-            meta = self._graph.get_meta(n["path"])
+            meta = domain_graph.get_meta(n["path"])
             if meta:
                 existing_notes.append(meta)
 
-        prompt = self._reflector.build_l2_prompt(text, existing_notes)
-
-        l2_model = self.config.get("reflection", {}).get("llm_model", "claude-sonnet-4-6")
-        log.info("L2 reflection: calling %s for session %s", l2_model, session_id[:8])
+        prompt = reflector.build_l2_prompt(text, existing_notes)
+        l2_model = reflector.config.get("llm_model", "claude-sonnet-4-6")
+        log.info(
+            "L2 reflection [%s]: calling %s for session %s", domain_name, l2_model, session_id[:8]
+        )
 
         try:
-            response = await self.engine.ask(
-                prompt,
-                model=l2_model,
-                max_turns=1,
-                timeout=60,
-            )
+            response = await self.engine.ask(prompt, model=l2_model, max_turns=1, timeout=60)
         except Exception:
             log.exception("L2 reflection: engine.ask failed")
             return
@@ -555,11 +618,12 @@ class ExtensionImpl(Extension):
             log.warning("L2 reflection: %s", response)
             return
 
-        actions = self._reflector.parse_l2_response(response)
+        actions = reflector.parse_l2_response(response)
         if actions:
-            applied = self._reflector.apply(actions, store=self._store)
+            applied = reflector.apply(actions, store=domain_store)
             log.info(
-                "L2 reflection for session %s: %d actions proposed, %d applied",
+                "L2 reflection [%s] for session %s: %d actions proposed, %d applied",
+                domain_name,
                 session_id[:8],
                 len(actions),
                 applied,
@@ -568,7 +632,4 @@ class ExtensionImpl(Extension):
     # -- seed files ---------------------------------------------------------
 
     def _seed_files(self, memory_dir: Path) -> None:
-        """Create seed files on first run."""
-        # constitution.md is seeded by migration.py
-        # users/ and events/ directories are created by migration.py
         pass

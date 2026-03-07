@@ -52,6 +52,10 @@ class SubAgentMCPServer(MCPServerBase):
                         "description": "Worker role: 'coder', 'reviewer', 'researcher', or custom",
                         "default": "coder",
                     },
+                    "context": {
+                        "type": "object",
+                        "description": "Extra context fields merged into the worker session (e.g. domains, audit_target, tags)",
+                    },
                 },
                 "required": ["task"],
             },
@@ -264,15 +268,16 @@ class SubAgentMCPServer(MCPServerBase):
     # -- handlers ------------------------------------------------------------
 
     def _handle_spawn(self, args: dict) -> str:
-        result = self._bridge_call(
-            "subagent_spawn",
-            {
-                "task": args.get("task", ""),
-                "name": args.get("name", "worker"),
-                "worktree": args.get("worktree", False),
-                "paradigm": args.get("paradigm", "coder"),
-            },
-        )
+        spawn_params = {
+            "task": args.get("task", ""),
+            "name": args.get("name", "worker"),
+            "worktree": args.get("worktree", False),
+            "paradigm": args.get("paradigm", "coder"),
+        }
+        extra_context = args.get("context")
+        if extra_context and isinstance(extra_context, dict):
+            spawn_params["context"] = extra_context
+        result = self._bridge_call("subagent_spawn", spawn_params)
         if "error" in result:
             return f"Error: {result['error']}"
 

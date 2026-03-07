@@ -2,6 +2,7 @@
 
 v1 → v2: Archive daily/ logs, seed constitution, create directories.
 v2 → v3: Knowledge graph tables, seed note_meta from file stats.
+v3 → v4: Domain isolation — move vuln files to domains/vuln/.
 """
 
 import logging
@@ -14,6 +15,7 @@ log = logging.getLogger(__name__)
 
 _MIGRATION_MARKER = ".migrated_v2"
 _MIGRATION_V3_MARKER = ".migrated_v3"
+_MIGRATION_V4_MARKER = ".migrated_v4"
 _INDEX_DB = ".search_index.db"
 
 
@@ -200,3 +202,68 @@ def _seed_note_meta(db: sqlite3.Connection, memory_dir: Path) -> None:
             )
 
     log.info("Seeded note_meta from filesystem stats")
+
+
+# ---------------------------------------------------------------------------
+# v3 → v4: Domain isolation — move matching files to domains/<name>/
+# ---------------------------------------------------------------------------
+
+
+def needs_migration_v4(memory_dir: Path) -> bool:
+    """Check if migration from v3 to v4 is needed."""
+    return not (memory_dir / _MIGRATION_V4_MARKER).exists()
+
+
+def migrate_v4(memory_dir: Path, domain_configs: dict) -> None:
+    """Run v3 → v4 migration: move files from core topics/ into domain dirs.
+
+    Each domain config may specify:
+        migrate_glob: list[str]  — glob patterns to match (e.g. ["vuln-*.md"])
+        migrate_files: list[str] — explicit filenames to move
+    """
+    if not needs_migration_v4(memory_dir):
+        return
+
+    log.info("Running memory v3 -> v4 migration (domain isolation)...")
+
+    for domain_name, cfg in domain_configs.items():
+        globs = cfg.get("migrate_glob", [])
+        files = cfg.get("migrate_files", [])
+        if globs or files:
+            _migrate_domain_files(memory_dir, domain_name, globs, files)
+
+    # Delete core search index — it will rebuild without moved files
+    core_index = memory_dir / _INDEX_DB
+    if core_index.exists():
+        core_index.unlink()
+        log.info("Deleted core %s (will rebuild)", _INDEX_DB)
+
+    (memory_dir / _MIGRATION_V4_MARKER).write_text("v4\n", encoding="utf-8")
+    log.info("Memory migration v3 -> v4 complete")
+
+
+def _migrate_domain_files(
+    memory_dir: Path, domain_name: str, globs: list[str], files: list[str]
+) -> None:
+    """Move files matching globs/names from topics/ to domains/<name>/topics/."""
+    topics_dir = memory_dir / "topics"
+    if not topics_dir.exists():
+        return
+
+    domain_topics = memory_dir / "domains" / domain_name / "topics"
+    domain_topics.mkdir(parents=True, exist_ok=True)
+
+    moved = 0
+
+    for pattern in globs:
+        for f in sorted(topics_dir.glob(pattern)):
+            shutil.move(str(f), str(domain_topics / f.name))
+            moved += 1
+
+    for name in files:
+        src = topics_dir / name
+        if src.exists():
+            shutil.move(str(src), str(domain_topics / name))
+            moved += 1
+
+    log.info("Moved %d files to domains/%s/topics/", moved, domain_name)

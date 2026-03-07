@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Memory MCP server — three-layer identity + knowledge graph + persistent store.
+"""Memory MCP server — three-layer identity + domain-scoped knowledge stores.
 
 Spawned by Claude Code per session.  Inherits MCPServerBase for protocol
 handling.  Regular memory ops use direct file I/O via MEMORY_DIR env var.
 Personality ops use bridge RPC for encryption/decryption via main process.
 Knowledge graph ops use KnowledgeGraph (own SQLite connection to shared DB).
+
+Domain isolation: MEMORY_DOMAINS env var (comma-separated) controls which
+domains the session can access. Domain tools use a `domain` parameter to
+route to the correct store/graph under domains/<name>/.
 """
 
 import json
@@ -39,6 +43,11 @@ _RECOMMENDED_RELATION_TYPES = (
     "Any lowercase alphanumeric + underscore format accepted (e.g. 'my_custom_type')."
 )
 
+_DOMAIN_PARAM = {
+    "type": "string",
+    "description": "Optional domain name for domain-scoped operations (e.g. 'vuln'). Omit for core memory.",
+}
+
 
 class MemoryMCPServer(MCPServerBase):
     name = "memory"
@@ -58,6 +67,7 @@ class MemoryMCPServer(MCPServerBase):
                         "type": "string",
                         "description": "Relative path to the memory file (e.g. 'topics/python.md')",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["path"],
             },
@@ -92,6 +102,7 @@ class MemoryMCPServer(MCPServerBase):
                             "If provided, overwrites any frontmatter in content."
                         ),
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["path", "content"],
             },
@@ -118,6 +129,7 @@ class MemoryMCPServer(MCPServerBase):
                         "type": "string",
                         "description": "Optional ISO 8601 expiry timestamp.",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["path", "content"],
             },
@@ -148,6 +160,7 @@ class MemoryMCPServer(MCPServerBase):
                         "type": "boolean",
                         "description": "Also return 1-hop related notes (default false)",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["query"],
             },
@@ -165,6 +178,7 @@ class MemoryMCPServer(MCPServerBase):
                         "type": "string",
                         "description": "Optional subdirectory to list (e.g. 'topics', 'users', 'events')",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
             },
         },
@@ -199,6 +213,7 @@ class MemoryMCPServer(MCPServerBase):
                         "type": "number",
                         "description": "(set) Base importance 0.0-1.0",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["action", "path"],
             },
@@ -229,6 +244,7 @@ class MemoryMCPServer(MCPServerBase):
                         "type": "number",
                         "description": "(add) Edge weight, default 1.0",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["action", "source"],
             },
@@ -260,6 +276,7 @@ class MemoryMCPServer(MCPServerBase):
                         "items": {"type": "string"},
                         "description": "(neighbors) Filter by relation types",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["action"],
             },
@@ -305,6 +322,7 @@ class MemoryMCPServer(MCPServerBase):
                         },
                         "description": "Relations to create from this note",
                     },
+                    "domain": _DOMAIN_PARAM,
                 },
                 "required": ["path", "content"],
             },
@@ -370,16 +388,30 @@ class MemoryMCPServer(MCPServerBase):
             "personality_write": self._handle_personality_write,
             "personality_append": self._handle_personality_append,
         }
+        self._allowed_domains: list[str] | None = None
 
-    def _get_store(self) -> MemoryStore:
+    def _get_allowed_domains(self) -> list[str]:
+        """Parse MEMORY_DOMAINS env var. Empty list = no domain access."""
+        if self._allowed_domains is None:
+            raw = os.environ.get("MEMORY_DOMAINS", "")
+            self._allowed_domains = [d.strip() for d in raw.split(",") if d.strip()]
+        return self._allowed_domains
+
+    def _get_store(self, domain: str | None = None) -> MemoryStore:
+        """Get core or domain-scoped MemoryStore."""
+        if domain:
+            return self._get_domain_store(domain)
         if not hasattr(self, "_store"):
             memory_dir = os.environ.get("MEMORY_DIR", "")
             if not memory_dir:
                 raise RuntimeError("MEMORY_DIR not set")
-            self._store = MemoryStore(Path(memory_dir))
+            self._store = MemoryStore(Path(memory_dir), exclude_dirs={"domains"})
         return self._store
 
-    def _get_graph(self) -> KnowledgeGraph:
+    def _get_graph(self, domain: str | None = None) -> KnowledgeGraph:
+        """Get core or domain-scoped KnowledgeGraph."""
+        if domain:
+            return self._get_domain_graph(domain)
         if not hasattr(self, "_graph"):
             memory_dir = os.environ.get("MEMORY_DIR", "")
             if not memory_dir:
@@ -387,9 +419,56 @@ class MemoryMCPServer(MCPServerBase):
             self._graph = KnowledgeGraph(Path(memory_dir))
         return self._graph
 
+    def _get_domain_store(self, domain: str) -> MemoryStore:
+        """Get or create a domain-scoped MemoryStore."""
+        allowed = self._get_allowed_domains()
+        if domain not in allowed:
+            raise ValueError(
+                f"Domain '{domain}' not accessible in this session. Available: {allowed or 'none'}"
+            )
+        attr = f"_domain_store_{domain}"
+        if not hasattr(self, attr):
+            memory_dir = os.environ.get("MEMORY_DIR", "")
+            if not memory_dir:
+                raise RuntimeError("MEMORY_DIR not set")
+            domain_dir = Path(memory_dir) / "domains" / domain
+            if not domain_dir.exists():
+                raise ValueError(f"Domain directory not found: {domain_dir}")
+            setattr(self, attr, MemoryStore(domain_dir))
+        return getattr(self, attr)
+
+    def _get_domain_graph(self, domain: str) -> KnowledgeGraph:
+        """Get or create a domain-scoped KnowledgeGraph."""
+        allowed = self._get_allowed_domains()
+        if domain not in allowed:
+            raise ValueError(
+                f"Domain '{domain}' not accessible in this session. Available: {allowed or 'none'}"
+            )
+        attr = f"_domain_graph_{domain}"
+        if not hasattr(self, attr):
+            memory_dir = os.environ.get("MEMORY_DIR", "")
+            if not memory_dir:
+                raise RuntimeError("MEMORY_DIR not set")
+            domain_dir = Path(memory_dir) / "domains" / domain
+            if not domain_dir.exists():
+                raise ValueError(f"Domain directory not found: {domain_dir}")
+            setattr(self, attr, KnowledgeGraph(domain_dir))
+        return getattr(self, attr)
+
+    def _resolve_domain(self, args: dict) -> str | None:
+        """Extract and validate domain param. Returns None for core, domain name for domain."""
+        domain = args.get("domain")
+        if not domain:
+            return None
+        allowed = self._get_allowed_domains()
+        if not allowed:
+            raise ValueError("No domains accessible in this session. Omit 'domain' parameter.")
+        if domain not in allowed:
+            raise ValueError(f"Domain '{domain}' not accessible. Available: {allowed}")
+        return domain
+
     @staticmethod
     def _check_readonly(path: str) -> str | None:
-        """Return error string if path is read-only, else None."""
         normalized = os.path.normpath(path.strip()).lower()
         if normalized in _READONLY_PATHS:
             return (
@@ -404,14 +483,17 @@ class MemoryMCPServer(MCPServerBase):
         path = args.get("path")
         if not path:
             return "Error: 'path' is required."
-        store = self._get_store()
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+        store = self._get_store(domain)
         try:
             content = store.read(path)
         except ValueError as e:
             return f"Error: {e}"
         if content is None:
             return "File not found."
-        # Touch for access tracking (SQLite only, no file write)
         store.touch(path)
         return content
 
@@ -424,23 +506,28 @@ class MemoryMCPServer(MCPServerBase):
             return "Error: 'path' is required."
         if content is None:
             return "Error: 'content' is required."
-        err = self._check_readonly(path)
-        if err:
-            return err
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+        if not domain:
+            err = self._check_readonly(path)
+            if err:
+                return err
 
-        # If inline meta provided, strip existing frontmatter and rebuild
         if inline_meta and isinstance(inline_meta, dict):
             body = strip_frontmatter(content)
             meta = NoteMeta()
             meta = merge_meta(meta, inline_meta)
             content = serialize_frontmatter(meta, body)
 
-        store = self._get_store()
+        store = self._get_store(domain)
         try:
             nbytes = store.write(path, content, expires=expires)
         except ValueError as e:
             return f"Error: {e}"
-        msg = f"Written {nbytes} bytes to {path}"
+        prefix = f"[{domain}] " if domain else ""
+        msg = f"{prefix}Written {nbytes} bytes to {path}"
         if expires:
             msg += f" (expires: {expires})"
         return msg
@@ -453,15 +540,21 @@ class MemoryMCPServer(MCPServerBase):
             return "Error: 'path' is required."
         if content is None:
             return "Error: 'content' is required."
-        err = self._check_readonly(path)
-        if err:
-            return err
-        store = self._get_store()
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+        if not domain:
+            err = self._check_readonly(path)
+            if err:
+                return err
+        store = self._get_store(domain)
         try:
             nbytes = store.append(path, content, expires=expires)
         except ValueError as e:
             return f"Error: {e}"
-        msg = f"Appended {nbytes} bytes to {path}"
+        prefix = f"[{domain}] " if domain else ""
+        msg = f"{prefix}Appended {nbytes} bytes to {path}"
         if expires:
             msg += f" (expires: {expires})"
         return msg
@@ -475,7 +568,12 @@ class MemoryMCPServer(MCPServerBase):
         min_importance = args.get("min_importance", 0.0)
         include_related = args.get("include_related", False)
 
-        store = self._get_store()
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        store = self._get_store(domain)
         try:
             results = store.search(query)
         except ValueError as e:
@@ -483,8 +581,7 @@ class MemoryMCPServer(MCPServerBase):
         if not results:
             return "No matches found."
 
-        # Enrich with graph data if filtering requested
-        graph = self._get_graph()
+        graph = self._get_graph(domain)
         enriched = []
         seen_files = set()
 
@@ -492,11 +589,9 @@ class MemoryMCPServer(MCPServerBase):
             file_path = r.get("file", "")
             meta = graph.get_meta(file_path)
 
-            # Tag filter
             if filter_tags and meta and not set(meta.get("tags", [])) & set(filter_tags):
                 continue
 
-            # Importance filter
             eff_imp = meta.get("effective_importance", 0.5) if meta else 0.5
             if eff_imp < min_importance:
                 continue
@@ -505,7 +600,6 @@ class MemoryMCPServer(MCPServerBase):
             enriched.append(r)
             seen_files.add(file_path)
 
-        # Include 1-hop related notes
         if include_related:
             for file_path in list(seen_files):
                 neighbors = graph.neighbors(file_path, depth=1)
@@ -524,6 +618,7 @@ class MemoryMCPServer(MCPServerBase):
         if not enriched:
             return "No matches found (after filtering)."
 
+        prefix = f"[{domain}] " if domain else ""
         lines = []
         for r in enriched:
             imp_str = (
@@ -534,24 +629,31 @@ class MemoryMCPServer(MCPServerBase):
             rel_str = " (related)" if r.get("via_relation") else ""
             if "heading" in r:
                 lines.append(
-                    f"{r['file']} [{r['heading']}]{imp_str}{rel_str}: {r.get('snippet', '')}"
+                    f"{prefix}{r['file']} [{r['heading']}]{imp_str}{rel_str}: {r.get('snippet', '')}"
                 )
             else:
-                lines.append(f"{r['file']}:{r.get('line', '?')}{imp_str}: {r.get('text', '')}")
+                lines.append(
+                    f"{prefix}{r['file']}:{r.get('line', '?')}{imp_str}: {r.get('text', '')}"
+                )
         return "\n".join(lines)
 
     def _handle_list(self, args: dict) -> str:
         subdir = args.get("subdir", "")
-        store = self._get_store()
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+        store = self._get_store(domain)
         try:
             files = store.list_files(subdir)
         except ValueError as e:
             return f"Error: {e}"
         if not files:
             return "No files found."
+        prefix = f"[{domain}] " if domain else ""
         lines = []
         for f in files:
-            lines.append(f"{f['path']}  ({f['size']} bytes, {f['modified']})")
+            lines.append(f"{prefix}{f['path']}  ({f['size']} bytes, {f['modified']})")
         return "\n".join(lines)
 
     # -- knowledge graph handlers -------------------------------------------
@@ -562,7 +664,12 @@ class MemoryMCPServer(MCPServerBase):
         if not path:
             return "Error: 'path' is required."
 
-        graph = self._get_graph()
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        graph = self._get_graph(domain)
 
         if action == "get":
             meta = graph.get_meta(path)
@@ -571,18 +678,17 @@ class MemoryMCPServer(MCPServerBase):
             return json.dumps(meta, indent=2)
 
         elif action == "set":
-            err = self._check_readonly(path)
-            if err:
-                return err
-            # Update SQLite
+            if not domain:
+                err = self._check_readonly(path)
+                if err:
+                    return err
             graph.set_meta(
                 path,
                 importance=args.get("importance"),
                 keywords=args.get("keywords"),
                 tags=args.get("tags"),
             )
-            # Also update frontmatter in the .md file
-            store = self._get_store()
+            store = self._get_store(domain)
             content = store.read(path)
             if content is not None:
                 existing_meta, body = parse_frontmatter(content)
@@ -609,7 +715,12 @@ class MemoryMCPServer(MCPServerBase):
         if not source:
             return "Error: 'source' is required."
 
-        graph = self._get_graph()
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        graph = self._get_graph(domain)
 
         if action == "list":
             rels = graph.get_relations(source)
@@ -643,7 +754,13 @@ class MemoryMCPServer(MCPServerBase):
 
     def _handle_graph(self, args: dict) -> str:
         action = args.get("action")
-        graph = self._get_graph()
+
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        graph = self._get_graph(domain)
 
         if action == "neighbors":
             path = args.get("path")
@@ -677,25 +794,29 @@ class MemoryMCPServer(MCPServerBase):
         return f"Error: Unknown action '{action}'. Use 'neighbors', 'suggest_links', 'list_tags', or 'stats'."
 
     def _handle_import(self, args: dict) -> str:
-        """Batch import: write + meta + relations in one call."""
         path = args.get("path")
         content = args.get("content")
         if not path:
             return "Error: 'path' is required."
         if content is None:
             return "Error: 'content' is required."
-        err = self._check_readonly(path)
-        if err:
-            return err
 
-        # Build frontmatter
+        try:
+            domain = self._resolve_domain(args)
+        except ValueError as e:
+            return f"Error: {e}"
+
+        if not domain:
+            err = self._check_readonly(path)
+            if err:
+                return err
+
         meta = NoteMeta(
             tags=args.get("tags", []),
             keywords=args.get("keywords", []),
             importance=args.get("importance", 0.5),
         )
 
-        # Add relations to frontmatter
         raw_rels = args.get("relations", [])
         for r in raw_rels:
             if (
@@ -714,16 +835,13 @@ class MemoryMCPServer(MCPServerBase):
 
         full_content = serialize_frontmatter(meta, content)
 
-        # Write file (triggers indexing + graph sync)
-        store = self._get_store()
+        store = self._get_store(domain)
         try:
             nbytes = store.write(path, full_content)
         except ValueError as e:
             return f"Error: {e}"
 
-        # Also add relations directly to graph (for relations targeting notes
-        # that might not be in frontmatter's outgoing edges)
-        graph = self._get_graph()
+        graph = self._get_graph(domain)
         for r in raw_rels:
             if (
                 isinstance(r, dict)
@@ -733,7 +851,8 @@ class MemoryMCPServer(MCPServerBase):
             ):
                 graph.add_relation(path, r["target"], r["type"], r.get("weight", 1.0))
 
-        parts = [f"Imported {nbytes} bytes to {path}"]
+        prefix = f"[{domain}] " if domain else ""
+        parts = [f"{prefix}Imported {nbytes} bytes to {path}"]
         if meta.tags:
             parts.append(f"tags={meta.tags}")
         if meta.keywords:
