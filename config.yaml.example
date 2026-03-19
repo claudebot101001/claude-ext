@@ -1,0 +1,38 @@
+# claude-ext configuration
+# Copy to config.yaml and fill in your values.
+
+engine:
+  max_turns: 0                        # 0 = unlimited
+  permission_mode: bypassPermissions  # Required for -p mode
+  gateway_mode: false                 # Consolidate MCP tools into single gateway per extension
+  model: null                         # null = default Claude model
+
+sessions:
+  max_sessions_per_user: 5
+  session_timeout: 7200               # Per-prompt timeout (seconds)
+
+# User-defined templates (override built-in coder/reviewer/researcher)
+templates:
+  dev:
+    working_dir: ~/my-project
+
+# Extensions to enable (order auto-resolved via dependency declarations)
+enabled:
+  - vault
+  - cron
+  - ask_user
+  - telegram
+
+# Per-extension configuration
+extensions:
+  telegram:
+    token: ""                          # Telegram bot token from @BotFather
+    allowed_users: []                  # List of Telegram user IDs (integers)
+    # default_template: coder          # Default template for new sessions
+    # default_working_dir: ~/projects  # Default working directory
+
+  # vault:
+  #   No config needed — passphrase auto-generated on first run
+
+  # cron:
+  #   No config needed — uses default store path

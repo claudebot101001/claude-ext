@@ -1,0 +1,5 @@
+description: "Research agent — reads code and docs, never modifies"
+disallowed_tools:
+  - Edit
+  - Write
+  - NotebookEdit

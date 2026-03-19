@@ -1,0 +1,7 @@
+description: "Code review agent — reads code, never writes"
+auto_cleanup: false
+disallowed_tools:
+  - Edit
+  - Write
+  - NotebookEdit
+  - Bash
